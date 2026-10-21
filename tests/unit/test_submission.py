@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from codeflare_sdk import RayJob
-from codeflare_sdk.ray.rayjobs.config import build_ray_cluster_spec
 from codeflare_sdk.vendored.python_client.kuberay_job_api import RayjobApi
 from fastapi.testclient import TestClient
 from kubernetes import client
@@ -165,7 +166,7 @@ def test_advanced_credential_and_algorithm_fields_are_out_of_basic_scope(
         create_app(
             FakeAuthenticator(),
             FakeAuthorizer(),
-            submission.CodeFlareJobSubmitter("quay.io/example/ray:2.58.0"),
+            submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1"),
         )
     ).post(
         "/api/v1/projects/team-alpha/training-jobs",
@@ -243,6 +244,7 @@ class FakeRayJob:
         self.instances.append(self)
 
     def submit(self) -> str:
+        self.client_at_submit = submission.codeflare_auth.api_client
         if self.error is not None:
             raise self.error
         return str(self.kwargs["job_name"])
@@ -255,6 +257,14 @@ def _mock_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCoreApi:
     monkeypatch.setattr(submission, "_caller_api_client", FakeApiClient)
     monkeypatch.setattr(submission.client, "CoreV1Api", lambda api_client: core)
     monkeypatch.setattr(submission, "_MetadataRayJob", FakeRayJob)
+    monkeypatch.setattr(submission.codeflare_auth, "api_client", None)
+    monkeypatch.setattr(submission.codeflare_auth, "config_path", None)
+
+    def set_api_client(api_client: FakeApiClient) -> None:
+        submission.codeflare_auth.api_client = api_client
+        submission.codeflare_auth.config_path = "custom"
+
+    monkeypatch.setattr(submission.codeflare_auth, "set_api_client", set_api_client)
     return core
 
 
@@ -263,7 +273,7 @@ def test_pvc_submission_maps_resources_and_retains_only_safe_payload(
 ) -> None:
     core = _mock_sdk(monkeypatch)
     body = _sample()
-    identifier = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.58.0")._submit_sync(
+    identifier = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
     assert identifier == body.name
@@ -275,12 +285,15 @@ def test_pvc_submission_maps_resources_and_retains_only_safe_payload(
     kwargs = FakeRayJob.instances[0].kwargs
     assert kwargs["namespace"] == "team-alpha"
     assert kwargs["local_queue"] == body.queue_name
-    assert kwargs["api_client"].token == "caller-token"
+    assert "api_client" not in kwargs
+    assert FakeRayJob.instances[0].client_at_submit.token == "caller-token"
+    assert submission.codeflare_auth.api_client is None
+    assert submission.codeflare_auth.config_path is None
     cluster = kwargs["cluster_config"]
-    assert cluster.image == "quay.io/example/ray:2.58.0"
+    assert cluster.image == "quay.io/example/ray:2.55.1"
     assert cluster.num_workers == 1
-    assert cluster.head_extended_resource_requests == {"nvidia.com/gpu": 4}
-    assert cluster.worker_extended_resource_requests == {"nvidia.com/gpu": 4}
+    assert cluster.head_accelerators == {"nvidia.com/gpu": 4}
+    assert cluster.worker_accelerators == {"nvidia.com/gpu": 4}
     assert len(cluster.volumes) == 3
     assert kwargs["annotations"]["training.rhoai.io/submitted-by"] == "alice"
     assert json.loads(kwargs["annotations"]["training.rhoai.io/submission"]) == body.model_dump(
@@ -293,14 +306,15 @@ def test_pvc_submission_maps_resources_and_retains_only_safe_payload(
 def test_configured_image_is_embedded_in_rayjob_head_and_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    image = "quay.io/example/ray:2.58.0"
+    image = "quay.io/example/ray:2.55.1"
     _mock_sdk(monkeypatch)
     submission.CodeFlareJobSubmitter(image)._submit_sync(
         "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
     )
     cluster = FakeRayJob.instances[0].kwargs["cluster_config"]
     assert cluster.image == image
-    spec = build_ray_cluster_spec(cluster, "pvc-training-cluster")
+    spec = cluster.build_ray_cluster_spec("pvc-training-cluster")
+    assert spec["rayVersion"] == "2.55.1"
     assert spec["headGroupSpec"]["template"].spec.containers[0].image == image
     assert spec["workerGroupSpecs"][0]["template"].spec.containers[0].image == image
 
@@ -320,7 +334,7 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     payload["algorithm"].pop("parameters")
     body = CreateJobRequest.model_validate(payload)
 
-    submission.CodeFlareJobSubmitter("quay.io/example/ray:2.58.0")._submit_sync(
+    submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
 
@@ -330,7 +344,7 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     assert cluster.num_workers == 0
     assert cluster.head_cpu_requests == "8"
     assert cluster.head_memory_requests == "32Gi"
-    assert cluster.head_extended_resource_requests == {"nvidia.com/gpu": 1}
+    assert cluster.head_accelerators == {"nvidia.com/gpu": 1}
     assert len(cluster.volumes) == 2
     assert entry_config["parameters"] == {}
     assert "output" not in entry_config
@@ -351,7 +365,7 @@ def test_secret_backed_locators_use_caller_client_and_mount_references_only(
 ) -> None:
     core = _mock_sdk(monkeypatch)
     body = _sample(example)
-    submission.CodeFlareJobSubmitter("quay.io/example/ray:2.58.0")._submit_sync(
+    submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
     assert [name for name, _ in core.secret_reads] == expected_reads
@@ -365,12 +379,97 @@ def test_secret_backed_locators_use_caller_client_and_mount_references_only(
 async def test_sdk_conflict_maps_to_documented_409(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_sdk(monkeypatch)
     FakeRayJob.error = ApiException(status=409, reason="Already Exists")
-    submitter = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.58.0")
+    submitter = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")
     with pytest.raises(ApiError) as raised:
         await submitter.submit(
             "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
         )
     assert raised.value.status_code == 409
+    assert submission.codeflare_auth.api_client is None
+    assert submission.codeflare_auth.config_path is None
+
+
+def test_sdk_auth_is_restored_when_client_verification_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_sdk(monkeypatch)
+    previous_client = FakeApiClient("previous-caller")
+    submission.codeflare_auth.api_client = previous_client
+    submission.codeflare_auth.config_path = "previous-config"
+
+    def reject_client(api_client: FakeApiClient) -> None:
+        submission.codeflare_auth.api_client = api_client
+        submission.codeflare_auth.config_path = "custom"
+        raise ApiException(status=401, reason="Invalid caller token")
+
+    monkeypatch.setattr(submission.codeflare_auth, "set_api_client", reject_client)
+    with pytest.raises(ApiException) as raised:
+        with submission._sdk_client_scope(FakeApiClient("invalid-caller")):
+            pytest.fail("SDK scope must not be entered after verification fails")
+
+    assert raised.value.status == 401
+    assert submission.codeflare_auth.api_client is previous_client
+    assert submission.codeflare_auth.config_path == "previous-config"
+
+
+def test_parallel_submissions_keep_each_callers_sdk_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_sdk(monkeypatch)
+    first_submitting = Event()
+    second_prepared = Event()
+    release_first = Event()
+    preparation_lock = Lock()
+    prepared = 0
+    original_storage_plan = submission._storage_plan
+
+    def storage_plan(*args: Any, **kwargs: Any) -> Any:
+        nonlocal prepared
+        result = original_storage_plan(*args, **kwargs)
+        with preparation_lock:
+            prepared += 1
+            if prepared == 2:
+                second_prepared.set()
+        return result
+
+    def controlled_submit(job: FakeRayJob) -> str:
+        job.client_at_submit = submission.codeflare_auth.api_client
+        if job.client_at_submit.token == "caller-a":
+            first_submitting.set()
+            assert release_first.wait(5)
+            assert submission.codeflare_auth.api_client is job.client_at_submit
+        return str(job.kwargs["job_name"])
+
+    monkeypatch.setattr(submission, "_storage_plan", storage_plan)
+    monkeypatch.setattr(FakeRayJob, "submit", controlled_submit)
+    submitters = [submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1") for _ in range(2)]
+
+    def submit(index: int, name: str, token: str) -> str:
+        body = _sample()
+        body.name = name
+        return submitters[index]._submit_sync(
+            "team-alpha", body, CallerIdentity(name, None, ()), token
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(submit, 0, "job-a", "caller-a")
+        try:
+            assert first_submitting.wait(5)
+            second = pool.submit(submit, 1, "job-b", "caller-b")
+            assert second_prepared.wait(5)
+            assert submission.codeflare_auth.api_client.token == "caller-a"
+            assert not second.done()
+        finally:
+            release_first.set()
+        assert first.result(timeout=5) == "job-a"
+        assert second.result(timeout=5) == "job-b"
+
+    assert [job.client_at_submit.token for job in FakeRayJob.instances] == [
+        "caller-a",
+        "caller-b",
+    ]
+    assert submission.codeflare_auth.api_client is None
+    assert submission.codeflare_auth.config_path is None
 
 
 @pytest.mark.parametrize(

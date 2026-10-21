@@ -8,13 +8,17 @@ import logging
 import os
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
 import anyio
-from codeflare_sdk import ClusterConfiguration, RayJob
+from codeflare_sdk import RayJob
+from codeflare_sdk.common.kubernetes_cluster import auth as codeflare_auth
+from codeflare_sdk.ray.rayjobs.config import ManagedClusterConfig
 from jsonschema import ValidationError
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
@@ -38,6 +42,7 @@ _BASIC_PARAMETERS = frozenset(
 )
 _GPU_TYPES = frozenset({"nvidia.com/gpu", "amd.com/gpu", "intel.com/gpu"})
 _RAYJOB_CREATE_PATH = "/apis/{group}/{version}/namespaces/{namespace}/{plural}"
+_SDK_AUTH_LOCK = Lock()
 
 
 class _SdkSubmissionError(Exception):
@@ -171,6 +176,22 @@ class _MetadataRayJob(RayJob):
         resource: dict[str, Any] = super()._build_rayjob_cr()
         resource["metadata"].setdefault("annotations", {}).update(self._submission_annotations)
         return resource
+
+
+@contextmanager
+def _sdk_client_scope(api_client: client.ApiClient) -> Iterator[None]:
+    """Serialize SDK 0.38's process-global auth for one caller's submission."""
+    with _SDK_AUTH_LOCK:
+        previous_client = codeflare_auth.api_client
+        previous_config_path = codeflare_auth.config_path
+        try:
+            # RayJob 0.38 has no api_client parameter. Its constructor and
+            # submission read this global, so keep both inside one lock.
+            codeflare_auth.set_api_client(api_client)
+            yield
+        finally:
+            codeflare_auth.api_client = previous_client
+            codeflare_auth.config_path = previous_config_path
 
 
 def _entrypoint(configuration: dict[str, Any]) -> str:
@@ -341,38 +362,37 @@ class CodeFlareJobSubmitter:
             cpu = resources.cpus_per_node or "8"
             memory = resources.memory_per_node or "32Gi"
             workers = (resources.num_nodes or 1) - 1
-            cluster = ClusterConfiguration(
-                namespace=project,
+            cluster = ManagedClusterConfig(
                 image=self._image,
                 num_workers=workers,
                 head_cpu_requests=cpu,
                 head_cpu_limits=cpu,
                 head_memory_requests=memory,
                 head_memory_limits=memory,
-                head_extended_resource_requests={gpu_type: gpu_count} if gpu_count else {},
+                head_accelerators={gpu_type: gpu_count} if gpu_count else {},
                 worker_cpu_requests=cpu,
                 worker_cpu_limits=cpu,
                 worker_memory_requests=memory,
                 worker_memory_limits=memory,
-                worker_extended_resource_requests={gpu_type: gpu_count} if gpu_count else {},
+                worker_accelerators={gpu_type: gpu_count} if gpu_count else {},
                 volumes=volumes,
                 volume_mounts=mounts,
             )
-            job = _MetadataRayJob(
-                job_name=request.name,
-                namespace=project,
-                entrypoint=_entrypoint(
-                    {
-                        **resolved,
-                        "parameters": parameters,
-                    }
-                ),
-                cluster_config=cluster,
-                local_queue=request.queue_name,
-                annotations=annotations,
-                api_client=api_client,
-            )
-            identifier = str(job.submit())
+            with _sdk_client_scope(api_client):
+                job = _MetadataRayJob(
+                    job_name=request.name,
+                    namespace=project,
+                    entrypoint=_entrypoint(
+                        {
+                            **resolved,
+                            "parameters": parameters,
+                        }
+                    ),
+                    cluster_config=cluster,
+                    local_queue=request.queue_name,
+                    annotations=annotations,
+                )
+                identifier = str(job.submit())
             if identifier != request.name:
                 raise RuntimeError("CodeFlare returned an unexpected RayJob identifier")
             return identifier

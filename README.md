@@ -14,10 +14,16 @@ The `202` response returns the RayJob name as `id` and a project-scoped
 
 Set `TRAINING_RAY_IMAGE` through the chart's existing `env` values or the
 process environment. The image must contain Ray and Training Hub, with a Ray
-version matching the version CodeFlare writes into the RayJob. There is no
-default image; submission returns `503` until one is configured. The API
-container bundles a pinned CodeFlare Git revision for caller-scoped SDK
-submission. No service-side job store or hand-authored RayJob manifest is used.
+version matching the version CodeFlare writes into the RayJob. The tested
+combination is CodeFlare SDK 0.38.2 with Ray 2.55.1 in the API image and
+`quay.io/modh/ray:2.55.1-py312-cu129-th081` for the RayJob (Ray 2.55.1,
+Training Hub 0.8.1). Use an approved image digest for deployment; this Quay
+tag has not been confirmed as shipped with RHOAI 3.6 GA. There is no default
+training image; submission returns `503` until one is configured. The API
+container installs the RHOAI 3.6 CodeFlare and Ray wheels. CodeFlare 0.38.2
+uses process-global authentication, so the adapter serializes SDK submission
+and restores the prior client after each caller. No service-side job store or
+hand-authored RayJob manifest is used.
 
 `pvc://` URIs refer to project PVCs. `hf://` and `s3://` URIs refer to
 project Secrets; the selected training image also needs `datasets`,
