@@ -4,6 +4,7 @@
 
 from typing import Annotated, ClassVar
 
+from fastapi import Request
 from pydantic import Field, StrictStr
 
 from training_service_api.models.create_job_request import CreateJobRequest
@@ -84,6 +85,7 @@ class BaseTrainingJobsApi:
         ],
         create_job_request: CreateJobRequest,
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> TrainingJobSubmission:
         """Submit a Ray training job in an OpenShift Project"""
         ...

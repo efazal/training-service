@@ -4,7 +4,7 @@ Keep handwritten implementations in this package, outside the regenerated
 tree. Future handlers subclass the generated API base interfaces and are
 imported by the handwritten application to register those subclasses.
 
-This task registers routes and models only. No handler implementations are
-present; generated routes and the authentication extension point return
-`501` without making backend calls. Authentication, project authorization,
-discovery, and SDK orchestration are implemented in their own tasks.
+The Training Jobs handler implements POST submission through the caller-scoped
+CodeFlare adapter in `training_service/submission.py`. List, get, and delete
+remain fail-closed with `501` until their own work is merged. Authentication
+and project authorization run in generated routes before this handler.

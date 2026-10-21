@@ -1,8 +1,9 @@
 # API generation
 
-`openapi.yaml` is the reviewed public contract (version `1.4.0-dp`). The
-contract is copied unchanged from the reviewed Training API specification;
-generation does not modify its endpoints or schemas.
+`openapi.yaml` is the reviewed public contract (version `1.4.0-dp`).
+Generation does not modify its endpoints or schemas. The POST-only
+`x-submission-context` vendor extension controls generated dispatch and
+response handling without changing the public wire schema.
 
 Generate with a running Podman or Docker engine:
 
@@ -23,20 +24,18 @@ application, Containerfile, dependency manifest, or test suite.
 
 The overrides in `templates/python-fastapi/` are based on upstream v7.25.0
 templates. They preserve Pydantic serialization and extra-field rules,
-forward the credential interface to future implementations, and import the
-external scalar URI type. `ContractModel` supplies canonical schema
+forward the verified request context to the submission handler, and import
+the external scalar URI type. `ContractModel` supplies canonical schema
 validation where the beta generator drops constraints. The external URI
 mapping produces upstream lookup warnings; the template supplies its import,
 and focused unit tests verify request examples round-trip unchanged.
 
-All API and authentication operations are placeholders returning `501`.
-The security extension point fails closed; it neither validates tokens nor
-grants access. Handwritten authentication, project authorization, Kubernetes
-discovery, and SDK behavior are separate tasks. Add implementations outside
-the generated tree and register them in the handwritten application.
+Authentication, project authorization, and POST submission are handwritten
+outside the generated tree. The other operations remain fail-closed with
+`501` after authentication and authorization.
 
-Swagger's runtime copy uses a relative server URL and documents the
-scaffold's `501` response. It never overwrites the canonical YAML.
+Swagger's runtime copy uses a relative server URL and never overwrites the
+canonical YAML.
 
 ## Formatting and regeneration
 

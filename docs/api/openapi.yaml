@@ -141,6 +141,7 @@ paths:
         job has started or completed. The returned id is the RayJob name and can
         be used with the detail and log endpoints in the same project.
       operationId: createTrainingJob
+      x-submission-context: true
       x-project-authorization:
         group: ray.io
         resource: rayjobs

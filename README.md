@@ -1,12 +1,29 @@
 # OpenDataHub Training Service
 
-Python/FastAPI scaffold generated from the reviewed Training API contract in
-`docs/api/openapi.yaml`. The runnable application registers all eight contract
-operations and serves Swagger UI at `/docs`.
+Python/FastAPI service generated from the Training API contract in
+`docs/api/openapi.yaml`. OpenShift TokenReview authenticates callers,
+SubjectAccessReview authorizes project operations, and POST training-job
+submission uses CodeFlare. Other API operations fail closed with `501`.
 
-API operations and authentication are unimplemented and fail closed with
-`501 Not Implemented`. Health and readiness probes remain available. This
-task does not submit jobs, query Kubernetes, or implement caller permissions.
+## Basic Ray submission
+
+POST supports Training Hub `lora_sft` with the four basic numeric parameters
+in the contract. It maps resources and queue settings to a CodeFlare RayJob.
+The `202` response returns the RayJob name as `id` and a project-scoped
+`Location` header; it does not mean training has completed.
+
+Set `TRAINING_RAY_IMAGE` through the chart's existing `env` values or the
+process environment. The image must contain Ray and Training Hub, with a Ray
+version matching the version CodeFlare writes into the RayJob. There is no
+default image; submission returns `503` until one is configured. The API
+container bundles a pinned CodeFlare Git revision for caller-scoped SDK
+submission. No service-side job store or hand-authored RayJob manifest is used.
+
+`pvc://` URIs refer to project PVCs. `hf://` and `s3://` URIs refer to
+project Secrets; the selected training image also needs `datasets`,
+`huggingface_hub`, and `boto3` for the corresponding storage paths. Resource
+lookups and RayJob creation use the verified caller's token, while credentials
+are mounted into Ray pods rather than embedded in the RayJob.
 
 ## Local development
 

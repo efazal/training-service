@@ -15,6 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+    "codeflare-sdk @ git+https://github.com/project-codeflare/codeflare-sdk.git@189c1c959cd886e160a4bb4ab130e8e1ddbb47c9",
     "fastapi>=0.115,<1",
     "jsonschema>=4.23,<5",
     "kubernetes>=31,<36",
@@ -35,6 +36,9 @@ Issues = "https://github.com/opendatahub-io/training-service/issues"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/training_service", "src/training_service_api"]

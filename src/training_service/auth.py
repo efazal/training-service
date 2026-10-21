@@ -127,6 +127,8 @@ async def authenticate_request(request: Request) -> TokenModel:
     if identity is None:
         raise _unauthorized()
 
-    # This is the canonical verified identity for downstream request handling.
+    # Keep the credential only on this request. SDK submission must use the
+    # caller's token, never the service account or a process-global SDK client.
     request.state.caller_identity = identity
+    request.state.caller_bearer_token = token
     return TokenModel(username=identity.username, uid=identity.uid, groups=list(identity.groups))

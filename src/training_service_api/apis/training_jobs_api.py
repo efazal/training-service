@@ -12,7 +12,9 @@ from fastapi import (
     Path,
     Query,
     Request,
+    Response,
     Security,
+    status,
 )
 from pydantic import Field, StrictStr
 
@@ -222,9 +224,11 @@ async def list_training_jobs(
     summary="Submit a Ray training job in an OpenShift Project",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def create_training_job(
     request: Request,
+    response: Response,
     project: Annotated[
         StrictStr,
         Field(
@@ -295,11 +299,11 @@ async def create_training_job(
     )
     if not BaseTrainingJobsApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseTrainingJobsApi.subclasses[0]().create_training_job(
-        project,
-        create_job_request,
-        token_OpenShiftBearer=token_OpenShiftBearer,
+    result = await BaseTrainingJobsApi.subclasses[0]().create_training_job(
+        project, create_job_request, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
+    response.headers["Location"] = f"/api/v1/projects/{project}/training-jobs/{result.id}"
+    return result
 
 
 @router.get(
