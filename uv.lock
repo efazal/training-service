@@ -2463,6 +2463,7 @@ name = "training-service"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "fastapi" },
     { name = "jsonschema" },
     { name = "kubernetes" },
@@ -2485,6 +2486,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10,<4" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "kubernetes", specifier = ">=31,<36" },
