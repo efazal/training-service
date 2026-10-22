@@ -50,13 +50,27 @@ class ErrorResponse(ContractModel):
             "authentication_unavailable",
             "authorization_unavailable",
             "not_implemented",
+            "invalid_request",
+            "submission_unavailable",
+            "backend_not_implemented",
+            "backend_unavailable",
+            "conflict",
+            "invalid_page_token",
+            "unowned_cluster",
+            "shared_cluster",
+            "logs_unavailable",
+            "stream_expired",
         ):
             raise ValueError(
                 "must be one of enum values ('bad_request', 'unauthorized', "
                 "'forbidden', 'not_found', 'already_exists', 'job_not_terminal', "
                 "'logs_not_ready', 'ray_cluster_gone', 'unsupported_media_type', "
                 "'validation_error', 'authentication_unavailable', "
-                "'authorization_unavailable', 'not_implemented')"
+                "'authorization_unavailable', 'not_implemented', 'invalid_request', "
+                "'submission_unavailable', 'backend_not_implemented', "
+                "'backend_unavailable', 'conflict', 'invalid_page_token', "
+                "'unowned_cluster', 'shared_cluster', 'logs_unavailable', "
+                "'stream_expired')"
             )
         return value
 

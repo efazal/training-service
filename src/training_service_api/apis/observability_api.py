@@ -16,8 +16,8 @@ from fastapi import (
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
+from training_service.api_impl.dispatch import implementation_for
 from training_service.authorization import authorize_project_request
-from training_service.errors import ApiError
 from training_service_api.apis.observability_api_base import BaseObservabilityApi
 from training_service_api.models.error_response import ErrorResponse
 from training_service_api.models.extra_models import TokenModel
@@ -145,9 +145,8 @@ async def stream_job_logs(
         verb="get",
         resource_name=job_id,
     )
-    if not BaseObservabilityApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseObservabilityApi.subclasses[0]().stream_job_logs(
+    implementation = implementation_for(BaseObservabilityApi, "stream_job_logs")
+    return await implementation.stream_job_logs(
         project,
         job_id,
         follow,

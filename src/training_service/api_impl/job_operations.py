@@ -1,12 +1,11 @@
 """Handwritten job reads and deletion outside the generated API package."""
 
-from typing import Any, NoReturn
+from typing import ClassVar
 
 import anyio
 from fastapi import Request, Response
 
 from training_service import jobs
-from training_service.errors import ApiError
 from training_service_api.apis.training_jobs_api_base import BaseTrainingJobsApi
 from training_service_api.models.extra_models import TokenModel
 from training_service_api.models.job_status import JobStatus
@@ -17,8 +16,13 @@ from training_service_api.models.training_job import TrainingJob
 class RayTrainingJobsApi(BaseTrainingJobsApi):
     """Generated routes perform authentication and project SAR before dispatch."""
 
-    async def create_training_job(self, *args: Any, **kwargs: Any) -> NoReturn:
-        raise ApiError(501, "not_implemented", "Job submission is not implemented.")
+    implemented_operations: ClassVar[frozenset[str]] = frozenset(
+        {
+            "list_training_jobs",
+            "get_training_job",
+            "delete_training_job",
+        }
+    )
 
     async def list_training_jobs(
         self,
