@@ -9,6 +9,7 @@ from contextlib import aclosing
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+import aiohttp
 import anyio
 from fastapi import Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -23,6 +24,14 @@ from training_service.kube import caller_client, validate_names
 
 def _unavailable() -> ApiError:
     return ApiError(503, "logs_unavailable", "The authenticated Ray log backend is unavailable.")
+
+
+async def _reject_log_redirect(
+    session: aiohttp.ClientSession, context: Any, parameters: aiohttp.TraceRequestRedirectParams
+) -> None:
+    """Abort before aiohttp can send caller credentials to a redirected path."""
+    parameters.response.close()
+    raise _unavailable()
 
 
 class BoundedJobClient(JobSubmissionClient):
@@ -45,6 +54,30 @@ class BoundedJobClient(JobSubmissionClient):
         if response.status_code >= 300:
             raise _unavailable()
         return response
+
+    async def tail_job_logs(self, job_id: str) -> AsyncIterator[str]:
+        """Harden Ray 2.55's WebSocket transport, which bypasses _do_request."""
+        # ws_connect has no allow_redirects argument. The public trace callback
+        # aborts a redirect before a second request, including on the same origin.
+        trace = aiohttp.TraceConfig()
+        trace.on_request_redirect.append(_reject_log_redirect)
+        async with aiohttp.ClientSession(
+            cookies=self._cookies,
+            headers=self._headers,
+            trace_configs=[trace],
+            timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_connect=5),
+        ) as session:
+            async with session.ws_connect(
+                f"{self._address}/api/jobs/{job_id}/logs/tail",
+                ssl=self._ssl_context,
+            ) as socket:
+                async for message in socket:
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        yield message.data
+                    elif message.type == aiohttp.WSMsgType.ERROR:
+                        raise _unavailable()
+                if socket.close_code == aiohttp.WSCloseCode.ABNORMAL_CLOSURE:
+                    raise _unavailable()
 
 
 def resolve_client(request: Request, project: str, name: str) -> tuple[JobSubmissionClient, str]:
@@ -114,17 +147,29 @@ def _snapshot(sdk: JobSubmissionClient, submission_id: str) -> str:
         raise _unavailable() from None
 
 
+def _check_status(sdk: JobSubmissionClient, submission_id: str) -> None:
+    try:
+        sdk.get_job_status(submission_id)
+    except ApiError:
+        raise
+    except Exception:
+        raise _unavailable() from None
+
+
 async def driver_logs(
     request: Request, project: str, name: str, follow: bool | None, tail_lines: int | None
 ) -> PlainTextResponse | StreamingResponse:
     sdk, submission_id = await anyio.to_thread.run_sync(resolve_client, request, project, name)
-    # Preflight before committing HTTP 200, including for following streams.
-    text = await anyio.to_thread.run_sync(_snapshot, sdk, submission_id)
     if not follow:
+        text = await anyio.to_thread.run_sync(_snapshot, sdk, submission_id)
         return PlainTextResponse(
             "".join(text.splitlines(keepends=True)[-(tail_lines or 100) :]),
             headers={"Cache-Control": "no-store"},
         )
+
+    # Check the backend without downloading the entire log before streaming it.
+    # WebSocket-specific failures are sanitized on the SSE error path below.
+    await anyio.to_thread.run_sync(_check_status, sdk, submission_id)
 
     async def events() -> AsyncIterator[str]:
         try:

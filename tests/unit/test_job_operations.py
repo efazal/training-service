@@ -274,6 +274,8 @@ def test_follow_uses_sse_and_closes_sdk_iterator(backend):
     assert response.headers["content-type"].startswith("text/event-stream")
     assert 'event: log\ndata: {"message": "one\\ntwo\\n"}\n\n' == response.text
     assert closed == [True]
+    sdk.get_job_status.assert_called_once_with("raysubmit_123")
+    sdk.get_job_logs.assert_not_called()
 
 
 def test_follow_failure_is_sanitized_after_headers(backend):
@@ -302,9 +304,9 @@ def test_logs_fail_before_streaming_when_backend_unavailable(backend, case, expe
     elif case == "unowned":
         cluster["metadata"]["ownerReferences"] = []
     elif case == "forbidden":
-        sdk.get_job_logs.side_effect = ApiError(403, "forbidden", "Denied.")
+        sdk.get_job_status.side_effect = ApiError(403, "forbidden", "Denied.")
     else:
-        sdk.get_job_logs.side_effect = RuntimeError("sensitive-error")
+        sdk.get_job_status.side_effect = RuntimeError("sensitive-error")
     response = http.get(BASE + "/example/logs?follow=true", headers=HEADERS)
     assert response.status_code == expected
     assert "sensitive-error" not in response.text

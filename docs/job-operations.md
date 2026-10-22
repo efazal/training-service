@@ -40,7 +40,8 @@ data: {"message":"Epoch 1 complete\n"}
 ```
 
 Following uses Ray's `tail_job_logs`; `tail_lines` applies only to snapshots.
-The backend is checked before sending HTTP 200. Later failures produce a
+Following checks backend status before sending HTTP 200 without first
+downloading the full log. Later failures produce a
 sanitized SSE `error` event. A stream lasts at most five minutes; reconnecting
 revalidates authentication and authorization. Disconnection closes the SDK
 iterator. Logs are not persisted or aggregated across workers.
@@ -62,7 +63,9 @@ is already present in the image or mounted by the deployment. Do not set
 No caller-supplied dashboard URL is used. RayJob and RayCluster reads use the
 caller token and require a verified RayJob controller owner reference. Shared
 or unowned clusters are not used as log endpoints. HTTP requests have bounded
-timeouts and do not follow redirects with credentials.
+timeouts and do not follow redirects with credentials, including WebSocket
+handshakes. The pinned Ray SDK's streaming transport is overridden narrowly
+to enforce that rule while retaining its verified TLS context.
 
 ## Deletion and GPU cleanup
 
