@@ -3,7 +3,9 @@
 Python/FastAPI service generated from the Training API contract in
 `docs/api/openapi.yaml`. OpenShift TokenReview authenticates callers,
 SubjectAccessReview authorizes project operations, and POST training-job
-submission uses CodeFlare. Other API operations fail closed with `501`.
+submission uses CodeFlare. Job listing, details, driver logs, and terminal
+RayJob deletion are implemented. Algorithm/queue discovery and estimation
+remain fail-closed with `501`.
 
 ## Basic Ray submission
 
@@ -30,6 +32,9 @@ project Secrets; the selected training image also needs `datasets`,
 `huggingface_hub`, and `boto3` for the corresponding storage paths. Resource
 lookups and RayJob creation use the verified caller's token, while credentials
 are mounted into Ray pods rather than embedded in the RayJob.
+
+See [job operations](docs/job-operations.md) for permissions, log gateway
+configuration, response examples, and cascading cleanup behavior.
 
 ## Local development
 

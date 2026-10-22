@@ -27,6 +27,7 @@ from fastapi import (
 
 from {{modelPackage}}.extra_models import TokenModel
 from training_service.authorization import authorize_project_request
+from training_service.api_impl.dispatch import implementation_for
 from training_service.errors import ApiError
 {{#imports}}
 {{import}}
@@ -92,15 +93,19 @@ async def {{operationId}}(
         {{/resourceNameParameter}}
     )
     {{/vendorExtensions.x-project-authorization}}
-    if not Base{{classname}}.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
+    implementation = implementation_for(Base{{classname}}, "{{operationId}}")
     {{#vendorExtensions.x-submission-context}}
-    result = await Base{{classname}}.subclasses[0]().{{operationId}}({{#allParams}}{{>impl_argument}}, {{/allParams}}{{#authMethods}}token_{{name}}=token_{{name}}, {{/authMethods}}request=request)
+    result = await implementation.{{operationId}}({{#allParams}}{{>impl_argument}}, {{/allParams}}{{#authMethods}}token_{{name}}=token_{{name}}, {{/authMethods}}request=request)
     response.headers["Location"] = f"/api/v1/projects/{project}/training-jobs/{result.id}"
     return result
     {{/vendorExtensions.x-submission-context}}
     {{^vendorExtensions.x-submission-context}}
-    return await Base{{classname}}.subclasses[0]().{{operationId}}({{#allParams}}{{>impl_argument}}, {{/allParams}}{{#authMethods}}token_{{name}}=token_{{name}}, {{/authMethods}})
+    {{#vendorExtensions.x-request-context}}
+    return await implementation.{{operationId}}({{#allParams}}{{>impl_argument}}, {{/allParams}}{{#authMethods}}token_{{name}}=token_{{name}}, {{/authMethods}}request=request)
+    {{/vendorExtensions.x-request-context}}
+    {{^vendorExtensions.x-request-context}}
+    return await implementation.{{operationId}}({{#allParams}}{{>impl_argument}}, {{/allParams}}{{#authMethods}}token_{{name}}=token_{{name}}, {{/authMethods}})
+    {{/vendorExtensions.x-request-context}}
     {{/vendorExtensions.x-submission-context}}
 {{^-last}}
 

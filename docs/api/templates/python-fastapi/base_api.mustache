@@ -3,8 +3,8 @@
 {{>partial_header}}
 
 from typing import ClassVar, Dict, List, Tuple
-from fastapi import Request
 from {{modelPackage}}.extra_models import TokenModel
+from fastapi import Request
 
 {{#imports}}
 {{import}}
@@ -29,6 +29,11 @@ class Base{{classname}}:
         {{/authMethods}}
         {{#vendorExtensions.x-submission-context}}
         request: Request,
+        {{/vendorExtensions.x-submission-context}}
+        {{^vendorExtensions.x-submission-context}}
+        {{#vendorExtensions.x-request-context}}
+        request: Request,
+        {{/vendorExtensions.x-request-context}}
         {{/vendorExtensions.x-submission-context}}
     ) -> {{returnType}}{{^returnType}}None{{/returnType}}:
         """{{#summary}}{{.}}{{/summary}}{{^summary}}Implement this API operation.{{/summary}}"""

@@ -10,11 +10,14 @@ training-service/
 ├── src/training_service_api/          # generated, committed; do not edit
 ├── src/training_service/
 │   ├── main.py                       # generated routers, Swagger, probes
-│   ├── api_impl/                     # handwritten submission handler
+│   ├── api_impl/                     # submission, job operations, driver logs
 │   ├── job_submission.py             # caller-scoped CodeFlare adapter
 │   ├── ray_entrypoint.py             # trusted code embedded in RayJob
 │   ├── auth.py                       # TokenReview and request-scoped caller
 │   ├── authorization.py              # project SubjectAccessReview
+│   ├── kube.py                       # isolated caller-token clients
+│   ├── jobs.py                       # stateless RayJob views and deletion
+│   ├── ray_logs.py                   # authenticated Ray SDK log access
 │   ├── contract.py                   # canonical model validation and Swagger
 │   ├── contract_types.py             # scalar URI generator workaround
 │   └── errors.py                     # API error envelope
@@ -27,10 +30,16 @@ library imported by the handwritten entry point; the wheel and container
 bundle both namespaces. Generation never overwrites handwritten source.
 
 The application registers the contract's eight operations under `/api/v1`.
-Authentication and project authorization run before submission. POST creates
-a caller-scoped CodeFlare RayJob and returns 202. Other operations remain
-fail-closed with `501`. `/healthz`, `/readyz`, `/docs`, and `/openapi.json`
-are available without a cluster.
+Authentication and project authorization run before job operations. POST
+creates a caller-scoped CodeFlare RayJob and returns 202. Reads remain
+available from caller-authorized RayJob resources after RayCluster cleanup.
+Driver logs use the Ray SDK through a trusted, authenticated gateway.
+Terminal deletion uses foreground Kubernetes garbage collection, guarded by
+ownership and resource-version checks. There is no service job database or
+elevated workload identity. See [job operations](job-operations.md).
+Algorithm/queue discovery and estimation remain fail-closed with `501`.
+`/healthz`, `/readyz`, `/docs`, and `/openapi.json` are available without a
+cluster.
 
 ## Ownership boundary
 

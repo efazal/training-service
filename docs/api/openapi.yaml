@@ -304,6 +304,7 @@ paths:
         Filters and pagination are applied to the authorized results; every page
         rechecks caller permissions and pagination is not a durable snapshot.
       operationId: listTrainingJobs
+      x-request-context: true
       x-project-authorization:
         group: ray.io
         resource: rayjobs
@@ -450,6 +451,7 @@ paths:
         omit submitted_by. Attribution is informational, may be modified by
         callers with metadata patch permissions, and is never an authorization input.
       operationId: getTrainingJob
+      x-request-context: true
       x-project-authorization:
         group: ray.io
         resource: rayjobs
@@ -585,11 +587,15 @@ paths:
       description: >
         Deletes any caller-authorized terminal RayJob in the target namespace,
         including a RayJob not submitted through this API. Uses the caller's
-        existing Kubernetes permission. KubeRay removes resources owned by the
-        RayJob according to its configured cleanup behavior. A non-terminal job
-        returns 409; this endpoint does not stop or cancel it. It does not delete
+        existing Kubernetes permission. Foreground cascading deletion removes
+        the RayJob and its owned RayCluster and pods asynchronously. GPU resources
+        become available after those pods terminate; the response does not
+        promise instantaneous resource release. Shared or unowned clusters are
+        not deleted and return 409. The shared RayJob CRD is never removed.
+        A non-terminal job returns 409; this endpoint does not stop or cancel it. It does not delete
         checkpoints or model outputs.
       operationId: deleteTrainingJob
+      x-request-context: true
       x-project-authorization:
         group: ray.io
         resource: rayjobs
@@ -599,7 +605,7 @@ paths:
         - Training Jobs
       responses:
         '204':
-          description: Terminal RayJob deleted; KubeRay applies its configured owned-resource cleanup
+          description: Terminal RayJob deletion initiated with foreground cascading cleanup of its owned RayCluster and pods
         '400':
           $ref: '#/components/responses/400BadRequest'
         '401':
@@ -611,7 +617,7 @@ paths:
         '404':
           $ref: '#/components/responses/404NotFound'
         '409':
-          description: RayJob is not terminal and cannot be deleted
+          description: RayJob is not terminal, changed concurrently, or does not have an exclusively owned RayCluster
           content:
             application/json:
               schema:
@@ -630,6 +636,7 @@ paths:
         storage are out of scope. Logs are available only while the managed
         RayCluster is reachable.
       operationId: streamJobLogs
+      x-request-context: true
       x-project-authorization:
         group: ray.io
         resource: rayjobs

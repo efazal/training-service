@@ -30,9 +30,15 @@ validation where the beta generator drops constraints. The external URI
 mapping produces upstream lookup warnings; the template supplies its import,
 and focused unit tests verify request examples round-trip unchanged.
 
-Authentication, project authorization, and POST submission are handwritten
-outside the generated tree. The other operations remain fail-closed with
-`501` after authentication and authorization.
+Authentication, project authorization, submission, job reads, driver logs,
+and terminal deletion are handwritten outside the generated tree. Algorithm
+and queue discovery and estimation remain fail-closed with `501`.
+
+The POST-only `x-submission-context` preserves the 202 status and Location
+header. Operations marked `x-request-context` also receive the authenticated
+request explicitly. Dispatch selects each operation's owner independently of
+import order. The query argument override permits normal integer/boolean HTTP
+query parsing without weakening strict JSON body models.
 
 Swagger's runtime copy uses a relative server URL and never overwrites the
 canonical YAML.

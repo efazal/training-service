@@ -63,6 +63,7 @@ class BaseTrainingJobsApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> ListTrainingJobs200Response:
         """List training jobs in an OpenShift Project"""
         ...
@@ -117,6 +118,7 @@ class BaseTrainingJobsApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> TrainingJob:
         """Get training job status and available details"""
         ...
@@ -148,6 +150,7 @@ class BaseTrainingJobsApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> None:
         """Delete a terminal Ray training job record"""
         ...

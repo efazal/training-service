@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from training_service.api_impl import training_jobs as _training_jobs_impl  # noqa: F401
+from training_service.api_impl import job_operations, observability, training_jobs  # noqa: F401
 from training_service.auth import KubernetesTokenAuthenticator, OpenShiftTokenAuthenticator
 from training_service.authorization import KubernetesProjectAuthorizer, OpenShiftProjectAuthorizer
 from training_service.contract import contract_document, load_contract
@@ -17,6 +17,7 @@ from training_service_api.apis.estimations_api import router as estimations_rout
 from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
 from training_service_api.apis.observability_api import router as observability_router
 from training_service_api.apis.training_jobs_api import router as jobs_router
+from training_service_api.models.error_response import ErrorResponse
 
 _SUBMISSION_PATH = re.compile(r"^/api/v1/projects/[^/]+/training-jobs$")
 
@@ -59,7 +60,9 @@ def create_app(
     async def api_error_handler(request: Request, error: ApiError) -> JSONResponse:
         return JSONResponse(
             status_code=error.status_code,
-            content={"code": error.code, "message": error.message},
+            content=ErrorResponse(code=error.code, message=error.message).model_dump(
+                exclude_unset=True
+            ),
             headers=error.headers,
         )
 
@@ -67,7 +70,12 @@ def create_app(
     async def validation_error_handler(
         request: Request, error: RequestValidationError
     ) -> JSONResponse:
-        del request
+        # Query errors remain 400; submission preserves its 400/422 envelopes.
+        if request.method in {"GET", "DELETE"}:
+            return JSONResponse(
+                status_code=400,
+                content={"code": "bad_request", "message": "Invalid path or query parameters."},
+            )
         malformed_json = any(item.get("type") == "json_invalid" for item in error.errors())
         return JSONResponse(
             status_code=400 if malformed_json else 422,

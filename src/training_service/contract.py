@@ -31,7 +31,12 @@ def contract_document() -> dict[str, Any]:
     document["servers"] = [{"url": "/api/v1"}]
     for path in document["paths"].values():
         for operation in path.values():
-            if isinstance(operation, dict) and operation.get("operationId"):
+            if isinstance(operation, dict) and operation.get("operationId") in {
+                "estimateTrainingJob",
+                "listAlgorithms",
+                "createTrainingJob",
+                "listQueues",
+            }:
                 operation["responses"]["501"] = {
                     "description": "Not implemented in this local scaffold.",
                     "content": {

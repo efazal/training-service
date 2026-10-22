@@ -4,6 +4,7 @@
 
 from typing import Annotated, ClassVar
 
+from fastapi import Request
 from pydantic import Field, StrictBool, StrictStr
 
 from training_service_api.models.extra_models import TokenModel
@@ -57,6 +58,7 @@ class BaseObservabilityApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> str:
         """Read or follow training job driver logs"""
         ...
