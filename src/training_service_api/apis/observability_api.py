@@ -13,7 +13,7 @@ from fastapi import (
     Request,
     Security,
 )
-from pydantic import Field, StrictBool, StrictStr
+from pydantic import Field, StrictStr
 
 import training_service_api.impl
 from training_service.authorization import authorize_project_request
@@ -119,24 +119,12 @@ async def stream_job_logs(
         ),
         examples=["llama3-8b-alpaca-lora"],
     ),
-    follow: Annotated[
-        StrictBool | None,
-        Field(description="False returns text/plain; true follows logs as text/event-stream."),
-    ] = Query(
+    follow: bool | None = Query(
         False,
         description="False returns text/plain; true follows logs as text/event-stream.",
         alias="follow",
     ),
-    tail_lines: Annotated[
-        Annotated[int, Field(strict=True, ge=1)] | None,
-        Field(
-            description=(
-                "Number of trailing lines in the non-following snapshot, selected by "
-                "the service after get_job_logs. Ignored when follow=true, which "
-                "forwards the log chunks provided by Ray's tail_job_logs. "
-            )
-        ),
-    ] = Query(
+    tail_lines: int | None = Query(
         100,
         description=(
             "Number of trailing lines in the non-following snapshot, selected by "
@@ -165,4 +153,5 @@ async def stream_job_logs(
         follow,
         tail_lines,
         token_OpenShiftBearer=token_OpenShiftBearer,
+        request=request,
     )

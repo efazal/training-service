@@ -4,9 +4,13 @@ Python/FastAPI scaffold generated from the reviewed Training API contract in
 `docs/api/openapi.yaml`. The runnable application registers all eight contract
 operations and serves Swagger UI at `/docs`.
 
-API operations and authentication are unimplemented and fail closed with
-`501 Not Implemented`. Health and readiness probes remain available. This
-task does not submit jobs, query Kubernetes, or implement caller permissions.
+OpenShift authentication and project authorization protect API operations.
+Job listing, details, driver logs, and terminal RayJob deletion are implemented.
+Submission, algorithm/queue discovery, and estimation remain separate work and
+return `501 Not Implemented`. Health and readiness probes remain available.
+
+See [job operations](docs/job-operations.md) for permissions, log gateway
+configuration, response examples, and cascading cleanup behavior.
 
 ## Local development
 

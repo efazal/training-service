@@ -4,6 +4,7 @@
 
 from typing import Annotated, ClassVar
 
+from fastapi import Request
 from pydantic import Field, StrictStr
 
 from training_service_api.models.create_job_request import CreateJobRequest
@@ -62,6 +63,7 @@ class BaseTrainingJobsApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> ListTrainingJobs200Response:
         """List training jobs in an OpenShift Project"""
         ...
@@ -115,6 +117,7 @@ class BaseTrainingJobsApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> TrainingJob:
         """Get training job status and available details"""
         ...
@@ -146,6 +149,7 @@ class BaseTrainingJobsApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> None:
         """Delete a terminal Ray training job record"""
         ...

@@ -29,11 +29,13 @@ validation where the beta generator drops constraints. The external URI
 mapping produces upstream lookup warnings; the template supplies its import,
 and focused unit tests verify request examples round-trip unchanged.
 
-All API and authentication operations are placeholders returning `501`.
-The security extension point fails closed; it neither validates tokens nor
-grants access. Handwritten authentication, project authorization, Kubernetes
-discovery, and SDK behavior are separate tasks. Add implementations outside
-the generated tree and register them in the handwritten application.
+Authentication uses OpenShift TokenReview; project operations also perform
+SubjectAccessReview before handwritten implementations are invoked.
+Job listing, detail, logs, and terminal deletion are implemented outside the
+generated tree. Other operations return `501`. Operations marked
+`x-request-context` receive the authenticated request explicitly. The query
+argument override permits normal integer/boolean HTTP query parsing without
+weakening strict JSON body models.
 
 Swagger's runtime copy uses a relative server URL and documents the
 scaffold's `501` response. It never overwrites the canonical YAML.

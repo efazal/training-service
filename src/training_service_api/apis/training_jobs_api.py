@@ -131,9 +131,7 @@ async def list_training_jobs(
         description="Filter by queue name recorded in training submission metadata.",
         alias="queue_name",
     ),
-    limit: Annotated[int, Field(strict=True, ge=1)] | None = Query(
-        20, description="", alias="limit", ge=1
-    ),
+    limit: int | None = Query(20, description="", alias="limit", ge=1),
     page_token: Annotated[
         StrictStr | None,
         Field(
@@ -169,6 +167,7 @@ async def list_training_jobs(
         limit,
         page_token,
         token_OpenShiftBearer=token_OpenShiftBearer,
+        request=request,
     )
 
 
@@ -399,9 +398,7 @@ async def get_training_job(
     if not BaseTrainingJobsApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseTrainingJobsApi.subclasses[0]().get_training_job(
-        project,
-        job_id,
-        token_OpenShiftBearer=token_OpenShiftBearer,
+        project, job_id, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
 
 
@@ -410,7 +407,8 @@ async def get_training_job(
     responses={
         204: {
             "description": (
-                "Terminal RayJob deleted; KubeRay applies its configured owned-resource cleanup"
+                "Terminal RayJob deletion initiated with foreground cascading cleanup "
+                "of its owned RayCluster and pods"
             )
         },
         400: {
@@ -440,7 +438,10 @@ async def get_training_job(
         },
         409: {
             "model": ErrorResponse,
-            "description": "RayJob is not terminal and cannot be deleted",
+            "description": (
+                "RayJob is not terminal, changed concurrently, or does not have an "
+                "exclusively owned RayCluster"
+            ),
         },
     },
     tags=["Training Jobs"],
@@ -508,7 +509,5 @@ async def delete_training_job(
     if not BaseTrainingJobsApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseTrainingJobsApi.subclasses[0]().delete_training_job(
-        project,
-        job_id,
-        token_OpenShiftBearer=token_OpenShiftBearer,
+        project, job_id, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
