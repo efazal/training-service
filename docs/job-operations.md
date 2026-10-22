@@ -102,6 +102,18 @@ are not sent to callers. Run `make check`; focused unit tests mock Kubernetes
 and Ray and require no cluster. Submission, discovery, and estimation are
 not implemented by this ticket.
 
+## Submission integration
+
+The pending submission implementation remains a separate change. Generated
+routes select explicit operation owners, not the first imported handler.
+`api_impl/job_operations.py` owns list/detail/delete and `observability.py`
+owns logs. An older submission handler can continue to own POST, even when
+it contains unimplemented read-method stubs. Duplicate owners fail closed.
+The templates preserve submission's 202 status, Location header, and request
+context extension when generating from the combined contract. Query failures
+remain 400; malformed JSON is 400 and invalid POST bodies are 422. Submission
+and job-operation errors share the generated `ErrorResponse` schema.
+
 KubeRay ownership reference:
 [RayJob controller](https://github.com/ray-project/kuberay/blob/master/ray-operator/controllers/ray/rayjob_controller.go)
 sets a RayJob controller owner reference when creating a managed RayCluster.

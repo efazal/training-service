@@ -1409,6 +1409,15 @@ components:
             - authorization_unavailable
             - submission_unavailable
             - not_implemented
+            - invalid_request
+            - backend_not_implemented
+            - backend_unavailable
+            - conflict
+            - invalid_page_token
+            - unowned_cluster
+            - shared_cluster
+            - logs_unavailable
+            - stream_expired
           example: forbidden
         message:
           type: string

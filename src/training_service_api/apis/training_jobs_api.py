@@ -19,8 +19,8 @@ from fastapi import (
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
+from training_service.api_impl.dispatch import implementation_for
 from training_service.authorization import authorize_project_request
-from training_service.errors import ApiError
 from training_service_api.apis.training_jobs_api_base import BaseTrainingJobsApi
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.error_response import ErrorResponse
@@ -160,9 +160,8 @@ async def list_training_jobs(
         resource="rayjobs",
         verb="list",
     )
-    if not BaseTrainingJobsApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseTrainingJobsApi.subclasses[0]().list_training_jobs(
+    implementation = implementation_for(BaseTrainingJobsApi, "list_training_jobs")
+    return await implementation.list_training_jobs(
         project,
         status,
         queue_name,
@@ -299,9 +298,8 @@ async def create_training_job(
         resource="rayjobs",
         verb="create",
     )
-    if not BaseTrainingJobsApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    result = await BaseTrainingJobsApi.subclasses[0]().create_training_job(
+    implementation = implementation_for(BaseTrainingJobsApi, "create_training_job")
+    result = await implementation.create_training_job(
         project, create_job_request, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
     response.headers["Location"] = f"/api/v1/projects/{project}/training-jobs/{result.id}"
@@ -402,9 +400,8 @@ async def get_training_job(
         verb="get",
         resource_name=job_id,
     )
-    if not BaseTrainingJobsApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseTrainingJobsApi.subclasses[0]().get_training_job(
+    implementation = implementation_for(BaseTrainingJobsApi, "get_training_job")
+    return await implementation.get_training_job(
         project, job_id, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
 
@@ -513,8 +510,7 @@ async def delete_training_job(
         verb="delete",
         resource_name=job_id,
     )
-    if not BaseTrainingJobsApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseTrainingJobsApi.subclasses[0]().delete_training_job(
+    implementation = implementation_for(BaseTrainingJobsApi, "delete_training_job")
+    return await implementation.delete_training_job(
         project, job_id, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )

@@ -15,8 +15,8 @@ from fastapi import (
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
+from training_service.api_impl.dispatch import implementation_for
 from training_service.authorization import authorize_project_request
-from training_service.errors import ApiError
 from training_service_api.apis.infrastructure_discovery_api_base import (
     BaseInfrastructureDiscoveryApi,
 )
@@ -66,9 +66,8 @@ async def list_algorithms(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> ListAlgorithms200Response:
     """List available Ray training algorithms"""
-    if not BaseInfrastructureDiscoveryApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseInfrastructureDiscoveryApi.subclasses[0]().list_algorithms(
+    implementation = implementation_for(BaseInfrastructureDiscoveryApi, "list_algorithms")
+    return await implementation.list_algorithms(
         token_OpenShiftBearer=token_OpenShiftBearer,
     )
 
@@ -145,9 +144,8 @@ async def list_queues(
         resource="localqueues",
         verb="list",
     )
-    if not BaseInfrastructureDiscoveryApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseInfrastructureDiscoveryApi.subclasses[0]().list_queues(
+    implementation = implementation_for(BaseInfrastructureDiscoveryApi, "list_queues")
+    return await implementation.list_queues(
         project,
         token_OpenShiftBearer=token_OpenShiftBearer,
     )

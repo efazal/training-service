@@ -12,7 +12,7 @@ from fastapi import (
 )
 
 import training_service_api.impl
-from training_service.errors import ApiError
+from training_service.api_impl.dispatch import implementation_for
 from training_service_api.apis.estimations_api_base import BaseEstimationsApi
 from training_service_api.models.error_response import ErrorResponse
 from training_service_api.models.extra_models import TokenModel
@@ -62,9 +62,8 @@ async def estimate_training_job(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> JobEstimationResponse:
     """Estimate training resources (stretch goal)"""
-    if not BaseEstimationsApi.subclasses:
-        raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
-    return await BaseEstimationsApi.subclasses[0]().estimate_training_job(
+    implementation = implementation_for(BaseEstimationsApi, "estimate_training_job")
+    return await implementation.estimate_training_job(
         job_estimation_request,
         token_OpenShiftBearer=token_OpenShiftBearer,
     )
