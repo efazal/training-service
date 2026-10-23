@@ -12,7 +12,7 @@ from training_service.auth import KubernetesTokenAuthenticator, OpenShiftTokenAu
 from training_service.authorization import KubernetesProjectAuthorizer, OpenShiftProjectAuthorizer
 from training_service.contract import contract_document, load_contract
 from training_service.errors import ApiError
-from training_service.submission import CodeFlareJobSubmitter, JobSubmitter
+from training_service.job_submission import CodeFlareJobSubmitter, JobSubmitter
 from training_service_api.apis.estimations_api import router as estimations_router
 from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
 from training_service_api.apis.observability_api import router as observability_router
@@ -72,7 +72,7 @@ def create_app(
         return JSONResponse(
             status_code=400 if malformed_json else 422,
             content={
-                "code": "bad_request" if malformed_json else "invalid_request",
+                "code": "bad_request" if malformed_json else "validation_error",
                 "message": (
                     "Malformed JSON request body."
                     if malformed_json

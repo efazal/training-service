@@ -191,7 +191,10 @@ async def list_training_jobs(
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": (
+                "OpenShift authentication, authorization, or Ray submission is "
+                "temporarily unavailable"
+            ),
         },
         403: {
             "model": ErrorResponse,

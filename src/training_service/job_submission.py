@@ -35,7 +35,7 @@ _K8S_TIMEOUT_SECONDS = 10
 _ANNOTATION_SUBMISSION = "training.rhoai.io/submission"
 _ANNOTATION_SUBMITTER = "training.rhoai.io/submitted-by"
 _NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
-_CPU_PATTERN = re.compile(r"^(?:[1-9][0-9]*|[1-9][0-9]*m|0\.[0-9]+)$")
+_CPU_PATTERN = re.compile(r"^(?:[1-9][0-9]*|[1-9][0-9]*m|0\.0*[1-9][0-9]*)$")
 _MEMORY_PATTERN = re.compile(r"^[1-9][0-9]*(?:Ki|Mi|Gi|Ti|K|M|G|T)$")
 _BASIC_PARAMETERS = frozenset(
     {"learning_rate", "num_epochs", "effective_batch_size", "max_seq_len"}
@@ -66,7 +66,9 @@ class _CallerApiClient(client.ApiClient):
             and path_params.get("version") == "v1"
             and path_params.get("plural") == "rayjobs"
         )
-        if is_rayjob_create:
+        # CodeFlare's client verification and queue lookup also use this
+        # transport while holding the process-wide SDK auth lock.
+        if kwargs.get("_request_timeout") is None:
             kwargs["_request_timeout"] = _K8S_TIMEOUT_SECONDS
         try:
             return super().call_api(resource_path, method, *args, **kwargs)
@@ -87,7 +89,7 @@ class JobSubmitter(Protocol):
 
 
 def _invalid(message: str) -> ApiError:
-    return ApiError(422, "invalid_request", message)
+    return ApiError(422, "validation_error", message)
 
 
 def _parse_location(uri: str, *, output: bool = False) -> dict[str, str]:
@@ -125,7 +127,7 @@ def _parse_location(uri: str, *, output: bool = False) -> dict[str, str]:
 
 def _validate_request(request: CreateJobRequest) -> tuple[ResourceSpec, dict[str, int | float]]:
     if request.backend not in (None, JobBackend.RAY):
-        raise ApiError(501, "backend_not_implemented", "Only the Ray backend is implemented.")
+        raise ApiError(501, "not_implemented", "Only the Ray backend is implemented.")
     if request.algorithm.name != "lora_sft":
         raise _invalid("Only the basic lora_sft algorithm is supported.")
     parameters = request.algorithm.parameters or {}
@@ -205,6 +207,7 @@ def _storage_plan(
     api: client.CoreV1Api,
     project: str,
     locations: dict[str, dict[str, str]],
+    num_nodes: int,
 ) -> tuple[dict[str, dict[str, str]], list[client.V1Volume], list[client.V1VolumeMount]]:
     """Resolve each reference with the caller's Kubernetes client."""
     volumes: list[client.V1Volume] = []
@@ -217,9 +220,11 @@ def _storage_plan(
         name = location["name"]
         scheme = location["scheme"]
         if scheme == "pvc" and name not in pvc_paths:
-            api.read_namespaced_persistent_volume_claim(
+            pvc = api.read_namespaced_persistent_volume_claim(
                 name, project, _request_timeout=_K8S_TIMEOUT_SECONDS
             )
+            if num_nodes > 1 and "ReadWriteMany" not in (pvc.spec.access_modes or []):
+                raise _invalid("Multi-node training requires ReadWriteMany access for every PVC.")
             mount_path = f"/mnt/training-api/pvc/{len(pvc_paths)}"
             volume_name = f"training-pvc-{len(pvc_paths)}"
             pvc_paths[name] = mount_path
@@ -356,7 +361,9 @@ class CodeFlareJobSubmitter:
 
         with _caller_api_client(token) as api_client:
             core_api = client.CoreV1Api(api_client)
-            resolved, volumes, mounts = _storage_plan(core_api, project, locations)
+            resolved, volumes, mounts = _storage_plan(
+                core_api, project, locations, resources.num_nodes or 1
+            )
             gpu_type = resources.gpu_type or "nvidia.com/gpu"
             gpu_count = resources.gpus_per_node if resources.gpus_per_node is not None else 1
             cpu = resources.cpus_per_node or "8"

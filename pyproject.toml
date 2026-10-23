@@ -15,7 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "codeflare-sdk @ https://packages.redhat.com/api/pulp-content/public-rhai/rhoai/3.6/cpu-ubi9/codeflare_sdk-0.38.2-1-py3-none-any.whl",
+    "codeflare-sdk @ https://packages.redhat.com/api/pulp-content/public-rhai/rhoai/3.6/cpu-ubi9/codeflare_sdk-0.38.2-1-py3-none-any.whl#sha256=9a83abc5587e22befe055e47c06b7336b9def34b6d8fe1d33008e6e55e39ee0a",
     "ray[data,default]==2.55.1",
     # The RHOAI 3.6 Ray wheel imports colorama but does not declare it.
     "colorama==0.4.6",

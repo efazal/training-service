@@ -11,7 +11,7 @@ training-service/
 ├── src/training_service/
 │   ├── main.py                       # generated routers, Swagger, probes
 │   ├── api_impl/                     # handwritten submission handler
-│   ├── submission.py                 # caller-scoped CodeFlare adapter
+│   ├── job_submission.py             # caller-scoped CodeFlare adapter
 │   ├── ray_entrypoint.py             # trusted code embedded in RayJob
 │   ├── auth.py                       # TokenReview and request-scoped caller
 │   ├── authorization.py              # project SubjectAccessReview

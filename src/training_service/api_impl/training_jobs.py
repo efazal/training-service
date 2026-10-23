@@ -8,7 +8,7 @@ from fastapi import Request
 
 from training_service.auth import CallerIdentity
 from training_service.errors import ApiError
-from training_service.submission import JobSubmitter
+from training_service.job_submission import JobSubmitter
 from training_service_api.apis.training_jobs_api_base import BaseTrainingJobsApi
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.extra_models import TokenModel

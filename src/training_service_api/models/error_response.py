@@ -49,6 +49,7 @@ class ErrorResponse(ContractModel):
             "validation_error",
             "authentication_unavailable",
             "authorization_unavailable",
+            "submission_unavailable",
             "not_implemented",
         ):
             raise ValueError(
@@ -56,7 +57,8 @@ class ErrorResponse(ContractModel):
                 "'forbidden', 'not_found', 'already_exists', 'job_not_terminal', "
                 "'logs_not_ready', 'ray_cluster_gone', 'unsupported_media_type', "
                 "'validation_error', 'authentication_unavailable', "
-                "'authorization_unavailable', 'not_implemented')"
+                "'authorization_unavailable', 'submission_unavailable', "
+                "'not_implemented')"
             )
         return value
 

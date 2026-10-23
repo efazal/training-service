@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
-from training_service import submission
+from training_service import job_submission as submission
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
@@ -24,6 +24,7 @@ from training_service.errors import ApiError
 from training_service.main import create_app
 from training_service.ray_entrypoint import _dataset_format
 from training_service_api.models.create_job_request import CreateJobRequest
+from training_service_api.models.error_response import ErrorResponse
 
 
 def _sample(name: str = "pvc_inputs_output") -> CreateJobRequest:
@@ -131,7 +132,7 @@ def test_post_denied_or_unauthenticated_never_calls_submitter() -> None:
     [
         ('{"name":', "application/json", 400, "bad_request"),
         ("not-json", "text/plain", 415, "unsupported_media_type"),
-        ("{}", "application/json", 422, "invalid_request"),
+        ("{}", "application/json", 422, "validation_error"),
     ],
 )
 def test_invalid_submission_uses_documented_error_envelope(
@@ -148,6 +149,7 @@ def test_invalid_submission_uses_documented_error_envelope(
     )
     assert response.status_code == status_code
     assert response.json()["code"] == code
+    ErrorResponse.model_validate(response.json())
     assert "message" in response.json()
     assert submitter.calls == []
 
@@ -174,7 +176,8 @@ def test_advanced_credential_and_algorithm_fields_are_out_of_basic_scope(
         headers={"Authorization": "Bearer caller-token"},
     )
     assert response.status_code == 422
-    assert response.json()["code"] == "invalid_request"
+    assert response.json()["code"] == "validation_error"
+    ErrorResponse.model_validate(response.json())
 
 
 def test_missing_training_image_returns_503_without_kubernetes_calls() -> None:
@@ -191,6 +194,7 @@ def test_missing_training_image_returns_503_without_kubernetes_calls() -> None:
     )
     assert response.status_code == 503
     assert response.json()["code"] == "submission_unavailable"
+    ErrorResponse.model_validate(response.json())
 
 
 def test_other_training_job_operations_remain_fail_closed() -> None:
@@ -219,12 +223,15 @@ class FakeCoreApi:
     def __init__(self) -> None:
         self.pvc_reads: list[tuple[str, str]] = []
         self.secret_reads: list[tuple[str, str]] = []
+        self.pvc_access_modes: dict[str, list[str]] = {}
 
     def read_namespaced_persistent_volume_claim(
         self, name: str, namespace: str, **_kwargs: Any
     ) -> object:
         self.pvc_reads.append((name, namespace))
-        return object()
+        return SimpleNamespace(
+            spec=SimpleNamespace(access_modes=self.pvc_access_modes.get(name, ["ReadWriteMany"]))
+        )
 
     def read_namespaced_secret(self, name: str, namespace: str, **_kwargs: Any) -> SimpleNamespace:
         self.secret_reads.append((name, namespace))
@@ -301,6 +308,42 @@ def test_pvc_submission_maps_resources_and_retains_only_safe_payload(
     )
     assert "caller-token" not in str(kwargs["annotations"])
     assert "caller-token" not in kwargs["entrypoint"]
+
+
+def test_multinode_pvc_requires_read_write_many(monkeypatch: pytest.MonkeyPatch) -> None:
+    core = _mock_sdk(monkeypatch)
+    core.pvc_access_modes["training-data"] = ["ReadWriteOnce"]
+    body = _sample()
+    submitter = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")
+
+    with pytest.raises(ApiError) as raised:
+        submitter._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "token")
+    assert raised.value.status_code == 422
+    assert raised.value.code == "validation_error"
+    assert FakeRayJob.instances == []
+
+    body.resources.num_nodes = 1
+    assert (
+        submitter._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "token")
+        == body.name
+    )
+
+
+@pytest.mark.parametrize("cpu", ["0.0", "0.00", "0.000"])
+def test_zero_cpu_request_is_rejected(cpu: str) -> None:
+    body = _sample()
+    body.resources.cpus_per_node = cpu
+    with pytest.raises(ApiError) as raised:
+        submission._validate_request(body)
+    assert raised.value.status_code == 422
+    assert raised.value.code == "validation_error"
+
+
+def test_positive_fractional_cpu_request_is_valid() -> None:
+    body = _sample()
+    body.resources.cpus_per_node = "0.01"
+    resources, _parameters = submission._validate_request(body)
+    assert resources.cpus_per_node == "0.01"
 
 
 def test_configured_image_is_embedded_in_rayjob_head_and_workers(
@@ -506,6 +549,36 @@ def test_sdk_owned_create_preserves_kubernetes_failure_status(
         api_client.call_api("/api/v1/namespaces/{namespace}/pods", "GET")
 
 
+def test_caller_client_times_out_all_sdk_calls_without_overriding_explicit_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[int] = []
+
+    def reject_call(
+        _self: client.ApiClient, _resource_path: str, _method: str, *args: Any, **kwargs: Any
+    ) -> None:
+        timeouts.append(kwargs["_request_timeout"])
+        raise ApiException(status=403)
+
+    monkeypatch.setattr(client.ApiClient, "call_api", reject_call)
+    api_client = submission._CallerApiClient(client.Configuration())
+
+    with pytest.raises(ApiException):
+        api_client.call_api("/api/v1/namespaces/{namespace}/pods", "GET")
+    with pytest.raises(ApiException):
+        api_client.call_api("/api/v1/namespaces/{namespace}/pods", "GET", _request_timeout=None)
+    with pytest.raises(ApiException):
+        api_client.call_api("/api/v1/namespaces/{namespace}/pods", "GET", _request_timeout=3)
+    with pytest.raises(submission._SdkSubmissionError):
+        api_client.call_api(
+            submission._RAYJOB_CREATE_PATH,
+            "POST",
+            {"group": "ray.io", "version": "v1", "plural": "rayjobs"},
+            _request_timeout=3,
+        )
+    assert timeouts == [submission._K8S_TIMEOUT_SECONDS] * 2 + [3, 3]
+
+
 def test_caller_client_never_falls_back_to_service_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -535,6 +608,7 @@ def test_kubernetes_errors_map_to_documented_statuses(backend_status: int, api_s
     error = submission._map_backend_error(ApiException(status=backend_status))
     assert error.status_code == api_status
     assert error.message
+    ErrorResponse.model_validate({"code": error.code, "message": error.message})
 
 
 def test_unsupported_backend_and_unsafe_pvc_path_fail_before_sdk() -> None:
@@ -543,6 +617,7 @@ def test_unsupported_backend_and_unsafe_pvc_path_fail_before_sdk() -> None:
     with pytest.raises(ApiError) as raised:
         submission._validate_request(body)
     assert raised.value.status_code == 501
+    assert raised.value.code == "not_implemented"
     with pytest.raises(ApiError) as raised:
         submission._parse_location("pvc://claim/safe/%2e%2e/secret")
     assert raised.value.status_code == 422

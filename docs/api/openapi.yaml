@@ -250,7 +250,14 @@ paths:
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
-          $ref: '#/components/responses/503OpenShiftUnavailable'
+          description: OpenShift authentication, authorization, or Ray submission is temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: submission_unavailable
+                message: RayJob submission is unavailable.
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -1048,7 +1055,8 @@ components:
       description: >
         The only public source for worker and GPU topology. If omitted, platform
         defaults are applied. Algorithm parameters describe hyperparameters,
-        not worker topology.
+        not worker topology. For multi-node requests, every referenced PVC must
+        support ReadWriteMany access because Ray head and worker pods mount it.
       properties:
         num_nodes:
           type: integer
@@ -1392,6 +1400,7 @@ components:
             - validation_error
             - authentication_unavailable
             - authorization_unavailable
+            - submission_unavailable
             - not_implemented
           example: forbidden
         message:
