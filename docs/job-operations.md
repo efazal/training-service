@@ -20,13 +20,16 @@ also requires caller access to read the target namespace.
 
 `GET /{job_id}` returns available details from the RayJob, even after its
 RayCluster has been cleaned up. The job ID is the namespaced RayJob name.
-Optional details include timestamps, failure reason, a representable worker
+Optional details include timestamps, failure reason, a representable node
 resource configuration, original submitter, and the accepted POST payload.
 Submission annotations are validated against the contract before returning
 them. Omitted settings stay omitted; external jobs without this metadata
 remain readable. Raw runtime environments and Kubernetes Secrets are not
 returned. The original submitter is informational, never an access-control
 claim. Metrics/progress are omitted unless an authorized source provides them.
+Resource summaries count the Ray head and active workers when their requested
+CPU, memory, and GPU resources are homogeneous. Heterogeneous configurations
+are omitted instead of being represented as an inaccurate per-node shape.
 
 ## Driver logs
 
@@ -107,10 +110,10 @@ not implemented by this ticket.
 
 ## Submission integration
 
-The pending submission implementation remains a separate change. Generated
+Submission is provided by the merged PR #7. Generated
 routes select explicit operation owners, not the first imported handler.
 `api_impl/job_operations.py` owns list/detail/delete and `observability.py`
-owns logs. An older submission handler can continue to own POST, even when
+owns logs. The submission handler continues to own POST, even when
 it contains unimplemented read-method stubs. Duplicate owners fail closed.
 The templates preserve submission's 202 status, Location header, and request
 context extension when generating from the combined contract. Query failures

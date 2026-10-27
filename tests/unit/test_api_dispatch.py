@@ -6,20 +6,17 @@ import pytest
 
 from training_service.api_impl.dispatch import implementation_for
 from training_service.api_impl.job_operations import RayTrainingJobsApi
+from training_service.api_impl.training_jobs import SubmissionTrainingJobsApi
 from training_service.contract import load_contract
 from training_service.errors import ApiError
 from training_service_api.models.error_response import ErrorResponse
 
 
-class SubmissionHandler:
-    """Represents the existing submission handler, including unimplemented reads."""
-
-
 @pytest.mark.parametrize("submission_first", [False, True])
 def test_explicit_read_owner_wins_over_submission_stubs(submission_first):
-    handlers = (SubmissionHandler, RayTrainingJobsApi)
+    handlers = (SubmissionTrainingJobsApi, RayTrainingJobsApi)
     base = SimpleNamespace(subclasses=handlers if submission_first else handlers[::-1])
-    assert isinstance(implementation_for(base, "create_training_job"), SubmissionHandler)
+    assert isinstance(implementation_for(base, "create_training_job"), SubmissionTrainingJobsApi)
     for operation in RayTrainingJobsApi.implemented_operations:
         assert isinstance(implementation_for(base, operation), RayTrainingJobsApi)
 
@@ -41,7 +38,7 @@ def test_ambiguous_owners_are_not_selected_by_import_order():
         )
     with pytest.raises(RuntimeError, match="Multiple legacy implementations"):
         implementation_for(
-            SimpleNamespace(subclasses=(SubmissionHandler, SubmissionHandler)),
+            SimpleNamespace(subclasses=(SubmissionTrainingJobsApi, SubmissionTrainingJobsApi)),
             "create_training_job",
         )
 

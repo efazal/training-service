@@ -17,6 +17,7 @@ from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
 from training_service import job_submission as submission
+from training_service import jobs
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
@@ -197,14 +198,22 @@ def test_missing_training_image_returns_503_without_kubernetes_calls() -> None:
     ErrorResponse.model_validate(response.json())
 
 
-def test_other_training_job_operations_remain_fail_closed() -> None:
+def test_reads_dispatch_without_invoking_submitter(monkeypatch: pytest.MonkeyPatch) -> None:
     submitter = RecordingSubmitter()
+    calls = []
+
+    def list_jobs(request: Any, project: str, *args: Any) -> dict[str, Any]:
+        calls.append((request.state.caller_identity.username, project))
+        return {"items": [], "total_count": 0}
+
+    monkeypatch.setattr(jobs, "list_jobs", list_jobs)
     response = TestClient(create_app(FakeAuthenticator(), FakeAuthorizer(), submitter)).get(
         "/api/v1/projects/team-alpha/training-jobs",
         headers={"Authorization": "Bearer caller-token"},
     )
-    assert response.status_code == 501
-    assert response.json()["code"] == "not_implemented"
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total_count": 0}
+    assert calls == [("alice", "team-alpha")]
     assert submitter.calls == []
 
 
@@ -360,6 +369,77 @@ def test_configured_image_is_embedded_in_rayjob_head_and_workers(
     assert spec["rayVersion"] == "2.55.1"
     assert spec["headGroupSpec"]["template"].spec.containers[0].image == image
     assert spec["workerGroupSpecs"][0]["template"].spec.containers[0].image == image
+
+
+@pytest.mark.parametrize("num_nodes", [1, 2])
+def test_sdk_submission_metadata_and_topology_are_readable(
+    monkeypatch: pytest.MonkeyPatch, num_nodes: int
+) -> None:
+    core = _mock_sdk(monkeypatch)
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["resources"]["num_nodes"] = num_nodes
+    authorizer = FakeAuthorizer()
+    http = TestClient(
+        create_app(
+            FakeAuthenticator(),
+            authorizer,
+            submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1"),
+        )
+    )
+    headers = {"Authorization": "Bearer caller-token"}
+    base = "/api/v1/projects/team-alpha/training-jobs"
+    response = http.post(base, json=payload, headers=headers)
+    assert response.status_code == 202
+    assert response.headers["location"] == base + "/" + payload["name"]
+
+    kwargs = FakeRayJob.instances[0].kwargs
+    with client.ApiClient() as serializer:
+        cluster = serializer.sanitize_for_serialization(
+            kwargs["cluster_config"].build_ray_cluster_spec("pvc-training-cluster")
+        )
+    record = {
+        "metadata": {
+            "name": payload["name"],
+            "creationTimestamp": "2026-10-27T09:00:00Z",
+            "annotations": kwargs["annotations"],
+            "labels": {"kueue.x-k8s.io/queue-name": payload["queue_name"]},
+        },
+        "spec": {"rayClusterSpec": cluster},
+    }
+
+    def custom_api(api: FakeApiClient) -> SimpleNamespace:
+        assert api.token == "caller-token"
+        return SimpleNamespace(
+            list_namespaced_custom_object=lambda *args, **kwargs: {"items": [record]},
+            get_namespaced_custom_object=lambda *args, **kwargs: record,
+        )
+
+    monkeypatch.setattr(jobs, "caller_client", lambda request: FakeApiClient("caller-token"))
+    monkeypatch.setattr(jobs.client, "CustomObjectsApi", custom_api)
+    monkeypatch.setattr(core, "read_namespace", lambda *args, **kwargs: object(), raising=False)
+    listing = http.get(base, headers=headers)
+    assert listing.status_code == 200
+    assert listing.json() == {
+        "items": [
+            {
+                "id": payload["name"],
+                "status": "PENDING",
+                "created_at": "2026-10-27T09:00:00Z",
+                "queue_name": payload["queue_name"],
+            }
+        ],
+        "total_count": 1,
+    }
+    response = http.get(response.headers["location"], headers=headers)
+    assert response.status_code == 200
+    assert response.json()["submission"] == payload
+    assert response.json()["submitted_by"] == "alice"
+    assert response.json()["resources"] == payload["resources"]
+    assert authorizer.calls == [
+        ProjectPermission("ray.io", "rayjobs", "create"),
+        ProjectPermission("ray.io", "rayjobs", "list"),
+        ProjectPermission("ray.io", "rayjobs", "get", payload["name"]),
+    ]
 
 
 def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -34,7 +34,6 @@ def contract_document() -> dict[str, Any]:
             if isinstance(operation, dict) and operation.get("operationId") in {
                 "estimateTrainingJob",
                 "listAlgorithms",
-                "createTrainingJob",
                 "listQueues",
             }:
                 operation["responses"]["501"] = {

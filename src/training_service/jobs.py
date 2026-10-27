@@ -94,23 +94,34 @@ def detail(job: dict[str, Any], project: str) -> dict[str, Any]:
 
 
 def _resources(cluster: dict[str, Any]) -> dict[str, Any] | None:
-    """Report homogeneous worker configuration; do not invent effective defaults."""
+    """Report homogeneous Ray nodes, including the submission adapter's head."""
     groups = cluster.get("workerGroupSpecs", [])
-    if not groups and cluster.get("headGroupSpec"):
-        groups = [dict(cluster["headGroupSpec"], replicas=1)]
-    if len(groups) != 1:
+    if cluster.get("headGroupSpec"):
+        groups = [dict(cluster["headGroupSpec"], replicas=1), *groups]
+    groups = [group for group in groups if group.get("replicas") != 0]
+    if not groups:
         return None
-    group = groups[0]
-    containers = group.get("template", {}).get("spec", {}).get("containers", [])
-    if not containers:
+    node_requests = []
+    for group in groups:
+        containers = group.get("template", {}).get("spec", {}).get("containers", [])
+        if not containers:
+            return None
+        node_requests.append(
+            {
+                key: value
+                for key, value in containers[0].get("resources", {}).get("requests", {}).items()
+                if key in {"cpu", "memory"} or key.endswith("/gpu")
+            }
+        )
+    requests = node_requests[0]
+    if any(item != requests for item in node_requests[1:]):
         return None
-    requests = containers[0].get("resources", {}).get("requests", {})
     gpu_keys = [key for key in requests if key.endswith("/gpu")]
     if len(gpu_keys) > 1:
         return None
     result: dict[str, Any] = {}
-    if isinstance(group.get("replicas"), int) and group["replicas"] > 0:
-        result["num_nodes"] = group["replicas"]
+    if all(type(group.get("replicas")) is int and group["replicas"] > 0 for group in groups):
+        result["num_nodes"] = sum(group["replicas"] for group in groups)
     for source, target in (("cpu", "cpus_per_node"), ("memory", "memory_per_node")):
         if source in requests:
             result[target] = str(requests[source])

@@ -420,10 +420,23 @@ def test_runtime_resources_do_not_reconstruct_submission(backend):
     assert "resources" not in data["submission"]
 
 
+def test_heterogeneous_head_and_workers_are_not_reported_as_one_shape():
+    def group(cpu):
+        return {"template": {"spec": {"containers": [{"resources": {"requests": {"cpu": cpu}}}]}}}
+
+    cluster = {
+        "headGroupSpec": group("2"),
+        "workerGroupSpecs": [dict(group("16"), replicas=2)],
+    }
+    assert jobs._resources(cluster) is None
+
+
 def test_swagger_does_not_advertise_scaffold_responses_for_implemented_operations(backend):
     document = backend[0].get("/openapi.json").json()
     assert "501" not in document["paths"]["/projects/{project}/training-jobs"]["get"]["responses"]
-    assert "501" in document["paths"]["/projects/{project}/training-jobs"]["post"]["responses"]
+    assert document["paths"]["/projects/{project}/training-jobs"]["post"]["responses"]["501"] == {
+        "$ref": "#/components/responses/501NotImplemented"
+    }
 
 
 def test_sdk_environment_override_is_rejected_before_credentials_are_sent(backend, monkeypatch):
