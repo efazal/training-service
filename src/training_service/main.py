@@ -7,12 +7,12 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from training_service.api_impl import job_operations, observability, training_jobs  # noqa: F401
+from training_service.api_impl import observability, training_jobs  # noqa: F401
 from training_service.auth import KubernetesTokenAuthenticator, OpenShiftTokenAuthenticator
 from training_service.authorization import KubernetesProjectAuthorizer, OpenShiftProjectAuthorizer
 from training_service.contract import contract_document, load_contract
 from training_service.errors import ApiError
-from training_service.job_submission import CodeFlareJobSubmitter, JobSubmitter
+from training_service.jobs import CodeFlareJobBackend, JobsBackend, JobSubmitter
 from training_service_api.apis.estimations_api import router as estimations_router
 from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
 from training_service_api.apis.observability_api import router as observability_router
@@ -26,6 +26,7 @@ def create_app(
     authenticator: OpenShiftTokenAuthenticator | None = None,
     authorizer: OpenShiftProjectAuthorizer | None = None,
     submitter: JobSubmitter | None = None,
+    backend: JobsBackend | None = None,
 ) -> FastAPI:
     """Create the HTTP application."""
     contract = load_contract()
@@ -38,7 +39,8 @@ def create_app(
 
     application.state.token_authenticator = authenticator or KubernetesTokenAuthenticator()
     application.state.project_authorizer = authorizer or KubernetesProjectAuthorizer()
-    application.state.job_submitter = submitter or CodeFlareJobSubmitter()
+    application.state.job_backend = backend or CodeFlareJobBackend()
+    application.state.job_submitter = submitter or application.state.job_backend
 
     @application.middleware("http")
     async def require_json_submission(

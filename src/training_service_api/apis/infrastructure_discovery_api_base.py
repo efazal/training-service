@@ -6,6 +6,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import Field, StrictStr
 
+from training_service.errors import ApiError
 from training_service_api.models.extra_models import TokenModel
 from training_service_api.models.list_algorithms200_response import ListAlgorithms200Response
 from training_service_api.models.queue_info_response import QueueInfoResponse
@@ -20,12 +21,21 @@ class BaseInfrastructureDiscoveryApi:
             cls,
         )
 
+    @classmethod
+    def implementation(cls) -> "BaseInfrastructureDiscoveryApi":
+        """Return the sole registered handler; never depend on import order."""
+        if not cls.subclasses:
+            raise ApiError(501, "not_implemented", "This operation is not implemented.")
+        if len(cls.subclasses) != 1:
+            raise RuntimeError(f"Expected one implementation for {cls.__name__}")
+        return cls.subclasses[0]()
+
     async def list_algorithms(
         self,
         token_OpenShiftBearer: TokenModel,
     ) -> ListAlgorithms200Response:
         """List available Ray training algorithms"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def list_queues(
         self,
@@ -46,4 +56,4 @@ class BaseInfrastructureDiscoveryApi:
         token_OpenShiftBearer: TokenModel,
     ) -> QueueInfoResponse:
         """List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")

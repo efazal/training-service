@@ -143,6 +143,7 @@ paths:
       operationId: createTrainingJob
       x-submission-context: true
       x-project-authorization:
+        useJobBackend: true
         group: ray.io
         resource: rayjobs
         verb: create
@@ -306,6 +307,7 @@ paths:
       operationId: listTrainingJobs
       x-request-context: true
       x-project-authorization:
+        useJobBackend: true
         group: ray.io
         resource: rayjobs
         verb: list
@@ -453,6 +455,7 @@ paths:
       operationId: getTrainingJob
       x-request-context: true
       x-project-authorization:
+        useJobBackend: true
         group: ray.io
         resource: rayjobs
         verb: get
@@ -573,6 +576,8 @@ paths:
                     project: team-alpha-ml
                     status: PENDING
                     selected_backend: ray
+        '400':
+          $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
@@ -597,6 +602,7 @@ paths:
       operationId: deleteTrainingJob
       x-request-context: true
       x-project-authorization:
+        useJobBackend: true
         group: ray.io
         resource: rayjobs
         verb: delete
@@ -638,6 +644,7 @@ paths:
       operationId: streamJobLogs
       x-request-context: true
       x-project-authorization:
+        useJobBackend: true
         group: ray.io
         resource: rayjobs
         verb: get
@@ -1409,8 +1416,6 @@ components:
             - authorization_unavailable
             - submission_unavailable
             - not_implemented
-            - invalid_request
-            - backend_not_implemented
             - backend_unavailable
             - conflict
             - invalid_page_token

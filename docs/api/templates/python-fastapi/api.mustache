@@ -27,7 +27,6 @@ from fastapi import (
 
 from {{modelPackage}}.extra_models import TokenModel
 from training_service.authorization import authorize_project_request
-from training_service.api_impl.dispatch import implementation_for
 from training_service.errors import ApiError
 {{#imports}}
 {{import}}
@@ -86,14 +85,20 @@ async def {{operationId}}(
     await authorize_project_request(
         request,
         project,
+        {{#useJobBackend}}
+        group=request.app.state.job_backend.api_group,
+        resource=request.app.state.job_backend.resource,
+        {{/useJobBackend}}
+        {{^useJobBackend}}
         group="{{group}}",
         resource="{{resource}}",
+        {{/useJobBackend}}
         verb="{{verb}}",
         {{#resourceNameParameter}}resource_name={{.}},
         {{/resourceNameParameter}}
     )
     {{/vendorExtensions.x-project-authorization}}
-    implementation = implementation_for(Base{{classname}}, "{{operationId}}")
+    implementation = Base{{classname}}.implementation()
     {{#vendorExtensions.x-submission-context}}
     result = await implementation.{{operationId}}({{#allParams}}{{>impl_argument}}, {{/allParams}}{{#authMethods}}token_{{name}}=token_{{name}}, {{/authMethods}}request=request)
     response.headers["Location"] = f"/api/v1/projects/{project}/training-jobs/{result.id}"

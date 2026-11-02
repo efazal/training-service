@@ -7,6 +7,7 @@ from typing import Annotated, ClassVar
 from fastapi import Request
 from pydantic import Field, StrictStr
 
+from training_service.errors import ApiError
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.extra_models import TokenModel
 from training_service_api.models.job_status import JobStatus
@@ -21,6 +22,15 @@ class BaseTrainingJobsApi:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         BaseTrainingJobsApi.subclasses = BaseTrainingJobsApi.subclasses + (cls,)
+
+    @classmethod
+    def implementation(cls) -> "BaseTrainingJobsApi":
+        """Return the sole registered handler; never depend on import order."""
+        if not cls.subclasses:
+            raise ApiError(501, "not_implemented", "This operation is not implemented.")
+        if len(cls.subclasses) != 1:
+            raise RuntimeError(f"Expected one implementation for {cls.__name__}")
+        return cls.subclasses[0]()
 
     async def list_training_jobs(
         self,
@@ -66,7 +76,7 @@ class BaseTrainingJobsApi:
         request: Request,
     ) -> ListTrainingJobs200Response:
         """List training jobs in an OpenShift Project"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def create_training_job(
         self,
@@ -89,7 +99,7 @@ class BaseTrainingJobsApi:
         request: Request,
     ) -> TrainingJobSubmission:
         """Submit a Ray training job in an OpenShift Project"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def get_training_job(
         self,
@@ -121,7 +131,7 @@ class BaseTrainingJobsApi:
         request: Request,
     ) -> TrainingJob:
         """Get training job status and available details"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def delete_training_job(
         self,
@@ -153,4 +163,4 @@ class BaseTrainingJobsApi:
         request: Request,
     ) -> None:
         """Delete a terminal Ray training job record"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")

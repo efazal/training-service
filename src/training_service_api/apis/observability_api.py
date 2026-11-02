@@ -16,7 +16,6 @@ from fastapi import (
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
-from training_service.api_impl.dispatch import implementation_for
 from training_service.authorization import authorize_project_request
 from training_service_api.apis.observability_api_base import BaseObservabilityApi
 from training_service_api.models.error_response import ErrorResponse
@@ -140,12 +139,12 @@ async def stream_job_logs(
     await authorize_project_request(
         request,
         project,
-        group="ray.io",
-        resource="rayjobs",
+        group=request.app.state.job_backend.api_group,
+        resource=request.app.state.job_backend.resource,
         verb="get",
         resource_name=job_id,
     )
-    implementation = implementation_for(BaseObservabilityApi, "stream_job_logs")
+    implementation = BaseObservabilityApi.implementation()
     return await implementation.stream_job_logs(
         project,
         job_id,

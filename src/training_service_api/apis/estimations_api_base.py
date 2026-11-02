@@ -4,6 +4,7 @@
 
 from typing import ClassVar
 
+from training_service.errors import ApiError
 from training_service_api.models.extra_models import TokenModel
 from training_service_api.models.job_estimation_request import JobEstimationRequest
 from training_service_api.models.job_estimation_response import JobEstimationResponse
@@ -16,10 +17,19 @@ class BaseEstimationsApi:
         super().__init_subclass__(**kwargs)
         BaseEstimationsApi.subclasses = BaseEstimationsApi.subclasses + (cls,)
 
+    @classmethod
+    def implementation(cls) -> "BaseEstimationsApi":
+        """Return the sole registered handler; never depend on import order."""
+        if not cls.subclasses:
+            raise ApiError(501, "not_implemented", "This operation is not implemented.")
+        if len(cls.subclasses) != 1:
+            raise RuntimeError(f"Expected one implementation for {cls.__name__}")
+        return cls.subclasses[0]()
+
     async def estimate_training_job(
         self,
         job_estimation_request: JobEstimationRequest,
         token_OpenShiftBearer: TokenModel,
     ) -> JobEstimationResponse:
         """Estimate training resources (stretch goal)"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")

@@ -105,20 +105,29 @@ privileges are introduced.
 
 Errors use the contract's `code`/`message` envelope. Raw SDK exception bodies
 are not sent to callers. Run `make check`; focused unit tests mock Kubernetes
-and Ray and require no cluster. Submission, discovery, and estimation are
-not implemented by this ticket.
+and Ray and require no cluster.
 
 ## Submission integration
 
-Submission is provided by the merged PR #7. Generated
-routes select explicit operation owners, not the first imported handler.
-`api_impl/job_operations.py` owns list/detail/delete and `observability.py`
-owns logs. The submission handler continues to own POST, even when
-it contains unimplemented read-method stubs. Duplicate owners fail closed.
-The templates preserve submission's 202 status, Location header, and request
-context extension when generating from the combined contract. Query failures
-remain 400; malformed JSON is 400 and invalid POST bodies are 422. Submission
-and job-operation errors share the generated `ErrorResponse` schema.
+Submission is provided by PR #7 and now shares
+`api_impl/training_jobs.py` with list/detail/delete. The generated API group
+selects one handler instead of dispatching individual operations between
+competing subclasses. `observability.py` owns the logs route.
+
+The job handler uses the `JobsBackend` interface in `jobs.py`; the logs response
+uses the backend's `LogClient` interface. Backend API group/resource settings
+also determine job authorization. The current adapter remains CodeFlare/Ray;
+this separation does not claim Trainer support yet.
+
+CodeFlare's `RayJobClient` provides log snapshot/status/tail operations.
+Its underlying Ray transport is hardened to preserve existing request
+timeouts, TLS verification, credential isolation and redirect protection.
+See `logs.py` and the loopback transport regression tests.
+
+The templates preserve submission's 202 status, Location header and request
+context extension. Query failures remain 400; malformed JSON is 400 and
+invalid POST bodies are 422. Submission and read/delete errors retain the
+same `ErrorResponse` schema.
 
 KubeRay ownership reference:
 [RayJob controller](https://github.com/ray-project/kuberay/blob/master/ray-operator/controllers/ray/rayjob_controller.go)

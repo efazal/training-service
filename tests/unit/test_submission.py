@@ -16,8 +16,8 @@ from fastapi.testclient import TestClient
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
-from training_service import job_submission as submission
 from training_service import jobs
+from training_service import jobs as submission
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
@@ -169,7 +169,7 @@ def test_advanced_credential_and_algorithm_fields_are_out_of_basic_scope(
         create_app(
             FakeAuthenticator(),
             FakeAuthorizer(),
-            submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1"),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
         )
     ).post(
         "/api/v1/projects/team-alpha/training-jobs",
@@ -186,7 +186,7 @@ def test_missing_training_image_returns_503_without_kubernetes_calls() -> None:
         create_app(
             FakeAuthenticator(),
             FakeAuthorizer(),
-            submission.CodeFlareJobSubmitter(""),
+            submission.CodeFlareJobBackend(""),
         )
     ).post(
         "/api/v1/projects/team-alpha/training-jobs",
@@ -202,11 +202,11 @@ def test_reads_dispatch_without_invoking_submitter(monkeypatch: pytest.MonkeyPat
     submitter = RecordingSubmitter()
     calls = []
 
-    def list_jobs(request: Any, project: str, *args: Any) -> dict[str, Any]:
+    def list_jobs(self: Any, request: Any, project: str, *args: Any) -> dict[str, Any]:
         calls.append((request.state.caller_identity.username, project))
         return {"items": [], "total_count": 0}
 
-    monkeypatch.setattr(jobs, "list_jobs", list_jobs)
+    monkeypatch.setattr(jobs.CodeFlareJobBackend, "list_jobs", list_jobs)
     response = TestClient(create_app(FakeAuthenticator(), FakeAuthorizer(), submitter)).get(
         "/api/v1/projects/team-alpha/training-jobs",
         headers={"Authorization": "Bearer caller-token"},
@@ -289,7 +289,7 @@ def test_pvc_submission_maps_resources_and_retains_only_safe_payload(
 ) -> None:
     core = _mock_sdk(monkeypatch)
     body = _sample()
-    identifier = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")._submit_sync(
+    identifier = submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
     assert identifier == body.name
@@ -323,7 +323,7 @@ def test_multinode_pvc_requires_read_write_many(monkeypatch: pytest.MonkeyPatch)
     core = _mock_sdk(monkeypatch)
     core.pvc_access_modes["training-data"] = ["ReadWriteOnce"]
     body = _sample()
-    submitter = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")
+    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")
 
     with pytest.raises(ApiError) as raised:
         submitter._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "token")
@@ -360,7 +360,7 @@ def test_configured_image_is_embedded_in_rayjob_head_and_workers(
 ) -> None:
     image = "quay.io/example/ray:2.55.1"
     _mock_sdk(monkeypatch)
-    submission.CodeFlareJobSubmitter(image)._submit_sync(
+    submission.CodeFlareJobBackend(image)._submit_sync(
         "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
     )
     cluster = FakeRayJob.instances[0].kwargs["cluster_config"]
@@ -383,7 +383,7 @@ def test_sdk_submission_metadata_and_topology_are_readable(
         create_app(
             FakeAuthenticator(),
             authorizer,
-            submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1"),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
         )
     )
     headers = {"Authorization": "Bearer caller-token"}
@@ -457,7 +457,7 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     payload["algorithm"].pop("parameters")
     body = CreateJobRequest.model_validate(payload)
 
-    submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")._submit_sync(
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
 
@@ -488,7 +488,7 @@ def test_secret_backed_locators_use_caller_client_and_mount_references_only(
 ) -> None:
     core = _mock_sdk(monkeypatch)
     body = _sample(example)
-    submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")._submit_sync(
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
     assert [name for name, _ in core.secret_reads] == expected_reads
@@ -502,7 +502,7 @@ def test_secret_backed_locators_use_caller_client_and_mount_references_only(
 async def test_sdk_conflict_maps_to_documented_409(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_sdk(monkeypatch)
     FakeRayJob.error = ApiException(status=409, reason="Already Exists")
-    submitter = submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1")
+    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")
     with pytest.raises(ApiError) as raised:
         await submitter.submit(
             "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
@@ -565,7 +565,7 @@ def test_parallel_submissions_keep_each_callers_sdk_client(
 
     monkeypatch.setattr(submission, "_storage_plan", storage_plan)
     monkeypatch.setattr(FakeRayJob, "submit", controlled_submit)
-    submitters = [submission.CodeFlareJobSubmitter("quay.io/example/ray:2.55.1") for _ in range(2)]
+    submitters = [submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1") for _ in range(2)]
 
     def submit(index: int, name: str, token: str) -> str:
         body = _sample()

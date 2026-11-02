@@ -42,6 +42,7 @@ def caller_client(request: Request) -> Iterator[client.ApiClient]:
     )
     configuration.verify_ssl = True
     configuration.api_key["authorization"] = request.headers["authorization"]
+    configuration.api_key_prefix.pop("authorization", None)
     configuration.retries = 0
     try:
         with client.ApiClient(configuration) as api:

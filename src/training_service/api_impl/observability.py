@@ -1,18 +1,14 @@
-"""Ray driver log snapshots and transient SSE streams."""
-
-from typing import ClassVar
+"""Driver log snapshots and transient SSE streams."""
 
 from fastapi import Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from training_service.ray_logs import driver_logs
+from training_service.logs import driver_logs
 from training_service_api.apis.observability_api_base import BaseObservabilityApi
 from training_service_api.models.extra_models import TokenModel
 
 
-class RayObservabilityApi(BaseObservabilityApi):
-    implemented_operations: ClassVar[frozenset[str]] = frozenset({"stream_job_logs"})
-
+class ObservabilityApi(BaseObservabilityApi):
     async def stream_job_logs(
         self,
         project: str,

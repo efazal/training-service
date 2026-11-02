@@ -15,7 +15,6 @@ from fastapi import (
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
-from training_service.api_impl.dispatch import implementation_for
 from training_service.authorization import authorize_project_request
 from training_service_api.apis.infrastructure_discovery_api_base import (
     BaseInfrastructureDiscoveryApi,
@@ -66,7 +65,7 @@ async def list_algorithms(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> ListAlgorithms200Response:
     """List available Ray training algorithms"""
-    implementation = implementation_for(BaseInfrastructureDiscoveryApi, "list_algorithms")
+    implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.list_algorithms(
         token_OpenShiftBearer=token_OpenShiftBearer,
     )
@@ -144,7 +143,7 @@ async def list_queues(
         resource="localqueues",
         verb="list",
     )
-    implementation = implementation_for(BaseInfrastructureDiscoveryApi, "list_queues")
+    implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.list_queues(
         project,
         token_OpenShiftBearer=token_OpenShiftBearer,

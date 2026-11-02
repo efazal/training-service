@@ -10,14 +10,13 @@ training-service/
 ├── src/training_service_api/          # generated, committed; do not edit
 ├── src/training_service/
 │   ├── main.py                       # generated routers, Swagger, probes
-│   ├── api_impl/                     # submission, job operations, driver logs
-│   ├── job_submission.py             # caller-scoped CodeFlare adapter
+│   ├── api_impl/                     # one handler per generated API group
 │   ├── ray_entrypoint.py             # trusted code embedded in RayJob
 │   ├── auth.py                       # TokenReview and request-scoped caller
 │   ├── authorization.py              # project SubjectAccessReview
-│   ├── kube.py                       # isolated caller-token clients
-│   ├── jobs.py                       # stateless RayJob views and deletion
-│   ├── ray_logs.py                   # authenticated Ray SDK log access
+│   ├── kubernetes_client.py          # isolated caller-token clients
+│   ├── jobs.py                       # backend interface; CodeFlare job operations
+│   ├── logs.py                       # generic log responses; hardened SDK transport
 │   ├── contract.py                   # canonical model validation and Swagger
 │   ├── contract_types.py             # scalar URI generator workaround
 │   └── errors.py                     # API error envelope
@@ -33,7 +32,8 @@ The application registers the contract's eight operations under `/api/v1`.
 Authentication and project authorization run before job operations. POST
 creates a caller-scoped CodeFlare RayJob and returns 202. Reads remain
 available from caller-authorized RayJob resources after RayCluster cleanup.
-Driver logs use the Ray SDK through a trusted, authenticated gateway.
+Driver logs use CodeFlare's log API with a hardened Ray transport through a
+trusted, authenticated gateway.
 Terminal deletion uses foreground Kubernetes garbage collection, guarded by
 ownership and resource-version checks. There is no service job database or
 elevated workload identity. See [job operations](job-operations.md).
@@ -55,6 +55,23 @@ preserves RayJob create errors that CodeFlare's vendored transport otherwise
 swallows, so the API can return the contract's 403/409/503 responses. The
 service does not create a RayJob resource or author its spec. There is no
 service-side job store.
+
+## Backend boundary
+
+`api_impl/training_jobs.py` owns all training-job routes; `observability.py`
+owns the logs route. They depend on the configured `JobsBackend` and
+`LogClient` interfaces, not Ray resource formats. `create_app(backend=...)`
+injects the job backend, including the API group/resource used for project
+authorization. A future Trainer implementation can provide that same
+interface without adding a second API handler. Trainer functionality and
+public contract changes are not implemented by this refactor.
+
+The current `CodeFlareJobBackend` contains Ray submission, resource mapping,
+ownership checks and deletion. `CodeFlareLogClient` delegates snapshot/status/
+tail operations to CodeFlare SDK while retaining bounded HTTP requests,
+verified TLS and redirect-safe streaming. `kubernetes_client.py` remains a
+shared platform helper because caller-scoped resource reads and cascading
+deletion cannot be replaced by deleting a Ray dashboard job record.
 
 The runtime Swagger copy changes only the server URL. The reviewed YAML
 remains the source of truth.

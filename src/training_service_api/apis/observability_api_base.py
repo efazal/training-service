@@ -7,6 +7,7 @@ from typing import Annotated, ClassVar
 from fastapi import Request
 from pydantic import Field, StrictBool, StrictStr
 
+from training_service.errors import ApiError
 from training_service_api.models.extra_models import TokenModel
 
 
@@ -16,6 +17,15 @@ class BaseObservabilityApi:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         BaseObservabilityApi.subclasses = BaseObservabilityApi.subclasses + (cls,)
+
+    @classmethod
+    def implementation(cls) -> "BaseObservabilityApi":
+        """Return the sole registered handler; never depend on import order."""
+        if not cls.subclasses:
+            raise ApiError(501, "not_implemented", "This operation is not implemented.")
+        if len(cls.subclasses) != 1:
+            raise RuntimeError(f"Expected one implementation for {cls.__name__}")
+        return cls.subclasses[0]()
 
     async def stream_job_logs(
         self,
@@ -61,4 +71,4 @@ class BaseObservabilityApi:
         request: Request,
     ) -> str:
         """Read or follow training job driver logs"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")

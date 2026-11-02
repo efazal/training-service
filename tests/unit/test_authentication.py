@@ -169,6 +169,37 @@ def test_token_review_status_error_is_authentication_unavailable() -> None:
         authenticator._review("accepted-token")
 
 
+@pytest.mark.parametrize(
+    "error",
+    ["invalid bearer token", "token lookup failed", "[invalid bearer token, token lookup failed]"],
+)
+def test_openshift_token_review_rejection_returns_401(error: str) -> None:
+    authenticator = KubernetesTokenAuthenticator()
+    authenticator._api = Mock()
+    authenticator._api.create_token_review.return_value = client.V1TokenReview(
+        spec=client.V1TokenReviewSpec(token="unused"),
+        status=client.V1TokenReviewStatus(authenticated=False, error=error),
+    )
+    http = TestClient(create_app(authenticator))
+    response = http.get("/api/v1/algorithms", headers={"Authorization": "Bearer invalid-token"})
+    assert response.status_code == 401
+    assert response.json()["code"] == "unauthorized"
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_token_rejection_mixed_with_backend_failure_remains_unavailable() -> None:
+    authenticator = KubernetesTokenAuthenticator()
+    authenticator._api = Mock()
+    authenticator._api.create_token_review.return_value = client.V1TokenReview(
+        spec=client.V1TokenReviewSpec(token="unused"),
+        status=client.V1TokenReviewStatus(
+            authenticated=False, error="[invalid bearer token, authentication webhook timed out]"
+        ),
+    )
+    with pytest.raises(AuthenticationUnavailable):
+        authenticator._review("invalid-token")
+
+
 def test_token_review_client_initializes_once_for_concurrent_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

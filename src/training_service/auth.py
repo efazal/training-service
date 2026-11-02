@@ -20,6 +20,7 @@ from training_service_api.models.extra_models import TokenModel
 
 _LOG = logging.getLogger(__name__)
 _TOKEN_REVIEW_TIMEOUT_SECONDS = 10
+_TOKEN_REJECTION_ERRORS = frozenset({"invalid bearer token", "token lookup failed"})
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,15 @@ class KubernetesTokenAuthenticator:
             _request_timeout=_TOKEN_REVIEW_TIMEOUT_SECONDS,
         )
         status = result.status
-        if status is None or status.error:
+        if status is None:
             raise AuthenticationUnavailable
+        if status.error:
+            # OpenShift returns explicit token rejections here, including an
+            # aggregate from its bearer authenticators. Unknown/mixed errors
+            # still mean the review could not complete and must remain 503.
+            errors = {part.strip() for part in status.error.strip("[]").split(",")}
+            if status.authenticated or not errors <= _TOKEN_REJECTION_ERRORS:
+                raise AuthenticationUnavailable
         if not status.authenticated or status.user is None:
             return None
 

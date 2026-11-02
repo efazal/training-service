@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from kubernetes.client.exceptions import ApiException
 
-from training_service import jobs, kube, ray_logs
+from training_service import jobs, kubernetes_client, logs
 from training_service.auth import CallerIdentity
 from training_service.errors import ApiError
 from training_service.main import create_app
@@ -86,11 +86,11 @@ def backend(monkeypatch):
 
     custom.get_namespaced_custom_object.side_effect = read
     custom.list_namespaced_custom_object.return_value = {"items": [record]}
-    monkeypatch.setattr(kube.client, "CustomObjectsApi", Mock(return_value=custom))
-    monkeypatch.setattr(kube.client, "CoreV1Api", Mock(return_value=core))
+    monkeypatch.setattr(kubernetes_client.client, "CustomObjectsApi", Mock(return_value=custom))
+    monkeypatch.setattr(kubernetes_client.client, "CoreV1Api", Mock(return_value=core))
     sdk.get_job_logs.return_value = "first\nsecond\nthird\n"
     factory = Mock(return_value=sdk)
-    monkeypatch.setattr(ray_logs, "BoundedJobClient", factory)
+    monkeypatch.setattr(jobs, "CodeFlareLogClient", factory)
     monkeypatch.setenv("TRAINING_SERVICE_RAY_GATEWAY_URL", "https://ray.example.com")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     monkeypatch.delenv("RAY_API_SERVER_ADDRESS", raising=False)
@@ -356,14 +356,14 @@ def test_denied_project_cannot_reach_backends(backend, method, suffix):
 
 def test_caller_clients_do_not_share_credentials(backend, monkeypatch):
     http = backend[0]
-    original = kube.client.ApiClient
+    original = kubernetes_client.client.ApiClient
     configurations = []
 
     def capture(configuration):
         configurations.append(configuration)
         return original(configuration)
 
-    monkeypatch.setattr(kube.client, "ApiClient", capture)
+    monkeypatch.setattr(kubernetes_client.client, "ApiClient", capture)
 
     def read(token):
         return http.get(BASE + "/example", headers={"Authorization": f"Bearer {token}"}).status_code
@@ -460,7 +460,7 @@ def test_real_sdk_transport_bounds_timeouts_and_sanitizes_errors(monkeypatch, st
     response = Mock(status_code=status, text="sensitive-gateway-response")
     transport = Mock(return_value=response)
     monkeypatch.setattr(dashboard_sdk.requests, "request", transport)
-    sdk = object.__new__(ray_logs.BoundedJobClient)
+    sdk = object.__new__(logs.BoundedJobClient)
     sdk._address = "https://ray.example.com/ray/team-a/example-cluster"
     sdk._cookies = None
     sdk._headers = HEADERS
@@ -475,3 +475,40 @@ def test_real_sdk_transport_bounds_timeouts_and_sanitizes_errors(monkeypatch, st
     assert transport.call_args.kwargs["timeout"] == (5, 15)
     assert transport.call_args.kwargs["allow_redirects"] is False
     assert transport.call_args.kwargs["verify"] is True
+
+
+def test_handlers_use_injected_backend_without_ray_resource_assumptions():
+    backend = Mock(spec=jobs.JobsBackend)
+    backend.backend_name = "ray"  # The current public contract still supports Ray only.
+    backend.api_group = "trainer.kubeflow.org"
+    backend.resource = "trainjobs"
+    backend.list_jobs.return_value = {"items": [], "total_count": 0}
+    backend.get_job.return_value = jobs.detail(job(), "team-a")
+    backend.delete_job.return_value = None
+    log_client = Mock()
+    log_client.get_job_logs.return_value = "backend-neutral log\n"
+    backend.log_client.return_value = (log_client, "opaque-job-id")
+    authorizer = Authorizer()
+    http = TestClient(create_app(Authenticator(), authorizer, backend=backend))
+
+    assert http.get(BASE, headers=HEADERS).json() == {"items": [], "total_count": 0}
+    assert http.get(BASE + "/example", headers=HEADERS).status_code == 200
+    assert http.delete(BASE + "/example", headers=HEADERS).status_code == 204
+    response = http.get(BASE + "/example/logs", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.text == "backend-neutral log\n"
+    backend.list_jobs.assert_called_once()
+    backend.get_job.assert_called_once()
+    backend.delete_job.assert_called_once()
+    backend.log_client.assert_called_once()
+    log_client.get_job_logs.assert_called_once_with("opaque-job-id")
+    assert [permission.verb for _, permission in authorizer.calls] == [
+        "list",
+        "get",
+        "delete",
+        "get",
+    ]
+    assert all(
+        permission.group == "trainer.kubeflow.org" and permission.resource == "trainjobs"
+        for _, permission in authorizer.calls
+    )

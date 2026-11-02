@@ -1,27 +1,23 @@
-"""Handwritten Training Jobs implementation; only submission is in this ticket."""
+"""Training Jobs API handler: submission, reads, and deletion."""
 
 from __future__ import annotations
 
-from typing import Any, NoReturn
-
-from fastapi import Request
+import anyio
+from fastapi import Request, Response
 
 from training_service.auth import CallerIdentity
 from training_service.errors import ApiError
-from training_service.job_submission import JobSubmitter
+from training_service.jobs import JobsBackend, JobSubmitter
 from training_service_api.apis.training_jobs_api_base import BaseTrainingJobsApi
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.extra_models import TokenModel
+from training_service_api.models.job_status import JobStatus
+from training_service_api.models.list_training_jobs200_response import ListTrainingJobs200Response
+from training_service_api.models.training_job import TrainingJob
 from training_service_api.models.training_job_submission import TrainingJobSubmission
 
 
-def _not_implemented() -> NoReturn:
-    raise ApiError(501, "not_implemented", "This operation is not implemented.")
-
-
-class SubmissionTrainingJobsApi(BaseTrainingJobsApi):
-    """Register one generated handler while other operations remain fail-closed."""
-
+class TrainingJobsApi(BaseTrainingJobsApi):
     async def create_training_job(
         self,
         project: str,
@@ -41,19 +37,52 @@ class SubmissionTrainingJobsApi(BaseTrainingJobsApi):
             "name": create_job_request.name,
             "project": project,
             "status": "SUBMITTED",
-            "selected_backend": "ray",
+            "selected_backend": request.app.state.job_backend.backend_name,
         }
         if create_job_request.queue_name is not None:
             receipt["queue_name"] = create_job_request.queue_name
-        return TrainingJobSubmission(
-            **receipt,
+        return TrainingJobSubmission(**receipt)
+
+    async def list_training_jobs(
+        self,
+        project: str,
+        status: JobStatus | None,
+        queue_name: str | None,
+        limit: int | None,
+        page_token: str | None,
+        token_OpenShiftBearer: TokenModel,
+        request: Request,
+    ) -> ListTrainingJobs200Response:
+        backend: JobsBackend = request.app.state.job_backend
+        result = await anyio.to_thread.run_sync(
+            backend.list_jobs,
+            request,
+            project,
+            status.value if status else None,
+            queue_name,
+            limit,
+            page_token,
         )
+        return ListTrainingJobs200Response.model_validate(result)
 
-    async def list_training_jobs(self, *args: Any, **kwargs: Any) -> NoReturn:
-        _not_implemented()
+    async def get_training_job(
+        self,
+        project: str,
+        job_id: str,
+        token_OpenShiftBearer: TokenModel,
+        request: Request,
+    ) -> TrainingJob:
+        backend: JobsBackend = request.app.state.job_backend
+        result = await anyio.to_thread.run_sync(backend.get_job, request, project, job_id)
+        return TrainingJob.model_validate(result)
 
-    async def get_training_job(self, *args: Any, **kwargs: Any) -> NoReturn:
-        _not_implemented()
-
-    async def delete_training_job(self, *args: Any, **kwargs: Any) -> NoReturn:
-        _not_implemented()
+    async def delete_training_job(
+        self,
+        project: str,
+        job_id: str,
+        token_OpenShiftBearer: TokenModel,
+        request: Request,
+    ) -> Response:
+        backend: JobsBackend = request.app.state.job_backend
+        await anyio.to_thread.run_sync(backend.delete_job, request, project, job_id)
+        return Response(status_code=204)

@@ -5,6 +5,7 @@
 from typing import ClassVar, Dict, List, Tuple
 from {{modelPackage}}.extra_models import TokenModel
 from fastapi import Request
+from training_service.errors import ApiError
 
 {{#imports}}
 {{import}}
@@ -17,6 +18,15 @@ class Base{{classname}}:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         Base{{classname}}.subclasses = Base{{classname}}.subclasses + (cls,)
+    @classmethod
+    def implementation(cls) -> "Base{{classname}}":
+        """Return the sole registered handler; never depend on import order."""
+        if not cls.subclasses:
+            raise ApiError(501, "not_implemented", "This operation is not implemented.")
+        if len(cls.subclasses) != 1:
+            raise RuntimeError(f"Expected one implementation for {cls.__name__}")
+        return cls.subclasses[0]()
+
 {{#operations}}
 {{#operation}}
     async def {{operationId}}(
@@ -37,7 +47,7 @@ class Base{{classname}}:
         {{/vendorExtensions.x-submission-context}}
     ) -> {{returnType}}{{^returnType}}None{{/returnType}}:
         """{{#summary}}{{.}}{{/summary}}{{^summary}}Implement this API operation.{{/summary}}"""
-        ...
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")
 {{^-last}}
 
 

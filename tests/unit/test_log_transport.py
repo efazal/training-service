@@ -2,12 +2,14 @@
 
 import asyncio
 import ssl
+from unittest.mock import Mock
 
 import pytest
 from aiohttp import web
 
+from training_service import logs
 from training_service.errors import ApiError
-from training_service.ray_logs import BoundedJobClient
+from training_service.logs import BoundedJobClient, CodeFlareLogClient
 
 
 @pytest.mark.parametrize("redirect", [False, True])
@@ -52,3 +54,23 @@ def test_log_websocket_streams_normally_but_never_follows_redirects(redirect):
             await runner.cleanup()
 
     asyncio.run(exercise())
+
+
+def test_codeflare_log_methods_delegate_to_hardened_transport(monkeypatch):
+    transport = Mock()
+    factory = Mock(return_value=transport)
+    monkeypatch.setattr(logs, "BoundedJobClient", factory)
+    sdk = CodeFlareLogClient(
+        "https://ray.example.com", headers={"Authorization": "Bearer dummy-unit-test-token"}
+    )
+    assert sdk.get_job_logs("example") is transport.get_job_logs.return_value
+    assert sdk.get_job_status("example") is transport.get_job_status.return_value
+    assert sdk.tail_job_logs("example") is transport.tail_job_logs.return_value
+    factory.assert_called_once_with(
+        "https://ray.example.com",
+        headers={"Authorization": "Bearer dummy-unit-test-token"},
+        verify=True,
+    )
+    transport.get_job_logs.assert_called_once_with(job_id="example")
+    transport.get_job_status.assert_called_once_with(job_id="example")
+    transport.tail_job_logs.assert_called_once_with(job_id="example")

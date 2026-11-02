@@ -19,7 +19,6 @@ from fastapi import (
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
-from training_service.api_impl.dispatch import implementation_for
 from training_service.authorization import authorize_project_request
 from training_service_api.apis.training_jobs_api_base import BaseTrainingJobsApi
 from training_service_api.models.create_job_request import CreateJobRequest
@@ -156,11 +155,11 @@ async def list_training_jobs(
     await authorize_project_request(
         request,
         project,
-        group="ray.io",
-        resource="rayjobs",
+        group=request.app.state.job_backend.api_group,
+        resource=request.app.state.job_backend.resource,
         verb="list",
     )
-    implementation = implementation_for(BaseTrainingJobsApi, "list_training_jobs")
+    implementation = BaseTrainingJobsApi.implementation()
     return await implementation.list_training_jobs(
         project,
         status,
@@ -294,11 +293,11 @@ async def create_training_job(
     await authorize_project_request(
         request,
         project,
-        group="ray.io",
-        resource="rayjobs",
+        group=request.app.state.job_backend.api_group,
+        resource=request.app.state.job_backend.resource,
         verb="create",
     )
-    implementation = implementation_for(BaseTrainingJobsApi, "create_training_job")
+    implementation = BaseTrainingJobsApi.implementation()
     result = await implementation.create_training_job(
         project, create_job_request, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
@@ -315,6 +314,10 @@ async def create_training_job(
                 "Accepted submission configuration, current RayJob status, and all "
                 "available job details"
             ),
+        },
+        400: {
+            "model": ErrorResponse,
+            "description": "Malformed JSON or invalid query/path parameter syntax",
         },
         401: {
             "model": ErrorResponse,
@@ -395,12 +398,12 @@ async def get_training_job(
     await authorize_project_request(
         request,
         project,
-        group="ray.io",
-        resource="rayjobs",
+        group=request.app.state.job_backend.api_group,
+        resource=request.app.state.job_backend.resource,
         verb="get",
         resource_name=job_id,
     )
-    implementation = implementation_for(BaseTrainingJobsApi, "get_training_job")
+    implementation = BaseTrainingJobsApi.implementation()
     return await implementation.get_training_job(
         project, job_id, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
@@ -505,12 +508,12 @@ async def delete_training_job(
     await authorize_project_request(
         request,
         project,
-        group="ray.io",
-        resource="rayjobs",
+        group=request.app.state.job_backend.api_group,
+        resource=request.app.state.job_backend.resource,
         verb="delete",
         resource_name=job_id,
     )
-    implementation = implementation_for(BaseTrainingJobsApi, "delete_training_job")
+    implementation = BaseTrainingJobsApi.implementation()
     return await implementation.delete_training_job(
         project, job_id, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
