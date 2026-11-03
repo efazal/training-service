@@ -4,6 +4,7 @@ import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 from fastapi import Request
 from kubernetes import client
@@ -31,10 +32,29 @@ def caller_configuration(authorization: str) -> client.Configuration:
     """Build isolated workload configuration without loading service-account tokens."""
     # Do not use the in-cluster loader: its credential refresh hook could replace
     # a caller's token with the pod's service-account token.
+    host = os.getenv("TRAINING_SERVICE_KUBERNETES_API_URL", "https://kubernetes.default.svc")
+    try:
+        parsed = urlsplit(host)
+        valid = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.port != 0
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ApiError(
+            503,
+            "backend_unavailable",
+            "Configure TRAINING_SERVICE_KUBERNETES_API_URL as an HTTPS URL "
+            "without credentials, query parameters, or a fragment.",
+        )
     configuration = client.Configuration()
-    configuration.host = os.getenv(
-        "TRAINING_SERVICE_KUBERNETES_API_URL", "https://kubernetes.default.svc"
-    )
+    configuration.host = host
     configuration.ssl_ca_cert = os.getenv(
         "TRAINING_SERVICE_KUBERNETES_CA_FILE",
         "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
@@ -63,6 +83,7 @@ def caller_client(request: Request) -> Iterator[client.ApiClient]:
             status,
             codes.get(status, "backend_unavailable"),
             "The requested Kubernetes operation could not be completed.",
+            headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
         ) from None
     except (HTTPError, OSError):
         raise ApiError(

@@ -37,7 +37,7 @@ from training_service.kubernetes_client import (
     caller_configuration,
     validate_names,
 )
-from training_service.logs import CodeFlareLogClient, LogClient, logs_unavailable
+from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_backend import JobBackend
 from training_service_api.models.resource_spec import ResourceSpec
@@ -533,7 +533,16 @@ class CodeFlareJobBackend:
         validate_names(project, name)
         with caller_client(request) as api:
             job = read_job(api, project, name)
-            submission_id = job.get("status", {}).get("jobId")
+            state = job.get("status", {})
+            submission_id = state.get("jobId")
+            # KubeRay allocates IDs before creating the cluster or submitting
+            # to Ray. Do not report its not-yet-created cluster as gone.
+            if state.get("jobStatus") not in _STATUSES:
+                if job_status(job) == "PENDING":
+                    raise ApiError(
+                        409, "logs_not_ready", "Driver logs are not available yet; retry later."
+                    )
+                raise logs_not_found()
             try:
                 cluster = owned_cluster(api, project, job)
             except ApiException as error:
@@ -551,7 +560,11 @@ class CodeFlareJobBackend:
                     ) from None
                 raise
         if not cluster or not submission_id:
-            raise ApiError(409, "logs_not_ready", "Driver logs are not available yet; retry later.")
+            if job_status(job) == "PENDING":
+                raise ApiError(
+                    409, "logs_not_ready", "Driver logs are not available yet; retry later."
+                )
+            raise logs_not_found()
         if (
             not isinstance(submission_id, str)
             or re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", submission_id) is None

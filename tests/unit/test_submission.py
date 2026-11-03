@@ -719,6 +719,47 @@ def test_submission_and_operations_share_caller_configuration(monkeypatch, overr
     assert client.Configuration._default is default
 
 
+@pytest.mark.parametrize("operation", ["submission", "read"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "http://cluster.example:6443",
+        "",
+        "cluster.example:6443",
+        "https://",
+        "https://user:secret@cluster.example",
+        "https://cluster.example?token=secret",
+        "https://cluster.example/#secret",
+        "https://cluster.example:invalid",
+    ],
+)
+def test_invalid_kubernetes_url_never_creates_caller_client(monkeypatch, operation, host):
+    def forbidden_client(configuration):
+        pytest.fail("Invalid Kubernetes URLs must be rejected before creating a client.")
+
+    monkeypatch.setenv("TRAINING_SERVICE_KUBERNETES_API_URL", host)
+    monkeypatch.setattr(submission, "_CallerApiClient", forbidden_client)
+    monkeypatch.setattr(kubernetes_client.client, "ApiClient", forbidden_client)
+    with pytest.raises(ApiError) as raised:
+        if operation == "submission":
+            submission._caller_api_client("caller-token")
+        else:
+            request = Request(
+                {
+                    "type": "http",
+                    "headers": [(b"authorization", b"Bearer caller-token")],
+                    "state": {"caller_identity": CallerIdentity("alice", "uid-a", ())},
+                }
+            )
+            with kubernetes_client.caller_client(request):
+                pytest.fail("Invalid Kubernetes URL was accepted.")
+    assert raised.value.status_code == 503
+    assert raised.value.code == "backend_unavailable"
+    assert "HTTPS" in raised.value.message
+    assert "caller-token" not in raised.value.message
+    assert "secret" not in raised.value.message
+
+
 @pytest.mark.parametrize(
     "backend_status,api_status",
     [(401, 401), (403, 403), (404, 404), (409, 409), (422, 422), (500, 503)],

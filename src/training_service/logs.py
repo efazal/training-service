@@ -37,6 +37,21 @@ def logs_unavailable() -> ApiError:
     return ApiError(503, "logs_unavailable", "The authenticated job log backend is unavailable.")
 
 
+def logs_not_found() -> ApiError:
+    return ApiError(404, "not_found", "Training submission not found; driver logs are unavailable.")
+
+
+def _check_log_auth(response: Any, **kwargs: Any) -> None:
+    """Preserve HTTP auth status before Ray normalizes it to AuthenticationError."""
+    if response.status_code in {401, 403}:
+        raise ApiError(
+            response.status_code,
+            "unauthorized" if response.status_code == 401 else "forbidden",
+            "Ray gateway access was denied.",
+            headers={"WWW-Authenticate": "Bearer"} if response.status_code == 401 else None,
+        )
+
+
 async def _reject_log_redirect(
     session: aiohttp.ClientSession, context: Any, parameters: aiohttp.TraceRequestRedirectParams
 ) -> None:
@@ -51,22 +66,27 @@ class BoundedJobClient(JobSubmissionClient):
     def _do_request(self, method: str, endpoint: str, **kwargs: Any) -> Any:
         try:
             response = super()._do_request(
-                method, endpoint, timeout=(5, 15), allow_redirects=False, **kwargs
+                method,
+                endpoint,
+                timeout=(5, 15),
+                allow_redirects=False,
+                hooks={"response": _check_log_auth},
+                **kwargs,
             )
+        except ApiError:
+            raise
         except AuthenticationError:
             raise ApiError(403, "forbidden", "Ray gateway access was denied.") from None
         except Exception:
             # SDK errors may contain raw response bodies, URLs or credentials.
             raise logs_unavailable() from None
-        if response.status_code in {401, 403}:
-            raise ApiError(response.status_code, "forbidden", "Ray gateway access was denied.")
         # A missing version or gateway endpoint is not a job readiness failure.
         if (
             response.status_code == 404
             and method == "GET"
             and re.fullmatch(r"/api/jobs/[^/]+(?:/logs)?", endpoint)
         ):
-            raise ApiError(409, "logs_not_ready", "Driver logs are not available yet; retry later.")
+            raise logs_not_found()
         if response.status_code >= 300:
             raise logs_unavailable()
         return response

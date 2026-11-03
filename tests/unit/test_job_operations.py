@@ -239,6 +239,74 @@ def test_backend_errors_are_sanitized(backend, status):
     assert "sensitive-backend-body" not in response.text
 
 
+@pytest.mark.parametrize(
+    "method, suffix",
+    [("GET", ""), ("GET", "/example"), ("DELETE", "/example"), ("GET", "/example/logs")],
+)
+def test_backend_401_includes_bearer_challenge(backend, method, suffix):
+    http, custom, *_ = backend
+    custom.get_namespaced_custom_object.side_effect = ApiException(status=401)
+    custom.list_namespaced_custom_object.side_effect = ApiException(status=401)
+    response = http.request(method, BASE + suffix, headers=HEADERS)
+    assert response.status_code == 401
+    assert response.headers.get("WWW-Authenticate") == "Bearer"
+    assert response.json()["code"] == "unauthorized"
+
+
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.parametrize("status", ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "STOPPED"])
+def test_missing_ray_submission_is_not_retryable(backend, monkeypatch, follow, status):
+    from ray.dashboard.modules import dashboard_sdk
+
+    http, _, _, _, record, *_ = backend
+    record["status"]["jobStatus"] = status
+    sdk = object.__new__(logs.BoundedJobClient)
+    sdk._address = "https://ray.example.com"
+    sdk._cookies = None
+    sdk._headers = HEADERS
+    sdk._verify = True
+    monkeypatch.setattr(jobs, "CodeFlareLogClient", Mock(return_value=sdk))
+    monkeypatch.setattr(
+        dashboard_sdk.requests,
+        "request",
+        Mock(return_value=Mock(status_code=404, text="sensitive-backend-body")),
+    )
+    response = http.get(BASE + "/example/logs", headers=HEADERS, params={"follow": follow})
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    assert "retry later" not in response.json()["message"]
+    assert "sensitive-backend-body" not in response.text
+    assert "text/event-stream" not in response.headers.get("content-type", "")
+
+
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.parametrize("cluster_exists", [False, True])
+def test_provisioning_job_id_is_not_proof_of_ray_submission(backend, follow, cluster_exists):
+    http, custom, _, _, record, _, _, factory = backend
+    # KubeRay allocates jobId and rayClusterName before submitting to Ray.
+    record["status"]["jobStatus"] = ""
+    record["status"]["jobDeploymentStatus"] = "Initializing"
+    if not cluster_exists:
+        custom.get_namespaced_custom_object.side_effect = [record, ApiException(status=404)]
+    response = http.get(BASE + "/example/logs", headers=HEADERS, params={"follow": follow})
+    assert response.status_code == 409
+    assert response.json()["code"] == "logs_not_ready"
+    assert custom.get_namespaced_custom_object.call_count == 1
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("field", ["jobId", "rayClusterName"])
+@pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "STOPPED"])
+def test_terminal_job_without_submission_metadata_is_not_retryable(backend, field, status):
+    http, _, _, _, record, _, _, factory = backend
+    record["status"]["jobStatus"] = status
+    record["status"].pop(field)
+    response = http.get(BASE + "/example/logs", headers=HEADERS)
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    factory.assert_not_called()
+
+
 def test_delete_race_returns_conflict_without_retry(backend):
     http, custom, _, _, record, *_ = backend
     record["status"]["jobStatus"] = "SUCCEEDED"
@@ -299,6 +367,7 @@ def test_logs_fail_before_streaming_when_backend_unavailable(backend, case, expe
     http, custom, _, sdk, record, cluster, *_ = backend
     if case == "pending":
         record["status"].pop("jobId")
+        record["status"]["jobStatus"] = "PENDING"
     elif case == "gone":
         custom.get_namespaced_custom_object.side_effect = [record, ApiException(status=404)]
     elif case == "unowned":
@@ -452,13 +521,18 @@ def test_invalid_log_queries_return_contract_400(backend, query):
 
 
 @pytest.mark.parametrize(
-    "status, expected", [(200, 200), (302, 503), (401, 403), (403, 403), (404, 409), (500, 503)]
+    "status, expected", [(200, 200), (302, 503), (401, 401), (403, 403), (404, 404), (500, 503)]
 )
 def test_real_sdk_transport_bounds_timeouts_and_sanitizes_errors(monkeypatch, status, expected):
     from ray.dashboard.modules import dashboard_sdk
 
     response = Mock(status_code=status, text="sensitive-gateway-response")
-    transport = Mock(return_value=response)
+
+    def request(*args, **kwargs):
+        kwargs["hooks"]["response"](response)
+        return response
+
+    transport = Mock(side_effect=request)
     monkeypatch.setattr(dashboard_sdk.requests, "request", transport)
     sdk = object.__new__(logs.BoundedJobClient)
     sdk._address = "https://ray.example.com/ray/team-a/example-cluster"

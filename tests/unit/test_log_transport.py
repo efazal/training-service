@@ -40,12 +40,12 @@ def test_missing_version_endpoint_is_not_reported_as_logs_not_ready(monkeypatch)
     [
         ("/api/version", 503, "logs_unavailable"),
         ("/api/jobs/", 503, "logs_unavailable"),
-        ("/api/jobs/raysubmit_123", 409, "logs_not_ready"),
-        ("/api/jobs/raysubmit_123/logs", 409, "logs_not_ready"),
+        ("/api/jobs/raysubmit_123", 404, "not_found"),
+        ("/api/jobs/raysubmit_123/logs", 404, "not_found"),
         ("/api/jobs/raysubmit_123/unknown", 503, "logs_unavailable"),
     ],
 )
-def test_log_http_404_only_reports_readiness_for_job_reads(monkeypatch, endpoint, status, code):
+def test_log_http_404_distinguishes_missing_job_from_gateway(monkeypatch, endpoint, status, code):
     from ray.dashboard.modules import dashboard_sdk
 
     transport = Mock(return_value=Mock(status_code=404))
@@ -61,6 +61,36 @@ def test_log_http_404_only_reports_readiness_for_job_reads(monkeypatch, endpoint
 
     assert raised.value.status_code == status
     assert raised.value.code == code
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_real_gateway_auth_status_and_challenge_are_preserved(status):
+    async def exercise():
+        async def endpoint(request):
+            return web.Response(status=status, text="sensitive-auth-response")
+
+        application = web.Application()
+        application.router.add_get("/api/jobs/example/logs", endpoint)
+        runner = web.AppRunner(application)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, "127.0.0.1", 0).start()
+            sdk = object.__new__(BoundedJobClient)
+            sdk._address = f"http://127.0.0.1:{runner.addresses[0][1]}"
+            sdk._cookies = None
+            sdk._headers = {"Authorization": "Bearer dummy-unit-test-token"}
+            sdk._verify = True
+            with pytest.raises(ApiError) as raised:
+                await asyncio.to_thread(sdk._do_request, "GET", "/api/jobs/example/logs")
+            assert raised.value.status_code == status
+            assert raised.value.code == ("unauthorized" if status == 401 else "forbidden")
+            assert raised.value.headers == ({"WWW-Authenticate": "Bearer"} if status == 401 else {})
+            assert "sensitive-auth-response" not in raised.value.message
+            assert "dummy-unit-test-token" not in raised.value.message
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("redirect", [False, True])

@@ -49,6 +49,13 @@ sanitized SSE `error` event. A stream lasts at most five minutes; reconnecting
 revalidates authentication and authorization. Disconnection closes the SDK
 iterator. Logs are not persisted or aggregated across workers.
 
+Before Ray submission, logs return `409 logs_not_ready`; KubeRay may already
+have allocated a job ID at this point. If Ray reports that the submission is
+absent, logs return `404 not_found`, not an instruction to keep retrying.
+A removed RayCluster returns `410 ray_cluster_gone`. Gateway/version endpoint
+failures remain `503 logs_unavailable`. These errors are returned as JSON before
+opening an SSE stream.
+
 The administrator must configure a trusted RHOAI HTTPS gateway serving
 authenticated Ray endpoints at `/ray/{project}/{rayClusterName}`. Use the
 chart's existing `env` values, for example:
@@ -96,9 +103,17 @@ privileges are introduced.
 
 ## Errors and verification
 
+Submission and job operations share caller-scoped Kubernetes configuration.
+`TRAINING_SERVICE_KUBERNETES_API_URL` must be a valid HTTPS URL without embedded
+credentials, query parameters, or fragments. Invalid configuration fails closed
+with `503 backend_unavailable` before a workload client is created. Configure
+`TRAINING_SERVICE_KUBERNETES_CA_FILE` for a mounted private CA; TLS verification
+is never disabled. Backend-originated `401` responses include
+`WWW-Authenticate: Bearer`, just like authentication failures.
+
 - 400: malformed path, query, or continuation token.
 - 401/403: authentication or caller permission denied.
-- 404: requested job/project absent.
+- 404: requested job/project or Ray submission absent.
 - 409: unsafe deletion or driver logs not ready.
 - 410: driver logs gone with the managed RayCluster.
 - 503: authentication, authorization, Kubernetes, or Ray backend unavailable.
