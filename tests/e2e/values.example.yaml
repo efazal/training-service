@@ -1,0 +1,21 @@
+# Copy outside the repo. Supply your tested image, gateway and public CA.
+# Never put tokens, passwords or Secret values here.
+imagePullSecrets: [] # Reference an existing pull Secret for private Quay repos.
+env:
+  - name: TRAINING_RAY_IMAGE
+    value: quay.io/YOUR_ORG/ray-traininghub@sha256:REPLACE_WITH_TESTED_DIGEST
+  - name: TRAINING_SERVICE_RAY_GATEWAY_URL
+    value: https://YOUR_AUTHENTICATED_RAY_GATEWAY
+  - name: TRAINING_SERVICE_RAY_CA_FILE
+    value: /var/run/training-service/ray-ca/ca.crt
+volumes:
+  - name: ray-gateway-ca
+    configMap:
+      name: training-service-ray-ca
+volumeMounts:
+  - name: ray-gateway-ca
+    mountPath: /var/run/training-service/ray-ca
+    readOnly: true
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {cpu: "1", memory: 1Gi}

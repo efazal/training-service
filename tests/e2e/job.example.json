@@ -1,0 +1,23 @@
+{
+  "name": "overridden-by-e2e",
+  "backend": "ray",
+  "model": {"uri": "pvc://training-inputs/models/small-model/"},
+  "dataset": {"uri": "pvc://training-inputs/datasets/tiny-alpaca.jsonl"},
+  "algorithm": {
+    "name": "lora_sft",
+    "parameters": {
+      "learning_rate": 0.0001,
+      "num_epochs": 1,
+      "effective_batch_size": 2,
+      "max_seq_len": 128
+    }
+  },
+  "resources": {
+    "num_nodes": 1,
+    "gpus_per_node": 1,
+    "gpu_type": "nvidia.com/gpu",
+    "cpus_per_node": "8",
+    "memory_per_node": "32Gi"
+  },
+  "output": {"destination_uri": "pvc://training-output/e2e/"}
+}

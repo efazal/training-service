@@ -49,6 +49,10 @@ make run
 
 Open http://localhost:8080/docs. Probes are at `/healthz` and `/readyz`.
 
+See [live E2E tests](tests/e2e/README.md) for `make test-e2e` against an existing
+service, or `make test-e2e-deploy` to build with Podman, push to Quay, deploy the
+Helm chart and test in one command. Live tests are excluded from unit-test/CI defaults.
+
 Generated code lives in the committed `src/training_service_api/` package.
 Its README and every Python file identify it as generated and not to be edited
 directly. Edit the contract or templates, run `make generate-server`, and

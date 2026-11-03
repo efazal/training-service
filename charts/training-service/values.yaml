@@ -31,6 +31,10 @@ authentication:
 env: []
 envFrom: []
 
+# For example, mount a ConfigMap containing the trusted Ray gateway CA.
+volumes: []
+volumeMounts: []
+
 podSecurityContext:
   runAsNonRoot: true
   seccompProfile:

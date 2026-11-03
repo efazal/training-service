@@ -1,0 +1,31 @@
+# One-time prepared fixture; replace image/PVC. Runner does not create it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-output-verifier
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: verifier
+      image: registry.access.redhat.com/ubi9/python-312:latest # Pin your approved digest.
+      command: ["python", "-c", "import time; time.sleep(86400)"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {cpu: 100m, memory: 128Mi}
+      volumeMounts:
+        - name: output
+          mountPath: /outputs
+          readOnly: true
+  volumes:
+    - name: output
+      persistentVolumeClaim:
+        claimName: training-output
+        readOnly: true

@@ -10,6 +10,7 @@ dist/
 build/
 *.egg-info/
 .env
+artifacts/e2e/
 
 # OpenAPI Generator bookkeeping (API source under src/ is committed)
 /.openapi-generator/

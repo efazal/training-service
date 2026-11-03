@@ -96,6 +96,7 @@ follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
+pythonpath = ["."]
 addopts = "-ra -q"
 
 [tool.coverage.run]

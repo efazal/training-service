@@ -16,8 +16,9 @@ HELM_CHART ?= charts/training-service
 HELM_OUTPUT_DIR ?= dist
 CHART_VERSION ?= 0.1.0
 APP_VERSION ?= $(CHART_VERSION)
+E2E_ARGS ?=
 
-.PHONY: install test lint format format-check typecheck check run generate-server \
+.PHONY: install test test-e2e test-e2e-deploy lint format format-check typecheck check run generate-server \
 	image-build image-push image-smoke helm-check helm-lint helm-template helm-package
 
 install: generate-server
@@ -25,6 +26,13 @@ install: generate-server
 
 test:
 	$(UV) run pytest
+
+# Existing deployment, or Podman -> Quay -> Helm -> live HTTP tests.
+test-e2e:
+	$(UV) run --locked pytest tests/e2e $(E2E_ARGS)
+
+test-e2e-deploy:
+	$(UV) run --locked python -m tests.e2e.deploy $(E2E_ARGS)
 
 lint:
 	$(UV) run ruff check .
