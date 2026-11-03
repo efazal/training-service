@@ -119,8 +119,30 @@ is never disabled. Backend-originated `401` responses include
 - 503: authentication, authorization, Kubernetes, or Ray backend unavailable.
 
 Errors use the contract's `code`/`message` envelope. Raw SDK exception bodies
-are not sent to callers. Run `make check`; focused unit tests mock Kubernetes
-and Ray and require no cluster.
+are not sent to callers. HTTP status codes and symbolic error codes remain
+separate: HTTP `404` uses `code: "not_found"`, not a numeric code in the body.
+Known missing resources are described using their requested name and project:
+
+```json
+{
+  "code": "not_found",
+  "message": "Training job 'my-job' was not found in project 'team-alpha'."
+}
+```
+
+Job reads, deletes (including a concurrent disappearance), and initial log
+lookups use that same message. Missing project lookups identify the project;
+submission lookups identify the missing PersistentVolumeClaim or Secret and
+its project. Duplicate submissions identify the job and project. A missing
+Ray submission is described separately from a missing job resource, with
+job/project context, rather than being mislabeled as a startup delay.
+Messages never echo backend response bodies, storage contents, or credentials.
+An inaccessible resource still returns `403`; no extra privileged lookup is
+made to infer whether it exists. Conflicts instruct clients to refresh before
+retrying, and backend authentication failures preserve the Bearer challenge.
+
+Run `make check`; focused unit tests mock Kubernetes and Ray and require no
+cluster. Live E2E coverage is maintained separately from this change.
 
 ## Submission integration
 

@@ -35,6 +35,7 @@ from training_service.kubernetes_client import (
     TIMEOUT,
     caller_client,
     caller_configuration,
+    describe_not_found,
     validate_names,
 )
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
@@ -246,9 +247,10 @@ def _storage_plan(
         name = location["name"]
         scheme = location["scheme"]
         if scheme == "pvc" and name not in pvc_paths:
-            pvc = api.read_namespaced_persistent_volume_claim(
-                name, project, _request_timeout=_K8S_TIMEOUT_SECONDS
-            )
+            with describe_not_found("PersistentVolumeClaim", name, project=project):
+                pvc = api.read_namespaced_persistent_volume_claim(
+                    name, project, _request_timeout=_K8S_TIMEOUT_SECONDS
+                )
             if num_nodes > 1 and "ReadWriteMany" not in (pvc.spec.access_modes or []):
                 raise _invalid("Multi-node training requires ReadWriteMany access for every PVC.")
             mount_path = f"/mnt/training-api/pvc/{len(pvc_paths)}"
@@ -264,9 +266,10 @@ def _storage_plan(
             )
             mounts.append(client.V1VolumeMount(name=volume_name, mount_path=mount_path))
         elif scheme in {"hf", "s3"} and name not in credential_dirs:
-            secret = api.read_namespaced_secret(
-                name, project, _request_timeout=_K8S_TIMEOUT_SECONDS
-            )
+            with describe_not_found("Secret", name, project=project):
+                secret = api.read_namespaced_secret(
+                    name, project, _request_timeout=_K8S_TIMEOUT_SECONDS
+                )
             keys = set(secret.data or {}) | set(secret.string_data or {})
             if scheme == "hf":
                 token_key = "HF_TOKEN" if "HF_TOKEN" in keys else "token"
@@ -314,11 +317,12 @@ def _storage_plan(
     return resolved, volumes, mounts
 
 
-def _map_backend_error(error: Exception) -> ApiError:
+def _map_backend_error(error: Exception, project: str, name: str) -> ApiError:
     if isinstance(error, _SdkSubmissionError):
         error = error.error
     if isinstance(error, ApiError):
         return error
+    target = f"training job '{name}' in project '{project}'"
     if isinstance(error, ApiException):
         status = error.status
         if status == 401:
@@ -330,14 +334,20 @@ def _map_backend_error(error: Exception) -> ApiError:
             )
         if status == 403:
             return ApiError(
-                403, "forbidden", "Caller cannot access the requested project resource."
+                403, "forbidden", f"Caller cannot access a resource required to submit {target}."
             )
         if status == 404:
-            return ApiError(404, "not_found", "A referenced project resource was not found.")
+            return ApiError(
+                404, "not_found", f"A resource required to submit {target} was not found."
+            )
         if status == 409:
-            return ApiError(409, "already_exists", "A RayJob with this name already exists.")
+            return ApiError(
+                409,
+                "already_exists",
+                f"Training job '{name}' already exists in project '{project}'.",
+            )
         if status in {400, 422}:
-            return _invalid("The backend rejected the submitted job configuration.")
+            return _invalid(f"The backend rejected the configuration for {target}.")
         return ApiError(503, "submission_unavailable", "RayJob submission is unavailable.")
     if isinstance(error, ValueError):
         if "Cluster config image:" in str(error):
@@ -366,7 +376,7 @@ class CodeFlareJobBackend:
             )
         except Exception as error:
             _LOG.warning("RayJob submission failed (%s)", type(error).__name__)
-            raise _map_backend_error(error) from error
+            raise _map_backend_error(error, project, request.name) from error
 
     def _submit_sync(
         self, project: str, request: CreateJobRequest, caller: CallerIdentity, token: str
@@ -449,7 +459,8 @@ class CodeFlareJobBackend:
         items = []
         with caller_client(request) as api:
             # Kubernetes list on a nonexistent namespace may otherwise look empty.
-            client.CoreV1Api(api).read_namespace(project, _request_timeout=TIMEOUT)
+            with describe_not_found("Project", project):
+                client.CoreV1Api(api).read_namespace(project, _request_timeout=TIMEOUT)
             custom = client.CustomObjectsApi(api)
             continuation = ""
             while True:
@@ -513,21 +524,22 @@ class CodeFlareJobBackend:
                     raise
                 # Normal when shutdown-after-finish already removed the owned cluster.
             metadata = job["metadata"]
-            client.CustomObjectsApi(api).delete_namespaced_custom_object(
-                "ray.io",
-                "v1",
-                project,
-                "rayjobs",
-                name,
-                body=client.V1DeleteOptions(
-                    propagation_policy="Foreground",
-                    preconditions=client.V1Preconditions(
-                        uid=metadata["uid"],
-                        resource_version=metadata["resourceVersion"],
+            with describe_not_found("Training job", name, project=project):
+                client.CustomObjectsApi(api).delete_namespaced_custom_object(
+                    "ray.io",
+                    "v1",
+                    project,
+                    "rayjobs",
+                    name,
+                    body=client.V1DeleteOptions(
+                        propagation_policy="Foreground",
+                        preconditions=client.V1Preconditions(
+                            uid=metadata["uid"],
+                            resource_version=metadata["resourceVersion"],
+                        ),
                     ),
-                ),
-                _request_timeout=TIMEOUT,
-            )
+                    _request_timeout=TIMEOUT,
+                )
 
     def log_client(self, request: Request, project: str, name: str) -> tuple[LogClient, str]:
         validate_names(project, name)
@@ -542,7 +554,7 @@ class CodeFlareJobBackend:
                     raise ApiError(
                         409, "logs_not_ready", "Driver logs are not available yet; retry later."
                     )
-                raise logs_not_found()
+                raise logs_not_found(project, name)
             try:
                 cluster = owned_cluster(api, project, job)
             except ApiException as error:
@@ -564,7 +576,7 @@ class CodeFlareJobBackend:
                 raise ApiError(
                     409, "logs_not_ready", "Driver logs are not available yet; retry later."
                 )
-            raise logs_not_found()
+            raise logs_not_found(project, name)
         if (
             not isinstance(submission_id, str)
             or re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", submission_id) is None
@@ -607,9 +619,10 @@ _ANNOTATION = "training.rhoai.io/"
 
 def read_job(api: client.ApiClient, project: str, name: str) -> dict[str, Any]:
     """Resolve only the requested namespace, using the caller's client."""
-    result: dict[str, Any] = client.CustomObjectsApi(api).get_namespaced_custom_object(
-        "ray.io", "v1", project, "rayjobs", name, _request_timeout=TIMEOUT
-    )
+    with describe_not_found("Training job", name, project=project):
+        result: dict[str, Any] = client.CustomObjectsApi(api).get_namespaced_custom_object(
+            "ray.io", "v1", project, "rayjobs", name, _request_timeout=TIMEOUT
+        )
     return result
 
 

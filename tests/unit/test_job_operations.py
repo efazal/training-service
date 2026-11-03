@@ -240,6 +240,46 @@ def test_backend_errors_are_sanitized(backend, status):
 
 
 @pytest.mark.parametrize(
+    "method,suffix",
+    [
+        ("GET", "/example"),
+        ("DELETE", "/example"),
+        ("GET", "/example/logs?follow=false"),
+        ("GET", "/example/logs?follow=true"),
+    ],
+)
+def test_missing_job_errors_identify_job_and_project(backend, method, suffix):
+    http, custom, _, _, _, _, _, factory = backend
+    error = ApiException(status=404, reason="sensitive-backend-body")
+    error.body = "unit-test-token"
+    custom.get_namespaced_custom_object.side_effect = error
+    response = http.request(method, BASE + suffix, headers=HEADERS)
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "not_found",
+        "message": "Training job 'example' was not found in project 'team-a'.",
+    }
+    assert response.headers["content-type"].startswith("application/json")
+    assert "sensitive-backend-body" not in response.text
+    assert "unit-test-token" not in response.text
+    custom.delete_namespaced_custom_object.assert_not_called()
+    factory.assert_not_called()
+
+
+def test_job_disappearing_during_delete_has_context(backend):
+    http, custom, _, _, record, *_ = backend
+    record["status"]["jobStatus"] = "SUCCEEDED"
+    custom.delete_namespaced_custom_object.side_effect = ApiException(status=404)
+    response = http.delete(BASE + "/example", headers=HEADERS)
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "not_found",
+        "message": "Training job 'example' was not found in project 'team-a'.",
+    }
+    assert custom.delete_namespaced_custom_object.call_count == 1
+
+
+@pytest.mark.parametrize(
     "method, suffix",
     [("GET", ""), ("GET", "/example"), ("DELETE", "/example"), ("GET", "/example/logs")],
 )
@@ -274,6 +314,8 @@ def test_missing_ray_submission_is_not_retryable(backend, monkeypatch, follow, s
     response = http.get(BASE + "/example/logs", headers=HEADERS, params={"follow": follow})
     assert response.status_code == 404
     assert response.json()["code"] == "not_found"
+    assert "job 'example' in project 'team-a'" in response.json()["message"]
+    assert "submission" in response.json()["message"].lower()
     assert "retry later" not in response.json()["message"]
     assert "sensitive-backend-body" not in response.text
     assert "text/event-stream" not in response.headers.get("content-type", "")
@@ -304,6 +346,7 @@ def test_terminal_job_without_submission_metadata_is_not_retryable(backend, fiel
     response = http.get(BASE + "/example/logs", headers=HEADERS)
     assert response.status_code == 404
     assert response.json()["code"] == "not_found"
+    assert "job 'example' in project 'team-a'" in response.json()["message"]
     factory.assert_not_called()
 
 
@@ -311,7 +354,10 @@ def test_delete_race_returns_conflict_without_retry(backend):
     http, custom, _, _, record, *_ = backend
     record["status"]["jobStatus"] = "SUCCEEDED"
     custom.delete_namespaced_custom_object.side_effect = ApiException(status=409)
-    assert http.delete(BASE + "/example", headers=HEADERS).status_code == 409
+    response = http.delete(BASE + "/example", headers=HEADERS)
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    assert "Refresh" in response.json()["message"]
     assert custom.delete_namespaced_custom_object.call_count == 1
 
 
@@ -407,8 +453,23 @@ def test_invalid_list_queries_return_contract_400(backend, query):
 def test_missing_project_is_not_reported_as_empty(backend):
     http, custom, core, *_ = backend
     core.read_namespace.side_effect = ApiException(status=404)
-    assert http.get(BASE, headers=HEADERS).status_code == 404
+    response = http.get(BASE, headers=HEADERS)
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "not_found",
+        "message": "Project 'team-a' was not found.",
+    }
     custom.list_namespaced_custom_object.assert_not_called()
+
+
+def test_missing_job_api_does_not_claim_existing_project_is_missing(backend):
+    http, custom, core, *_ = backend
+    custom.list_namespaced_custom_object.side_effect = ApiException(status=404)
+    response = http.get(BASE, headers=HEADERS)
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    assert "Project 'team-a' was not found" not in response.json()["message"]
+    core.read_namespace.assert_called_once()
 
 
 @pytest.mark.parametrize(

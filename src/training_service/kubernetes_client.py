@@ -17,6 +17,20 @@ from training_service.errors import ApiError
 TIMEOUT = (5, 15)
 
 
+@contextmanager
+def describe_not_found(resource: str, name: str, *, project: str | None = None) -> Iterator[None]:
+    """Describe a known resource lookup without trusting Kubernetes response bodies."""
+    try:
+        yield
+    except ApiException as error:
+        if error.status != 404:
+            raise
+        message = f"{resource} '{name}' was not found"
+        if project is not None:
+            message += f" in project '{project}'"
+        raise ApiError(404, "not_found", message + ".") from None
+
+
 def validate_names(project: str, job_id: str | None = None) -> None:
     """Reject path-like values before constructing Kubernetes or gateway paths."""
     label = r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"
@@ -79,10 +93,18 @@ def caller_client(request: Request) -> Iterator[client.ApiClient]:
         codes = {400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found"}
         codes[409] = "conflict"
         status = error.status if error.status in codes else 503
+        messages = {
+            400: "Kubernetes rejected the operation. Check the request parameters.",
+            401: "The OpenShift bearer token is no longer valid. Sign in again and retry.",
+            403: "Caller is not permitted to access the requested project resource.",
+            404: "The requested Kubernetes resource was not found.",
+            409: "The operation conflicts with the current resource state. Refresh and retry.",
+            503: "Kubernetes is temporarily unavailable. Try again later.",
+        }
         raise ApiError(
             status,
             codes.get(status, "backend_unavailable"),
-            "The requested Kubernetes operation could not be completed.",
+            messages[status],
             headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
         ) from None
     except (HTTPError, OSError):

@@ -509,8 +509,61 @@ async def test_sdk_conflict_maps_to_documented_409(monkeypatch: pytest.MonkeyPat
             "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
         )
     assert raised.value.status_code == 409
+    assert raised.value.code == "already_exists"
+    assert raised.value.message == (
+        "Training job 'pvc-training' already exists in project 'team-alpha'."
+    )
     assert submission.codeflare_auth.api_client is None
     assert submission.codeflare_auth.config_path is None
+
+
+@pytest.mark.parametrize(
+    "example,kind,name,method",
+    [
+        ("pvc_inputs_output", "PersistentVolumeClaim", "model-storage", "pvc"),
+        ("pvc_inputs_output", "PersistentVolumeClaim", "training-data", "pvc"),
+        ("pvc_inputs_output", "PersistentVolumeClaim", "training-output", "pvc"),
+        ("huggingface_inputs_s3_output", "Secret", "hf-secret-token", "secret"),
+        ("s3_inputs", "Secret", "model-storage", "secret"),
+    ],
+)
+def test_missing_submission_resources_identify_reference_and_project(
+    monkeypatch, example, kind, name, method
+):
+    core = _mock_sdk(monkeypatch)
+    attribute = (
+        "read_namespaced_persistent_volume_claim" if method == "pvc" else "read_namespaced_secret"
+    )
+    original = getattr(core, attribute)
+
+    def read(resource_name, namespace, **kwargs):
+        if resource_name == name:
+            error = ApiException(status=404, reason="sensitive-backend-body")
+            error.body = "caller-token"
+            raise error
+        return original(resource_name, namespace, **kwargs)
+
+    monkeypatch.setattr(core, attribute, read)
+    http = TestClient(
+        create_app(
+            FakeAuthenticator(),
+            FakeAuthorizer(),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
+        )
+    )
+    response = http.post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=_sample(example).model_dump(mode="json", exclude_unset=True),
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "not_found",
+        "message": f"{kind} '{name}' was not found in project 'team-alpha'.",
+    }
+    assert "sensitive-backend-body" not in response.text
+    assert "caller-token" not in response.text
+    assert FakeRayJob.instances == []
 
 
 def test_sdk_auth_is_restored_when_client_verification_fails(
@@ -624,7 +677,9 @@ def test_sdk_owned_create_preserves_kubernetes_failure_status(
         "timeout": 10,
     }
     assert raised.value.error.status == backend_status
-    assert submission._map_backend_error(raised.value).status_code == api_status
+    assert (
+        submission._map_backend_error(raised.value, "team-alpha", "job-1").status_code == api_status
+    )
 
     with pytest.raises(ApiException):
         api_client.call_api("/api/v1/namespaces/{namespace}/pods", "GET")
@@ -765,7 +820,9 @@ def test_invalid_kubernetes_url_never_creates_caller_client(monkeypatch, operati
     [(401, 401), (403, 403), (404, 404), (409, 409), (422, 422), (500, 503)],
 )
 def test_kubernetes_errors_map_to_documented_statuses(backend_status: int, api_status: int) -> None:
-    error = submission._map_backend_error(ApiException(status=backend_status))
+    error = submission._map_backend_error(
+        ApiException(status=backend_status), "team-alpha", "job-1"
+    )
     assert error.status_code == api_status
     assert error.message
     ErrorResponse.model_validate({"code": error.code, "message": error.message})

@@ -37,8 +37,13 @@ def logs_unavailable() -> ApiError:
     return ApiError(503, "logs_unavailable", "The authenticated job log backend is unavailable.")
 
 
-def logs_not_found() -> ApiError:
-    return ApiError(404, "not_found", "Training submission not found; driver logs are unavailable.")
+def logs_not_found(project: str | None = None, name: str | None = None) -> ApiError:
+    target = f" for job '{name}' in project '{project}'" if project and name else ""
+    return ApiError(
+        404,
+        "not_found",
+        f"Training submission{target} was not found; driver logs are unavailable.",
+    )
 
 
 def _check_log_auth(response: Any, **kwargs: Any) -> None:
@@ -148,16 +153,21 @@ async def driver_logs(
 ) -> PlainTextResponse | StreamingResponse:
     backend: JobsBackend = request.app.state.job_backend
     sdk, submission_id = await anyio.to_thread.run_sync(backend.log_client, request, project, name)
-    if not follow:
-        text = await anyio.to_thread.run_sync(_snapshot, sdk, submission_id)
-        return PlainTextResponse(
-            "".join(text.splitlines(keepends=True)[-(tail_lines or 100) :]),
-            headers={"Cache-Control": "no-store"},
-        )
+    try:
+        if not follow:
+            text = await anyio.to_thread.run_sync(_snapshot, sdk, submission_id)
+            return PlainTextResponse(
+                "".join(text.splitlines(keepends=True)[-(tail_lines or 100) :]),
+                headers={"Cache-Control": "no-store"},
+            )
 
-    # Check the backend without downloading the entire log before streaming it.
-    # WebSocket-specific failures are sanitized on the SSE error path below.
-    await anyio.to_thread.run_sync(_check_status, sdk, submission_id)
+        # Check the backend without downloading the entire log before streaming it.
+        # WebSocket-specific failures are sanitized on the SSE error path below.
+        await anyio.to_thread.run_sync(_check_status, sdk, submission_id)
+    except ApiError as error:
+        if error.status_code == 404 and error.code == "not_found":
+            raise logs_not_found(project, name) from None
+        raise
 
     async def events() -> AsyncIterator[str]:
         try:
