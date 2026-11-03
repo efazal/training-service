@@ -12,11 +12,12 @@ from typing import Any
 import pytest
 from codeflare_sdk import RayJob
 from codeflare_sdk.vendored.python_client.kuberay_job_api import RayjobApi
+from fastapi import Request
 from fastapi.testclient import TestClient
-from kubernetes import client
+from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-from training_service import jobs
+from training_service import jobs, kubernetes_client
 from training_service import jobs as submission
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
@@ -662,22 +663,60 @@ def test_caller_client_times_out_all_sdk_calls_without_overriding_explicit_timeo
 def test_caller_client_never_falls_back_to_service_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed: dict[str, Any] = {}
+    def forbidden_incluster_config(**kwargs: Any) -> None:
+        pytest.fail("Caller clients must not load service-account credentials.")
 
-    def fake_incluster_config(*, client_configuration: Any, try_refresh_token: bool) -> None:
-        observed["refresh"] = try_refresh_token
-        client_configuration.api_key["authorization"] = "bearer service-account-token"
+    default = client.Configuration()
+    default.api_key["authorization"] = "Bearer service-account-token"
+    default.refresh_api_key_hook = lambda configuration: pytest.fail("Refreshed pod credentials.")
+    monkeypatch.setattr(client.Configuration, "_default", default)
+    monkeypatch.setattr(config, "load_incluster_config", forbidden_incluster_config)
+    with submission._caller_api_client("caller-token") as api:
+        assert api.configuration.api_key == {"authorization": "Bearer caller-token"}
+        assert api.configuration.refresh_api_key_hook is None
+        assert api.configuration.get_api_key_with_prefix("authorization") == "Bearer caller-token"
+    assert default.api_key["authorization"] == "Bearer service-account-token"
+    assert client.Configuration._default is default
 
-    def fake_api_client(configuration: Any) -> Any:
-        observed["configuration"] = configuration
-        return configuration
 
-    monkeypatch.setattr(submission.config, "load_incluster_config", fake_incluster_config)
-    monkeypatch.setattr(submission, "_CallerApiClient", fake_api_client)
-    result = submission._caller_api_client("caller-token")
-    assert observed["refresh"] is False
-    assert result.api_key["authorization"] == "Bearer caller-token"
-    assert "service-account-token" not in result.api_key["authorization"]
+@pytest.mark.parametrize("overrides", [False, True])
+def test_submission_and_operations_share_caller_configuration(monkeypatch, overrides):
+    def fake_incluster_config(*, client_configuration, try_refresh_token):
+        client_configuration.host = "https://incluster.example:6443"
+        client_configuration.ssl_ca_cert = "/mounted/service-account/ca.crt"
+
+    monkeypatch.setattr(config, "load_incluster_config", fake_incluster_config)
+    expected_host = "https://kubernetes.default.svc"
+    expected_ca = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    for name in ("TRAINING_SERVICE_KUBERNETES_API_URL", "TRAINING_SERVICE_KUBERNETES_CA_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    if overrides:
+        expected_host = "https://override.example:6443"
+        expected_ca = "/custom/cluster-ca.crt"
+        monkeypatch.setenv("TRAINING_SERVICE_KUBERNETES_API_URL", expected_host)
+        monkeypatch.setenv("TRAINING_SERVICE_KUBERNETES_CA_FILE", expected_ca)
+    default = client.Configuration._default
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer caller-token")],
+            "state": {"caller_identity": CallerIdentity("alice", "uid-a", ())},
+        }
+    )
+    with (
+        submission._caller_api_client("caller-token") as submit_api,
+        kubernetes_client.caller_client(request) as read_api,
+    ):
+        assert submit_api.configuration is not read_api.configuration
+        for configuration in (submit_api.configuration, read_api.configuration):
+            assert configuration.host == expected_host
+            assert configuration.ssl_ca_cert == expected_ca
+            assert configuration.verify_ssl is True
+            assert configuration.retries == 0
+            assert configuration.api_key == {"authorization": "Bearer caller-token"}
+            assert "authorization" not in configuration.api_key_prefix
+            assert configuration.refresh_api_key_hook is None
+    assert client.Configuration._default is default
 
 
 @pytest.mark.parametrize(

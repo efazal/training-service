@@ -24,14 +24,19 @@ from codeflare_sdk.common.kubernetes_cluster import auth as codeflare_auth
 from codeflare_sdk.ray.rayjobs.config import ManagedClusterConfig
 from fastapi import Request
 from jsonschema import ValidationError
-from kubernetes import client, config
+from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from pydantic import ValidationError as ModelValidationError
 
 from training_service.auth import CallerIdentity
 from training_service.contract import component_validator
 from training_service.errors import ApiError
-from training_service.kubernetes_client import TIMEOUT, caller_client, validate_names
+from training_service.kubernetes_client import (
+    TIMEOUT,
+    caller_client,
+    caller_configuration,
+    validate_names,
+)
 from training_service.logs import CodeFlareLogClient, LogClient, logs_unavailable
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_backend import JobBackend
@@ -185,17 +190,7 @@ def _validate_request(request: CreateJobRequest) -> tuple[ResourceSpec, dict[str
 
 
 def _caller_api_client(token: str) -> client.ApiClient:
-    configuration = client.Configuration()
-    # Never call load_incluster_config without a target Configuration: doing so
-    # mutates the process-wide default. Disable its refresh hook, which would
-    # otherwise silently replace this caller token with the pod's token.
-    config.load_incluster_config(
-        client_configuration=configuration,
-        try_refresh_token=False,
-    )
-    configuration.api_key["authorization"] = f"Bearer {token}"
-    configuration.api_key_prefix.pop("authorization", None)
-    return _CallerApiClient(configuration)
+    return _CallerApiClient(caller_configuration(f"Bearer {token}"))
 
 
 class _MetadataRayJob(RayJob):

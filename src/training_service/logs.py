@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -59,7 +60,12 @@ class BoundedJobClient(JobSubmissionClient):
             raise logs_unavailable() from None
         if response.status_code in {401, 403}:
             raise ApiError(response.status_code, "forbidden", "Ray gateway access was denied.")
-        if response.status_code == 404:
+        # A missing version or gateway endpoint is not a job readiness failure.
+        if (
+            response.status_code == 404
+            and method == "GET"
+            and re.fullmatch(r"/api/jobs/[^/]+(?:/logs)?", endpoint)
+        ):
             raise ApiError(409, "logs_not_ready", "Driver logs are not available yet; retry later.")
         if response.status_code >= 300:
             raise logs_unavailable()

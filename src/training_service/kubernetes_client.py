@@ -27,11 +27,10 @@ def validate_names(project: str, job_id: str | None = None) -> None:
         raise ApiError(400, "bad_request", "Invalid RayJob name.")
 
 
-@contextmanager
-def caller_client(request: Request) -> Iterator[client.ApiClient]:
-    """Forward only a verified caller's credential; never mutate SDK defaults."""
-    if not isinstance(getattr(request.state, "caller_identity", None), CallerIdentity):
-        raise ApiError(403, "forbidden", "Verified caller context is unavailable.")
+def caller_configuration(authorization: str) -> client.Configuration:
+    """Build isolated workload configuration without loading service-account tokens."""
+    # Do not use the in-cluster loader: its credential refresh hook could replace
+    # a caller's token with the pod's service-account token.
     configuration = client.Configuration()
     configuration.host = os.getenv(
         "TRAINING_SERVICE_KUBERNETES_API_URL", "https://kubernetes.default.svc"
@@ -41,9 +40,18 @@ def caller_client(request: Request) -> Iterator[client.ApiClient]:
         "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
     )
     configuration.verify_ssl = True
-    configuration.api_key["authorization"] = request.headers["authorization"]
+    configuration.api_key["authorization"] = authorization
     configuration.api_key_prefix.pop("authorization", None)
     configuration.retries = 0
+    return configuration
+
+
+@contextmanager
+def caller_client(request: Request) -> Iterator[client.ApiClient]:
+    """Forward only a verified caller's credential; never mutate SDK defaults."""
+    if not isinstance(getattr(request.state, "caller_identity", None), CallerIdentity):
+        raise ApiError(403, "forbidden", "Verified caller context is unavailable.")
+    configuration = caller_configuration(request.headers["authorization"])
     try:
         with client.ApiClient(configuration) as api:
             yield api

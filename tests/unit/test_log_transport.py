@@ -12,6 +12,57 @@ from training_service.errors import ApiError
 from training_service.logs import BoundedJobClient, CodeFlareLogClient
 
 
+def test_missing_version_endpoint_is_not_reported_as_logs_not_ready(monkeypatch):
+    from ray.dashboard.modules import dashboard_sdk
+
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    monkeypatch.delenv("RAY_API_SERVER_ADDRESS", raising=False)
+    transport = Mock(return_value=Mock(status_code=404, text="sensitive-gateway-response"))
+    monkeypatch.setattr(dashboard_sdk.requests, "request", transport)
+
+    with pytest.raises(ApiError) as raised:
+        BoundedJobClient(
+            "https://ray.example.com/ray/team-a/example-cluster",
+            headers={"Authorization": "Bearer dummy-unit-test-token"},
+        )
+
+    assert transport.call_count == 1
+    assert transport.call_args.args[1].endswith("/api/version")
+    assert raised.value.status_code == 503
+    assert raised.value.code == "logs_unavailable"
+    assert "sensitive-gateway-response" not in raised.value.message
+    assert "ray.example.com" not in raised.value.message
+    assert "dummy-unit-test-token" not in raised.value.message
+
+
+@pytest.mark.parametrize(
+    "endpoint, status, code",
+    [
+        ("/api/version", 503, "logs_unavailable"),
+        ("/api/jobs/", 503, "logs_unavailable"),
+        ("/api/jobs/raysubmit_123", 409, "logs_not_ready"),
+        ("/api/jobs/raysubmit_123/logs", 409, "logs_not_ready"),
+        ("/api/jobs/raysubmit_123/unknown", 503, "logs_unavailable"),
+    ],
+)
+def test_log_http_404_only_reports_readiness_for_job_reads(monkeypatch, endpoint, status, code):
+    from ray.dashboard.modules import dashboard_sdk
+
+    transport = Mock(return_value=Mock(status_code=404))
+    monkeypatch.setattr(dashboard_sdk.requests, "request", transport)
+    sdk = object.__new__(BoundedJobClient)
+    sdk._address = "https://ray.example.com"
+    sdk._cookies = None
+    sdk._headers = {"Authorization": "Bearer dummy-unit-test-token"}
+    sdk._verify = True
+
+    with pytest.raises(ApiError) as raised:
+        sdk._do_request("GET", endpoint)
+
+    assert raised.value.status_code == status
+    assert raised.value.code == code
+
+
 @pytest.mark.parametrize("redirect", [False, True])
 def test_log_websocket_streams_normally_but_never_follows_redirects(redirect):
     async def exercise():
