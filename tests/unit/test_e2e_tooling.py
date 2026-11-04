@@ -28,7 +28,7 @@ from tests.e2e.test_training_jobs import follow_logs
 
 @pytest.fixture
 def jobfile(tmp_path):
-    payload = json.loads((deploy.ROOT / "tests/e2e/job.example.json").read_text())
+    payload = json.loads((deploy.ROOT / "tests/e2e/examples/job.example.json").read_text())
     path = tmp_path / "job.json"
     path.write_text(json.dumps(payload))
     return path
@@ -628,7 +628,7 @@ def queue_observer(monkeypatch, prepared_cluster):
     discovery = Mock()
     discovery.get_api_versions.return_value.groups = [SimpleNamespace(name="kueue.x-k8s.io")]
     monkeypatch.setattr(module.client, "ApisApi", Mock(return_value=discovery))
-    payload = json.loads((deploy.ROOT / "tests/e2e/job.example.json").read_text())
+    payload = json.loads((deploy.ROOT / "tests/e2e/examples/job.example.json").read_text())
     payload["queue_name"] = "e2e"
     return result, payload, queue, discovery
 
@@ -1239,7 +1239,7 @@ def test_chart_mounts_ca_only_when_configured():
             "e2e",
             deploy.CHART,
             "-f",
-            deploy.ROOT / "tests/e2e/values.example.yaml",
+            deploy.ROOT / "tests/e2e/examples/values.example.yaml",
         ]
     )
     assert "volumeMounts:" not in plain and "volumes:" not in plain

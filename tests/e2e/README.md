@@ -3,7 +3,7 @@
 Tracking: [RHOAIENG-102547](https://redhat.atlassian.net/browse/RHOAIENG-102547).
 These tests call a real HTTP deployment, not TestClient or a mocked backend.
 Manually invoked automation, not Jenkins/CI; `make test` and `make check` remain
-unit-only. See the [full plan](test-plan.md) and [coverage/gaps](coverage.md).
+unit-only. See [coverage/gaps](coverage.md) and [examples](examples/).
 
 ## Build, push, deploy and test — one command
 
@@ -33,7 +33,7 @@ Prepare once:
   repo, add `--use-podman-auth` as described below: local Podman login alone does
   not authorize Kubernetes image pulls. The runner never copies a pre-existing
   cluster Secret or changes cluster-wide pull credentials.
-- Copy [values.example.yaml](values.example.yaml) outside the repo and supply a
+- Copy [values.example.yaml](examples/values.example.yaml) outside the repo and supply a
   compatible Ray + Training Hub runtime and authenticated Ray gateway.
   The runner automatically reads the cluster's **public ingress certificate
   bundle** from `openshift-config-managed/default-ingress-cert` (`ca-bundle.crt`).
@@ -197,9 +197,9 @@ resource cleanup reports a cleanup failure rather than a passing run. Uncatchabl
 
 The normal deployment command above **always includes Kueue**. To separately
 test an already-deployed service without Kueue, use `make test-e2e`, not the
-deployment runner. Supply a known-good [workload JSON](job.example.json), existing
+deployment runner. Supply a known-good [workload JSON](examples/job.example.json), existing
 PVC/model/dataset/output references and a prepared
-[read-only verifier pod](artifact-verifier.example.yaml). Main currently supports
+[read-only verifier pod](examples/artifact-verifier.example.yaml). Main currently supports
 basic `lora_sft`, not all Training Hub APIs.
 
 ```bash
@@ -243,7 +243,7 @@ gone. Global free-GPU counts need not rise if other workloads consume capacity.
 The deployment runner creates its verifier automatically. For an existing
 deployment, `--artifact-pod` selects a prepared Python-enabled pod (default container
 `verifier`) mounting the **complete output PVC read-only**, without subPath. See
-[artifact-verifier.example.yaml](artifact-verifier.example.yaml). Prepare it once
+[artifact-verifier.example.yaml](examples/artifact-verifier.example.yaml). Prepare it once
 with your approved image/PVC. The observer requires
 pod get and pods/exec create. Exec only reads the unique output directory.
 

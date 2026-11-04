@@ -1,18 +1,17 @@
 # Coverage and customer-readiness gaps
 
-Source: [RHOAIENG-102547](https://redhat.atlassian.net/browse/RHOAIENG-102547) and
-[the full plan](test-plan.md). This PR is a repeatable baseline, **not a claim
-that every P0 or configuration passes**. Mocked unit tests are not live evidence.
+Source: [RHOAIENG-102547](https://redhat.atlassian.net/browse/RHOAIENG-102547).
 
-The follow-up requests add Podman → Quay → Helm automation, a fresh labeled
+This PR is a repeatable baseline, **not a claim that every P0 or configuration
+passes**. Mocked unit tests are not live evidence.
+
+The deployment workflow provides Podman → Quay → Helm automation, a fresh labeled
 namespace, LocalQueue/PVC/fixture provisioning, and mandatory Kueue-admitted
-training. They supersede the ticket/plan's original “already deployed only”
-boundary. Shared cluster/operator/DSC/ClusterQueue/StorageClass provisioning and
+training. Shared cluster/operator/DSC/ClusterQueue/StorageClass provisioning and
 Jenkins remain excluded; users prepare Ray/Kueue first. Direct installation is
 supported without DSC checks. Kueue failures fail the queued test with diagnostics
 while independent API tests continue; the final run still fails.
-The later cleanup requirement supersedes the plan's namespace-preservation rule
-only for `test-e2e-deploy`'s newly created, UID/run-label-owned namespace: default
+For `test-e2e-deploy`'s newly created, UID/run-label-owned namespace, default
 cleanup runs after success/failure/interruption, including test PVCs and leftover
 Ray resources. `--keep-resources` retains debugging resources, never temporary
 registry credentials. Existing-deployment tests preserve customer namespaces/data.

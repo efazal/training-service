@@ -15,6 +15,7 @@ from kubernetes.client.exceptions import ApiException
 from tests.e2e.registry import PullSecret, kubeconfig_client
 
 FIXTURES = Path(__file__).with_name("fixtures")
+EXAMPLES = Path(__file__).with_name("examples")
 RUN_LABEL = "training.rhoai.io/e2e-run"
 
 
@@ -113,7 +114,7 @@ def prepare_tls(args, command, results, values):
         ):
             raise ValueError(
                 "Mount training-service-ray-ca read-only at the configured Ray CA directory; "
-                "see values.example.yaml"
+                "see tests/e2e/examples/values.example.yaml"
             )
     route_override = os.getenv("TRAINING_SERVICE_CA_BUNDLE")
     ray_override = args.ray_ca_bundle
@@ -406,7 +407,7 @@ class RunEnvironment:
             pod["spec"]["imagePullSecrets"] = [{"name": self.pull_secret.name}]
         self.pod_uid = self.create("fixtures.yaml", pod)["metadata"]["uid"]
         self.wait_for_fixtures()
-        payload = json.loads((Path(__file__).with_name("job.example.json")).read_text())
+        payload = json.loads((EXAMPLES / "job.example.json").read_text())
         payload.update(queue_name="e2e")
         payload["model"]["uri"] = "pvc://e2e-storage/models/qwen/"
         payload["dataset"]["uri"] = "pvc://e2e-storage/datasets/tiny-chat.jsonl"
