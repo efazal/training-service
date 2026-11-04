@@ -61,6 +61,9 @@ def arguments(argv=None):
         "--image-repository", required=True, help="quay.io/your-org/training-service"
     )
     parser.add_argument(
+        "--reuse-image", help="Reuse a known-compatible IMAGE@sha256:DIGEST; skip Podman build/push"
+    )
+    parser.add_argument(
         "--namespace", type=namespace, help="New namespace (default: training-e2e-<run>)"
     )
     parser.add_argument("--values", required=True, type=Path, help="Credential-free Helm values")
@@ -96,6 +99,10 @@ def arguments(argv=None):
 def preflight(args):
     if not re.fullmatch(r"quay\.io/[a-z0-9_-]+/[a-z0-9_.-]+", args.image_repository):
         raise ValueError("Use an untagged quay.io/<organization>/<repository> image repository")
+    if args.reuse_image and not re.fullmatch(
+        re.escape(args.image_repository) + r"@sha256:[0-9a-f]{64}", args.reuse_image
+    ):
+        raise ValueError("--reuse-image must pin a sha256 digest in --image-repository")
     for option in (
         "build_timeout",
         "deploy_timeout",
@@ -108,7 +115,7 @@ def preflight(args):
             raise ValueError(f"--{option.replace('_', '-')} must be positive")
     if not os.getenv("TRAINING_SERVICE_TOKEN", "").strip():
         raise ValueError("Set TRAINING_SERVICE_TOKEN in the environment (never a CLI argument)")
-    for tool in ("podman", "helm", "oc", "git"):
+    for tool in ("helm", "oc", "git") if args.reuse_image else ("podman", "helm", "oc", "git"):
         if not shutil.which(tool):
             raise ValueError(f"Required executable not found: {tool}")
     if not args.values.is_file():
@@ -120,8 +127,9 @@ def preflight(args):
     if not isinstance(values, dict):
         raise ValueError("Helm values must contain an object")
     cluster_preflight(args, command, values)
-    command(["podman", "info", "--format", "{{.Host.Arch}}"])
-    command(["podman", "login", "--get-login", "quay.io"])
+    if not args.reuse_image:
+        command(["podman", "info", "--format", "{{.Host.Arch}}"])
+        command(["podman", "login", "--get-login", "quay.io"])
     nodes = json.loads(command(["oc", "get", "nodes", "-o", "json"]))["items"]
     architecture = args.platform.partition("/")[2]
     if not any(
@@ -194,28 +202,36 @@ def run(args):
         evidence["dirty"] = bool(command(["git", "status", "--porcelain"]).strip())
         tag = "e2e-" + commit[:12] + "-" + run_id
         image = args.image_repository + ":" + tag
-        print(f"Building {image} for {args.platform}", flush=True)
-        command(
-            [
-                "podman",
-                "build",
-                "--platform",
-                args.platform,
-                "-f",
-                "Containerfile",
-                "-t",
-                image,
-                ".",
-            ],
-            timeout=args.build_timeout,
-        )
-        print("Pushing to Quay (using existing Podman login)", flush=True)
-        digest_file = results / "image-digest.txt"
-        command(["podman", "push", "--digestfile", digest_file, image], timeout=args.build_timeout)
-        digest = digest_file.read_text().strip()
+        if args.reuse_image:
+            digest = args.reuse_image.partition("@")[2]
+            tag = "reused"
+            print(f"Reusing {args.reuse_image}; no image build or push", flush=True)
+        else:
+            print(f"Building {image} for {args.platform}", flush=True)
+            command(
+                [
+                    "podman",
+                    "build",
+                    "--platform",
+                    args.platform,
+                    "-f",
+                    "Containerfile",
+                    "-t",
+                    image,
+                    ".",
+                ],
+                timeout=args.build_timeout,
+            )
+            print("Pushing to Quay (using existing Podman login)", flush=True)
+            digest_file = results / "image-digest.txt"
+            command(
+                ["podman", "push", "--digestfile", digest_file, image], timeout=args.build_timeout
+            )
+            digest = digest_file.read_text().strip()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise RuntimeError("Podman did not return a valid pushed image digest")
         evidence["image"] = args.image_repository + "@" + digest
+        evidence["image_reused"] = bool(args.reuse_image)
         print(f"Creating fresh Kueue-enrolled namespace {args.namespace} and fixtures", flush=True)
         environment.provision()
         print(f"Deploying isolated release {release} in {args.namespace}", flush=True)
@@ -226,7 +242,12 @@ def run(args):
                     "list",
                     "-n",
                     args.namespace,
-                    "--all",
+                    "--deployed",
+                    "--failed",
+                    "--pending",
+                    "--superseded",
+                    "--uninstalled",
+                    "--uninstalling",
                     "--filter",
                     "^" + release + "$",
                     "-o",

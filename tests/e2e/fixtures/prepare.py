@@ -1,12 +1,25 @@
 """Runs in a test-owned init container; downloads only a pinned public model."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"
+
+os.umask(0o002)
+try:
+    with tempfile.TemporaryFile(dir="/data"):
+        pass
+except OSError:
+    raise RuntimeError(
+        "E2E fixture PVC is not writable by the non-root container; "
+        "check the namespace-allocated fsGroup and NFS volume permissions"
+    ) from None
+print("Fixture PVC write check passed; downloading the pinned public model", flush=True)
 
 snapshot_download(
     repo_id=MODEL,

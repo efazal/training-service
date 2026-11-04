@@ -9,7 +9,7 @@ unit-only. See the [full plan](test-plan.md) and [coverage/gaps](coverage.md).
 
 Prepare once:
 
-- Install `uv`, Podman, Helm 3.13+ and `oc`; start your Podman machine if needed.
+- Install `uv`, Podman, Helm 3.13+ (including Helm 4) and `oc`; start your Podman machine if needed.
 - `oc login` to your test cluster; `podman login quay.io`.
   Never enable shell tracing or copy tokens into files.
 - An administrator prepares Ray and Kueue, including Kueue's RayJob integration,
@@ -68,6 +68,16 @@ verifier pod, build/push/deploy/test sequence is needed. Default
 `linux/arm64` for ARM nodes.
 Podman must support that platform (emulation can be slow).
 
+To rerun using an already-built service image, add
+`--reuse-image quay.io/YOUR_ORG/training-service@sha256:YOUR_DIGEST` in the same
+repository as `--image-repository`. This skips Podman build/push and does not
+require a running Podman machine or Quay push login. The cluster must still be
+able to pull that image. The digest is recorded as reused, not a new build.
+Only reuse it when the service source, dependencies, `Containerfile` and other
+files copied by the `Containerfile` are unchanged; an unchanged `Containerfile`
+alone is insufficient. Test-harness-only changes do not require an image rebuild.
+Select a known-compatible image explicitly; there is no silent latest-tag cache.
+
 Each invocation creates a new `training-e2e-<run>` namespace and Helm release.
 The [namespace manifest](fixtures/namespace.yaml) includes
 `kueue.openshift.io/managed: "true"`, `opendatahub.io/dashboard: "true"`, and a
@@ -76,6 +86,11 @@ ClusterQueue `default` (override with `--cluster-queue`), a 5Gi RWX PVC and a
 fixture/verifier pod. The pod downloads a pinned public Qwen2.5-0.5B-Instruct
 revision and prepares eight chat examples; training uses PVC references and
 needs no HF token. The generated request and manifests are saved with results.
+The fixture pod uses the new namespace's OpenShift-allocated `fsGroup` so the CSI
+driver can grant non-root access to its new PVC; no privileged/root setup pod or
+shared storage permission change is used. A write check runs before the download.
+Readiness polling prints progress and immediately reports failed init containers,
+including a targeted `oc logs` command, instead of waiting the full fixture timeout.
 The ClusterQueue selector must admit these labels. The runner never changes the
 DSC, operators, ClusterQueue quota or ResourceFlavors.
 
@@ -200,6 +215,7 @@ make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile with-k
 | `--cleanup-timeout 180` | Terminal/resource cleanup deadline |
 | `--request-timeout 30` | Per HTTP timeout, existing-deployment command |
 | `--build-timeout 1800`, `--deploy-timeout 300` | Build/push and rollout/Route deadlines, deployment runner |
+| `--reuse-image IMAGE@sha256:DIGEST` | Reuse a known-compatible image in `--image-repository`, skipping build/push |
 | `--fixture-timeout 900` | PVC/model preparation deadline, deployment runner |
 | `--namespace NEW_NAME`, `--cluster-queue existing-cq` | New namespace name and existing ClusterQueue override |
 | `--preflight-only` | Read-only cluster/tooling/config checks; no build/push/deploy |

@@ -143,8 +143,9 @@ def test_subprocess_errors_withhold_raw_output(monkeypatch, cmd):
     "failure,keep,missing_evidence",
     [(False, False, False), (False, True, False), (True, False, False), (False, False, True)],
 )
+@pytest.mark.parametrize("reuse", [False, True])
 def test_runner_build_push_digest_install_test_cleanup(
-    monkeypatch, tmp_path, failure, keep, missing_evidence
+    monkeypatch, tmp_path, failure, keep, missing_evidence, reuse
 ):
     values = tmp_path / "values.yaml"
     values.write_text("env: []\n")
@@ -159,6 +160,11 @@ def test_runner_build_push_digest_install_test_cleanup(
             "--results-dir",
             str(tmp_path / "results"),
             *(["--keep-deployment"] if keep else []),
+            *(
+                ["--reuse-image", "quay.io/test/training-service@sha256:" + "a" * 64]
+                if reuse
+                else []
+            ),
         ]
     )
     monkeypatch.setattr(deploy, "preflight", Mock())
@@ -224,10 +230,24 @@ def test_runner_build_push_digest_install_test_cleanup(
             deploy.run(args)
     else:
         deploy.run(args)
-    build = next(c for c in commands if c[:2] == ["podman", "build"])
-    assert "Containerfile" in build and "Dockerfile" not in build
+    builds = [c for c in commands if c[:2] == ["podman", "build"]]
+    assert bool(builds) != reuse
+    assert any(c[:2] == ["podman", "push"] for c in commands) != reuse
+    if builds:
+        assert "Containerfile" in builds[0] and "Dockerfile" not in builds[0]
     install = next(c for c in commands if c[:2] == ["helm", "install"])
-    assert any(c.startswith("image.tag=e2e-") and c.endswith("@" + digest) for c in install)
+    listing = next(c for c in commands if c[:2] == ["helm", "list"])
+    assert "--all" not in listing  # Removed in Helm 4; explicit status flags also work in Helm 3.
+    assert {
+        "--deployed",
+        "--failed",
+        "--pending",
+        "--superseded",
+        "--uninstalled",
+        "--uninstalling",
+    } <= set(listing)
+    prefix = "image.tag=reused" if reuse else "image.tag=e2e-"
+    assert any(c.startswith(prefix) and c.endswith("@" + digest) for c in install)
     assert install[2].startswith("training-e2e-") and "upgrade" not in install
     invocation = next(c for c in commands if "pytest" in c)
     assert invocation[invocation.index("--queue-profile") + 1] == "with-kueue"
@@ -241,6 +261,7 @@ def test_runner_build_push_digest_install_test_cleanup(
     report = json.loads(next((tmp_path / "results").glob("*/run.json")).read_text())
     assert report["outcome"] == ("failed" if failed else "passed")
     assert report["image"].endswith("@" + digest)
+    assert report["image_reused"] == reuse
 
 
 @pytest.fixture
@@ -361,12 +382,17 @@ def test_localqueue_setup_failure_does_not_abort_other_fixtures(prepared_cluster
 
     def create(filename, document):
         documents.append(document)
+        if document["kind"] == "Namespace":
+            document["metadata"]["annotations"] = {
+                "openshift.io/sa.scc.supplemental-groups": "1001420000/10000"
+            }
         if document["kind"] == "LocalQueue":
             raise RuntimeError("raw private response must not be exposed")
         document["metadata"]["uid"] = "uid-" + document["metadata"]["name"]
         return document
 
     environment.create = create
+    environment.wait_for_fixtures = Mock()
     environment.provision()
     assert documents[-1]["kind"] == "Pod"
     assert workload(args.job_file, "with-kueue")["queue_name"] == "e2e"
@@ -606,10 +632,15 @@ def test_environment_creates_queued_fixture_and_readonly_verifier(prepared_clust
 
     def create(filename, document):
         documents.append(document)
+        if document["kind"] == "Namespace":
+            document["metadata"]["annotations"] = {
+                "openshift.io/sa.scc.supplemental-groups": "1001420000/10000"
+            }
         document["metadata"]["uid"] = "uid-" + document["metadata"]["name"]
         return document
 
     environment.create = create
+    environment.wait_for_fixtures = Mock()
     environment.provision()
     assert [d["kind"] for d in documents] == [
         "Namespace",
@@ -622,12 +653,178 @@ def test_environment_creates_queued_fixture_and_readonly_verifier(prepared_clust
     assert documents[2]["spec"]["accessModes"] == ["ReadWriteMany"]
     pod = documents[-1]["spec"]
     assert not pod["automountServiceAccountToken"]
+    assert pod["securityContext"]["fsGroup"] == 1001420000
+    assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
     assert pod["containers"][0]["volumeMounts"][0]["readOnly"]
     assert "kueue.x-k8s.io/queue-name" not in documents[-1]["metadata"]["labels"]
     payload = workload(args.job_file, "with-kueue")
     assert payload["queue_name"] == "e2e"
     assert payload["model"]["uri"].startswith("pvc://e2e-storage/")
     assert args.artifact_pod == "e2e-output-verifier"
+
+
+@pytest.mark.parametrize("annotation", ["supplemental-groups", "uid-range"])
+def test_fixture_uses_namespace_allocated_group(prepared_cluster, tmp_path, annotation):
+    environment = RunEnvironment(prepared_cluster[0], "run", tmp_path, Mock())
+    assert (
+        environment.fixture_group(
+            {
+                "metadata": {
+                    "annotations": {
+                        "openshift.io/sa.scc." + annotation: "1001420000/10000,1001430000/10000"
+                    }
+                }
+            }
+        )
+        == 1001420000
+    )
+    environment.command.assert_not_called()
+
+
+def test_fixture_waits_for_namespace_security_allocation(monkeypatch, prepared_cluster, tmp_path):
+    from tests.e2e import environment as module
+
+    command = Mock(
+        return_value=json.dumps(
+            {
+                "metadata": {
+                    "annotations": {"openshift.io/sa.scc.supplemental-groups": "1001420000/10000"}
+                }
+            }
+        )
+    )
+    environment = RunEnvironment(prepared_cluster[0], "run", tmp_path, command)
+    monkeypatch.setattr(module.time, "sleep", Mock())
+    assert environment.fixture_group({"metadata": {}}) == 1001420000
+    command.assert_called_once()
+
+
+@pytest.mark.parametrize("allocated", ["0/10000", "1001420000/0", "not-a-range"])
+def test_fixture_rejects_invalid_or_root_group(prepared_cluster, tmp_path, allocated):
+    environment = RunEnvironment(prepared_cluster[0], "run", tmp_path, Mock())
+    with pytest.raises(RuntimeError, match="invalid allocated filesystem group"):
+        environment.fixture_group(
+            {"metadata": {"annotations": {"openshift.io/sa.scc.supplemental-groups": allocated}}}
+        )
+
+
+@pytest.mark.parametrize("container_kind", ["initContainerStatuses", "containerStatuses"])
+def test_fixture_failure_exits_immediately_with_log_instructions(
+    monkeypatch, prepared_cluster, tmp_path, container_kind
+):
+    from tests.e2e import environment as module
+
+    pod = {
+        "metadata": {"uid": "fixture-uid"},
+        "status": {
+            "phase": "Failed",
+            container_kind: [
+                {
+                    "name": "prepare",
+                    "state": {"terminated": {"exitCode": 1, "message": "private response"}},
+                }
+            ],
+        },
+    }
+    environment = RunEnvironment(
+        prepared_cluster[0], "run", tmp_path, Mock(return_value=json.dumps(pod))
+    )
+    environment.pod_uid = "fixture-uid"
+    sleep = Mock()
+    monkeypatch.setattr(module.time, "sleep", sleep)
+    with pytest.raises(RuntimeError, match="exited with code 1") as error:
+        environment.wait_for_fixtures()
+    assert "oc logs -n new-test-project e2e-output-verifier -c prepare" in str(error.value)
+    assert "private" not in str(error.value)
+    sleep.assert_not_called()
+
+
+def test_fixture_pending_progress_then_ready(monkeypatch, prepared_cluster, tmp_path, capsys):
+    from tests.e2e import environment as module
+
+    pending = {"metadata": {"uid": "fixture-uid"}, "status": {"phase": "Pending"}}
+    ready = {
+        "metadata": {"uid": "fixture-uid"},
+        "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]},
+    }
+    environment = RunEnvironment(
+        prepared_cluster[0],
+        "run",
+        tmp_path,
+        Mock(side_effect=[json.dumps(pending), json.dumps(ready)]),
+    )
+    environment.pod_uid = "fixture-uid"
+    monkeypatch.setattr(module.time, "sleep", Mock())
+    environment.wait_for_fixtures()
+    assert "Waiting for fixtures: Pending" in capsys.readouterr().out
+
+
+def test_fixture_readiness_deadline_is_bounded(monkeypatch, prepared_cluster, tmp_path):
+    from tests.e2e import environment as module
+
+    args = prepared_cluster[0]
+    args.fixture_timeout = 1
+    pending = {"metadata": {"uid": "fixture-uid"}, "status": {"phase": "Pending"}}
+    environment = RunEnvironment(args, "run", tmp_path, Mock(return_value=json.dumps(pending)))
+    environment.pod_uid = "fixture-uid"
+    monkeypatch.setattr(module.time, "monotonic", Mock(side_effect=[0, 1]))
+    with pytest.raises(RuntimeError, match="Fixture readiness deadline exceeded"):
+        environment.wait_for_fixtures()
+
+
+@pytest.mark.parametrize(
+    "image", ["quay.io/other/service@sha256:" + "a" * 64, "quay.io/test/training-service:latest"]
+)
+def test_reused_image_must_be_digest_pinned_in_selected_repository(prepared_cluster, image):
+    args = prepared_cluster[0]
+    args.reuse_image = image
+    with pytest.raises(ValueError, match="must pin a sha256 digest"):
+        deploy.preflight(args)
+
+
+def test_reuse_preflight_needs_no_podman_or_push_credentials(monkeypatch, prepared_cluster):
+    args, _, _, _, _ = prepared_cluster
+    args.reuse_image = args.image_repository + "@sha256:" + "a" * 64
+    args.values.write_text("env: []\n")
+    monkeypatch.setenv("TRAINING_SERVICE_TOKEN", "unit-placeholder")
+    monkeypatch.setattr(deploy, "cluster_preflight", Mock())
+    which = Mock(side_effect=lambda name: None if name == "podman" else "/usr/bin/" + name)
+    monkeypatch.setattr(deploy.shutil, "which", which)
+
+    def query(cmd, **kwargs):
+        assert cmd[0] != "podman"
+        if cmd[:3] == ["oc", "get", "nodes"]:
+            return json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {"labels": {"kubernetes.io/arch": "amd64"}},
+                            "status": {"allocatable": {"nvidia.com/gpu": "1"}},
+                        }
+                    ]
+                }
+            )
+        return "yes"
+
+    monkeypatch.setattr(deploy, "command", query)
+    deploy.preflight(args)
+    assert [call.args[0] for call in which.call_args_list] == ["helm", "oc", "git"]
+
+
+def test_fixture_write_failure_happens_before_model_download(monkeypatch):
+    import runpy
+    import tempfile
+
+    download = Mock()
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
+    monkeypatch.setattr(os, "umask", Mock())
+    monkeypatch.setattr(
+        tempfile, "TemporaryFile", Mock(side_effect=PermissionError("private path"))
+    )
+    with pytest.raises(RuntimeError, match="PVC is not writable") as error:
+        runpy.run_path(str(deploy.ROOT / "tests/e2e/fixtures/prepare.py"))
+    assert "private" not in str(error.value)
+    download.assert_not_called()
 
 
 def test_fixture_cleanup_refuses_replaced_namespace(prepared_cluster, tmp_path):

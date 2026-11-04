@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import ssl
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -180,10 +181,100 @@ class RunEnvironment:
             **spec,
         }
 
+    def fixture_group(self, namespace):
+        """Use an OpenShift-allocated group, never a hardcoded UID or privileged pod."""
+        deadline = time.monotonic() + min(30, self.args.fixture_timeout)
+        while True:
+            annotations = namespace["metadata"].get("annotations", {})
+            allocated = annotations.get(
+                "openshift.io/sa.scc.supplemental-groups"
+            ) or annotations.get("openshift.io/sa.scc.uid-range", "")
+            if allocated:
+                try:
+                    first, size = allocated.split(",")[0].split("/")
+                    if int(first) > 0 and int(size) > 0:
+                        return int(first)
+                except ValueError:
+                    pass
+                raise RuntimeError("Namespace has an invalid allocated filesystem group range")
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Namespace has no OpenShift-allocated filesystem group; "
+                    "ask an administrator to check namespace security allocation"
+                )
+            time.sleep(1)
+            namespace = json.loads(
+                self.command(
+                    ["oc", "get", "namespace", self.args.namespace, "-o", "json"], timeout=15
+                )
+            )
+
+    def wait_for_fixtures(self):
+        """Fail on terminated setup containers instead of waiting out the readiness deadline."""
+        deadline = time.monotonic() + self.args.fixture_timeout
+        previous = None
+        last_progress = 0
+        while True:
+            pod = json.loads(
+                self.command(
+                    [
+                        "oc",
+                        "get",
+                        "pod/e2e-output-verifier",
+                        "-n",
+                        self.args.namespace,
+                        "-o",
+                        "json",
+                    ],
+                    timeout=15,
+                )
+            )
+            if pod["metadata"]["uid"] != self.pod_uid:
+                raise RuntimeError("Fixture pod ownership changed while waiting for readiness")
+            status = pod.get("status", {})
+            containers = status.get("initContainerStatuses", []) + status.get(
+                "containerStatuses", []
+            )
+            progress = [status.get("phase", "Pending")]
+            for container in containers:
+                state = container.get("state", {})
+                terminated = state.get("terminated", {})
+                if terminated.get("exitCode", 0) != 0:
+                    raise RuntimeError(
+                        f"Fixture container '{container['name']}' exited with code "
+                        f"{terminated['exitCode']} in {self.args.namespace}/e2e-output-verifier. "
+                        f"Inspect: oc logs -n {self.args.namespace} e2e-output-verifier "
+                        f"-c {container['name']}. "
+                        "Check PVC write permissions/fsGroup if preparation failed."
+                    )
+                state_name = state.get("waiting", {}).get("reason") or next(iter(state), "waiting")
+                progress.append(f"{container['name']}: {state_name}")
+            if status.get("phase") in {"Failed", "Succeeded"}:
+                raise RuntimeError(f"Fixture pod ended as {status['phase']} before becoming Ready")
+            if any(
+                c.get("type") == "Ready" and c.get("status") == "True"
+                for c in status.get("conditions", [])
+            ):
+                print("Fixture pod Ready; model and dataset prepared", flush=True)
+                return
+            summary = ", ".join(progress)
+            now = time.monotonic()
+            if summary != previous or now - last_progress >= 30:
+                print(f"Waiting for fixtures: {summary}", flush=True)
+                previous, last_progress = summary, now
+            remaining = deadline - now
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Fixture readiness deadline exceeded ({summary}); inspect pod events/PVC "
+                    f"in namespace '{self.args.namespace}'"
+                )
+            time.sleep(min(2, remaining))
+
     def provision(self):
         args = self.args
         namespace = self.create("namespace.yaml", namespace_manifest(args.namespace, self.run_id))
         self.namespace_uid = namespace["metadata"]["uid"]
+        group = self.fixture_group(namespace)
         try:
             self.create(
                 "localqueue.yaml",
@@ -248,6 +339,8 @@ class RunEnvironment:
                 "automountServiceAccountToken": False,
                 "securityContext": {
                     "runAsNonRoot": True,
+                    "fsGroup": group,
+                    "fsGroupChangePolicy": "OnRootMismatch",
                     "seccompProfile": {"type": "RuntimeDefault"},
                 },
                 "initContainers": [
@@ -290,19 +383,7 @@ class RunEnvironment:
             },
         )
         self.pod_uid = self.create("fixtures.yaml", pod)["metadata"]["uid"]
-        self.command(
-            [
-                "oc",
-                "wait",
-                "pod/e2e-output-verifier",
-                "-n",
-                args.namespace,
-                "--for=condition=Ready",
-                "--timeout",
-                f"{args.fixture_timeout}s",
-            ],
-            timeout=args.fixture_timeout + 30,
-        )
+        self.wait_for_fixtures()
         payload = json.loads((Path(__file__).with_name("job.example.json")).read_text())
         payload.update(queue_name="e2e")
         payload["model"]["uri"] = "pvc://e2e-storage/models/qwen/"

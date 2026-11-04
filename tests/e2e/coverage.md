@@ -33,7 +33,7 @@ while independent API tests continue; the final run still fails.
 | LOG-06/07 (deferred) | Closing successful follow exercises disconnect; reconnect, slow consumer, lifetime/leaks and malicious ownership/gateway fixtures still required |
 | DEL-01–03/05/06 (partial) | Terminal delete/eventual/repeated 404; controller-UID observer confirms owned job/cluster/batch Job/pod/Workload disappearance and observed GPU pods gone; PVC UIDs/output preserved, shared RayJob API survives |
 | DEL-04/07/08 (deferred) | Active/shared/unowned/retrying/UID-race/finalizer cases remain unit-tested only; baseline does not inject these faults |
-| OPS-01 (extended) | `deploy.py`: read-only preflight, Podman/Quay/Helm, fresh namespace/fixtures, unique release/tag, pushed digest, readiness/Route TLS, running image IDs/service versions, terminal summary/result evidence |
+| OPS-01 (extended) | `deploy.py`: read-only preflight, Podman/Quay/Helm or explicit digest-pinned image reuse, fresh namespace/fixtures, unique release/tag, pushed/reused digest, namespace-allocated fixture fsGroup and write check, progress/failed-init detection, readiness/Route TLS, running image IDs/service versions, terminal summary/result evidence |
 | OPS-02–09 (partial/deferred) | Bounded config/auth failures and independent invocations; restart, ambiguous-response injection, concurrency/load, upgrade and outages need focused follow-ups |
 | TP | Disconnected, ROCm/CPU, operator/Trainer, estimation/custom code/new storage not introduced or certified |
 
