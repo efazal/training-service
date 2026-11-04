@@ -52,8 +52,9 @@ Open http://localhost:8080/docs. Probes are at `/healthz` and `/readyz`.
 See [live E2E tests](tests/e2e/README.md) for `make test-e2e` against an existing
 service, or `make test-e2e-deploy` to build with Podman, push to Quay, create a
 fresh Kueue-labeled namespace, deploy Helm and test real queued training in one
-command. Ray/Kueue must already be enabled in the DSC. Live tests are excluded
-from unit-test/CI defaults.
+command. Ray and Kueue must already be installed/configured; direct installations
+are supported without checking DSC management state. Kueue failures are reported
+without stopping independent API tests. Live tests are excluded from unit-test/CI defaults.
 
 Generated code lives in the committed `src/training_service_api/` package.
 Its README and every Python file identify it as generated and not to be edited

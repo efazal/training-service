@@ -7,7 +7,10 @@ Podman/Quay/Helm automation and fresh Kueue-labeled namespace, LocalQueue,
 PVC and tiny training fixture provisioning. The normal deployment run always
 requires real Kueue-admitted training. These supersede the original
 existing-deployment-only boundary below. Shared cluster/operator/DSC/ClusterQueue/
-StorageClass provisioning remains excluded; users enable Ray/Kueue in the DSC.
+StorageClass provisioning remains excluded; users prepare Ray/Kueue independently.
+Direct installation is supported; do not gate the suite on DSC management state.
+Kueue failures must identify the cause, fail the queued test and allow independent
+API tests to continue, with a nonzero final result.
 See [instructions](README.md) and [coverage status](coverage.md). IDs/priorities
 below are the maintained backlog, not a list of passing tests.
 
@@ -66,7 +69,7 @@ existing lifecycle test does not independently verify checkpoints or GPU cleanup
 | Smoke | Read-only API checks; negative mutations use unique, nonexistent test names and verify no job was created |
 | Training | Opt-in compute allocation; small model, tiny compatible dataset, bounded runtime, unique output prefix |
 | Training without Kueue | Existing Ray-enabled deployment with Kueue absent/disabled, or an explicitly permitted unqueued project; omit `queue_name` and verify successful training without bypassing policy |
-| Training with Kueue | Existing Ray/Kueue-enabled deployment with the supported DSC settings, RayJob integration, project enrollment, LocalQueue/ClusterQueue and quota configured; verify admission and successful training |
+| Training with Kueue | Existing Ray/Kueue-enabled deployment (direct or DSC-managed), RayJob integration, project enrollment, LocalQueue/ClusterQueue and quota configured; verify admission and successful training |
 | Security | Distinct real users/service accounts and two projects; restricted credentials, not a cluster-admin token for denial assertions |
 | Infrastructure | Read-only cluster/storage observer verifies ownership, cleanup, GPU requests, and artifacts independently of API responses |
 | Resilience | Explicit opt-in on a dedicated test deployment; restart, dependency outage, race, and concurrency scenarios |
@@ -216,8 +219,8 @@ validation test:
   `SUCCEEDED`, outputs, and safe terminal cleanup without requiring queue APIs.
   Record whether Kueue was absent or an explicit opt-out was used; an opt-out
   does not prove the absent-Kueue case.
-- **With Kueue:** prerequisites are Ray and Kueue enabled/configured through the
-  supported DataScienceCluster (DSC) settings, applicable RayJob integration and
+- **With Kueue:** prerequisites are installed/configured Ray and Kueue, independent
+  of DSC management state, applicable RayJob integration and
   namespace enrollment, an active project LocalQueue backed by a ClusterQueue,
   appropriate ResourceFlavor/quota, and caller permissions. Submit to the named
   LocalQueue; verify the queue is honored, the associated Workload is admitted,
@@ -241,7 +244,7 @@ validation test:
 | QUEUE-07 | P1 | GPU scarcity, unschedulable placement, project quota, queue suspension, and workload-policy admission failures surface intelligible reasons without API hangs |
 | QUEUE-08 | P1 | Verify every advertised RHOAI/KubeRay/CodeFlare/Ray client/runtime combination; do not claim compatibility solely because Helm installs |
 | QUEUE-09 | P0 | Run a real no-queue lifecycle with Kueue absent/disabled; omit `queue_name`, require `SUCCEEDED` and durable artifacts, and independently verify test-owned resource/GPU cleanup |
-| QUEUE-10 | P0 | Run a real queued lifecycle with Kueue enabled/configured in the DSC and the required RayJob/namespace integration; verify LocalQueue selection, Workload admission, `SUCCEEDED`, durable artifacts, and resource/GPU cleanup |
+| QUEUE-10 | P0 | Run a real queued lifecycle with installed/configured Kueue (direct or DSC-managed) and the required RayJob/namespace integration; verify LocalQueue selection, Workload admission, `SUCCEEDED`, durable artifacts, and resource/GPU cleanup |
 | QUEUE-11 | P0 | In a mandatory-admission project, missing queue selection cannot start an unadmitted workload; verify the documented rejection/pending behavior without silently opting out |
 
 ## 7. Listing, detail, timestamps, and pagination

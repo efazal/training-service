@@ -12,19 +12,18 @@ Prepare once:
 - Install `uv`, Podman, Helm 3.13+ and `oc`; start your Podman machine if needed.
 - `oc login` to your test cluster; `podman login quay.io`.
   Never enable shell tracing or copy tokens into files.
-- An administrator must enable **both Ray and Kueue in the DSC**
-  (`spec.components.ray.managementState: Managed` and
-  `spec.components.kueue.managementState: Managed`) and wait for
-  `RayReady=True` / `KueueReady=True`. Existing CRDs/controllers alone are not
-  sufficient. On other clusters this is a user/admin prerequisite, not something
-  the script enables. Configure Kueue's RayJob integration, ResourceFlavors and
-  an Active ClusterQueue with sufficient CPU, memory and NVIDIA GPU quota.
+- An administrator prepares Ray and Kueue, including Kueue's RayJob integration,
+  ResourceFlavors and an Active ClusterQueue with CPU, memory and NVIDIA GPU
+  quota. **Direct installations are supported**: the runner does not read the DSC
+  or require Kueue to be DSC-managed. It assumes this infrastructure is ready;
+  the queued test verifies actual APIs, namespace policy and admission. A Kueue
+  problem fails that test with diagnostics, not the independent API tests.
 - Select a **ReadWriteMany-capable StorageClass**, writable by OpenShift-assigned
   nonroot UIDs. The built-in fixture needs one NVIDIA GPU, 4 CPUs, 32Gi memory,
   5Gi storage and outbound access to the public Hugging Face model repository.
   This is not a disconnected/ROCm or CPU-only test.
 - The deployment identity needs namespace creation, Helm install/uninstall,
-  DSC/StorageClass/node reads, Route/service/pod reads, `get` access to ConfigMap
+  StorageClass/node reads, Route/service/pod reads, `get` access to ConfigMap
   `openshift-config-managed/default-ingress-cert` for public TLS trust discovery,
   pod exec for evidence, and permission to install the chart's
   TokenReview/SAR ClusterRole and ClusterRoleBinding. This is separate from the
@@ -73,7 +72,7 @@ Each invocation creates a new `training-e2e-<run>` namespace and Helm release.
 The [namespace manifest](fixtures/namespace.yaml) includes
 `kueue.openshift.io/managed: "true"`, `opendatahub.io/dashboard: "true"`, and a
 unique E2E ownership label. It creates LocalQueue `e2e` backed by the existing
-DSC-default ClusterQueue (override with `--cluster-queue`), a 5Gi RWX PVC and a
+ClusterQueue `default` (override with `--cluster-queue`), a 5Gi RWX PVC and a
 fixture/verifier pod. The pod downloads a pinned public Qwen2.5-0.5B-Instruct
 revision and prepares eight chat examples; training uses PVC references and
 needs no HF token. The generated request and manifests are saved with results.
@@ -91,8 +90,21 @@ make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-serv
 ```
 
 The terminal summary reports pass/fail/skip counts, training success, Kueue
-admission, GPU cleanup, checkpoint verification and evidence paths. Missing
-required lifecycle evidence fails even if pytest was accidentally filtered.
+admission, GPU cleanup, checkpoint verification and evidence paths. Kueue setup
+and test diagnostics also appear in the summary and JSON/JUnit evidence. Missing
+APIs/queues, denied observer permissions, inactive queues, namespace-selector
+mismatches and missing resource coverage have distinct diagnostics; training
+timeouts include the last observed Workload condition reasons. Raw controller
+messages and API error bodies are not copied into reports.
+
+A LocalQueue creation/check failure does not abort deployment or the suite.
+The queued test fails before submission if its prerequisites are unavailable;
+independent tests continue. The deployment runner overrides inherited pytest
+fail-fast settings (`--maxfail=0`) and **still exits nonzero** for failed tests.
+It never silently skips queued training or falls back to unqueued execution.
+Missing required lifecycle evidence fails even if pytest was accidentally filtered.
+`--preflight-only` checks deployment/tooling/TLS prerequisites, **not Kueue
+readiness**; actual queue checks belong to the selected lifecycle test.
 
 Successful deployments and the fixture/verifier pod are removed with bounded
 waits; `--keep-deployment` retains both for manual inspection. Failed/interrupted
@@ -120,8 +132,8 @@ make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile no-kue
 - `no-kueue`: **omit `queue_name` entirely**. Preflight requires Kueue's API group
   to be absent. This conservative check does not certify installed-but-disabled
   Kueue; use a separately prepared absent-Kueue environment for that evidence.
-- `with-kueue`: supply a nonempty `queue_name` in the JSON. Prepare Ray/Kueue DSC
-  settings, RayJob integration, namespace enrollment, ResourceFlavor, active
+- `with-kueue`: supply a nonempty `queue_name` in the JSON. Prepare Ray/Kueue
+  (DSC-managed or directly installed), RayJob integration, namespace enrollment, ResourceFlavor, active
   ClusterQueue/quota and LocalQueue. Verify the label and an owner-linked
   Workload with `Admitted=True`, not just successful POST.
 - `unqueued-opt-out`: omit `queue_name` only where project policy explicitly

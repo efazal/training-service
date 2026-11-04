@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import httpx
@@ -17,10 +18,10 @@ from tests.e2e.environment import (
     RunEnvironment,
     cluster_preflight,
     namespace_manifest,
-    selector_matches,
+    terminal_summary,
 )
-from tests.e2e.observer import Observer, owned_by, pages
-from tests.e2e.support import pvc_path, workload
+from tests.e2e.observer import Observer, ObserverError, failure_reason, owned_by, pages
+from tests.e2e.support import pvc_path, selector_matches, workload
 from tests.e2e.test_training_jobs import follow_logs
 
 
@@ -116,7 +117,10 @@ def test_observer_does_not_claim_gpu_cleanup_without_observation():
         observer.verify_cleanup("test-job", 1)
 
 
-def test_subprocess_errors_withhold_raw_output(monkeypatch):
+@pytest.mark.parametrize(
+    "cmd", [["helm", "install", "test"], [sys.executable, "-m", "pytest", "tests/e2e"]]
+)
+def test_subprocess_errors_withhold_raw_output(monkeypatch, cmd):
     monkeypatch.setattr(
         deploy.subprocess,
         "run",
@@ -130,7 +134,7 @@ def test_subprocess_errors_withhold_raw_output(monkeypatch):
         ),
     )
     with pytest.raises(RuntimeError) as error:
-        deploy.command(["helm", "install", "test"])
+        deploy.command(cmd)
     assert "private" not in str(error.value)
     assert "exit 1" in str(error.value)
 
@@ -160,9 +164,8 @@ def test_runner_build_push_digest_install_test_cleanup(
     monkeypatch.setattr(deploy, "preflight", Mock())
     args.ingress_ca_bundle = tmp_path / "generated-ingress-ca.pem"
     monkeypatch.setattr(deploy, "prepare_tls", Mock(return_value={"ingress_ca_source": "test"}))
-    monkeypatch.setattr(deploy, "observer_preflight", Mock())
     monkeypatch.setattr(deploy, "wait_ready", Mock())
-    environment = Mock(namespace_uid="test-namespace-uid")
+    environment = Mock(namespace_uid="test-namespace-uid", kueue_setup_error=None)
 
     def provision():
         args.job_file = tmp_path / "generated-workload.json"
@@ -228,6 +231,7 @@ def test_runner_build_push_digest_install_test_cleanup(
     assert install[2].startswith("training-e2e-") and "upgrade" not in install
     invocation = next(c for c in commands if "pytest" in c)
     assert invocation[invocation.index("--queue-profile") + 1] == "with-kueue"
+    assert "--maxfail=0" in invocation
     assert {"--job-file", "--artifact-pod", "--observe-cluster", "--check-stream"} <= set(
         invocation
     )
@@ -335,23 +339,245 @@ def test_cluster_preflight_validates_queued_environment_read_only(prepared_clust
     assert all(call.args[0][1] in {"get", "auth"} for call in command.call_args_list)
 
 
-@pytest.mark.parametrize(
-    "problem",
-    ["removed", "not-ready", "queue-inactive", "selector", "gpu", "storage", "runtime", "private"],
-)
-def test_missing_kueue_prerequisites_stop_before_mutation(prepared_cluster, problem):
+def test_cluster_preflight_accepts_directly_installed_kueue(prepared_cluster):
     args, values, dsc, queue, command = prepared_cluster
-    if problem == "removed":
-        dsc["spec"]["components"]["kueue"]["managementState"] = "Removed"
-    elif problem == "not-ready":
-        dsc["status"]["conditions"][1]["status"] = "False"
-    elif problem == "queue-inactive":
-        queue["status"]["conditions"][0]["status"] = "False"
+    dsc["spec"]["components"]["kueue"]["managementState"] = "Removed"
+    dsc["status"]["conditions"][1]["status"] = "False"
+    queue["status"]["conditions"][0]["status"] = "False"
+    cluster_preflight(args, command, values)
+    assert args.cluster_queue == "default"
+    assert not any(
+        call.args[0][2] in {"datascienceclusters", "clusterqueue"}
+        for call in command.call_args_list
+        if call.args[0][1] == "get"
+    )
+
+
+def test_localqueue_setup_failure_does_not_abort_other_fixtures(prepared_cluster, tmp_path):
+    args, values, _, _, command = prepared_cluster
+    cluster_preflight(args, command, values)
+    environment = RunEnvironment(args, "run-123", tmp_path, Mock())
+    documents = []
+
+    def create(filename, document):
+        documents.append(document)
+        if document["kind"] == "LocalQueue":
+            raise RuntimeError("raw private response must not be exposed")
+        document["metadata"]["uid"] = "uid-" + document["metadata"]["name"]
+        return document
+
+    environment.create = create
+    environment.provision()
+    assert documents[-1]["kind"] == "Pod"
+    assert workload(args.job_file, "with-kueue")["queue_name"] == "e2e"
+    assert "LocalQueue" in environment.kueue_setup_error
+    assert "private" not in environment.kueue_setup_error
+
+
+@pytest.fixture
+def queue_observer(monkeypatch, prepared_cluster):
+    from tests.e2e import observer as module
+
+    _, _, _, queue, _ = prepared_cluster
+    result = object.__new__(Observer)
+    result.project, result.queue = "new-test-project", None
+    result.api, result.core, result.custom = Mock(), Mock(), Mock()
+    result.inventory, result.listing = Mock(return_value=[]), Mock(return_value=[])
+    result.preserved, result.uids, result.resources = [], set(), set()
+    result.job_uid, result.saw_gpu, result.admitted = None, False, False
+    result.core.read_namespace.return_value.metadata.labels = namespace_manifest(
+        result.project, "run"
+    )["metadata"]["labels"]
+    result.custom.get_namespaced_custom_object.return_value = {"spec": {"clusterQueue": "default"}}
+    result.custom.get_cluster_custom_object.return_value = queue
+    discovery = Mock()
+    discovery.get_api_versions.return_value.groups = [SimpleNamespace(name="kueue.x-k8s.io")]
+    monkeypatch.setattr(module.client, "ApisApi", Mock(return_value=discovery))
+    payload = json.loads((deploy.ROOT / "tests/e2e/job.example.json").read_text())
+    payload["queue_name"] = "e2e"
+    return result, payload, queue, discovery
+
+
+def test_observer_accepts_operational_kueue_regardless_of_installation_method(queue_observer):
+    observer, payload, _, _ = queue_observer
+    observer.preflight(payload, "with-kueue")
+    assert observer.queue == "e2e"
+    observer.inventory.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "problem,expected",
+    [
+        ("absent", "Kueue API group is absent"),
+        ("local-missing", "LocalQueue 'new-test-project/e2e': not found"),
+        ("forbidden", "ClusterQueue 'default': observer permission denied"),
+        ("inactive", "Active=False (FlavorNotFound)"),
+        ("selector", "namespaceSelector mismatch"),
+        ("resources", "does not cover requested resources: nvidia.com/gpu"),
+        (
+            "workloads",
+            "Kueue Workloads in namespace 'new-test-project': observer permission denied",
+        ),
+    ],
+)
+def test_queue_failures_are_actionable_and_do_not_expose_raw_bodies(
+    queue_observer, problem, expected
+):
+    observer, payload, queue, discovery = queue_observer
+    if problem == "absent":
+        discovery.get_api_versions.return_value.groups = []
+    elif problem == "local-missing":
+        observer.custom.get_namespaced_custom_object.side_effect = ApiException(
+            status=404, reason="private-token"
+        )
+    elif problem == "forbidden":
+        observer.custom.get_cluster_custom_object.side_effect = ApiException(
+            status=403, reason="private-token"
+        )
+    elif problem == "inactive":
+        queue["status"]["conditions"] = [
+            {
+                "type": "Active",
+                "status": "False",
+                "reason": "FlavorNotFound",
+                "message": "private-token",
+            }
+        ]
     elif problem == "selector":
         queue["spec"]["namespaceSelector"]["matchLabels"]["other-policy"] = "required"
-    elif problem == "gpu":
+    elif problem == "resources":
         queue["spec"]["resourceGroups"][0]["coveredResources"].remove("nvidia.com/gpu")
-    elif problem == "storage":
+    else:
+        observer.listing.side_effect = ApiException(status=403, reason="private-token")
+    with pytest.raises(ObserverError) as error:
+        observer.preflight(payload, "with-kueue")
+    assert expected in failure_reason(error.value)
+    assert "private-token" not in failure_reason(error.value)
+    observer.inventory.assert_not_called()
+
+
+def test_pending_workload_conditions_are_available_for_timeout_diagnostics(queue_observer):
+    observer, payload, _, _ = queue_observer
+    observer.preflight(payload, "with-kueue")
+    observer.custom.get_namespaced_custom_object.return_value = {
+        "metadata": {"uid": "job-uid", "labels": {"kueue.x-k8s.io/queue-name": "e2e"}}
+    }
+    observer.listing.return_value = [
+        {
+            "metadata": {
+                "name": "owned-workload",
+                "uid": "workload-uid",
+                "ownerReferences": [{"uid": "job-uid", "controller": True}],
+            },
+            "spec": {"queueName": "e2e"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "QuotaReserved",
+                        "status": "False",
+                        "reason": "Pending",
+                        "message": "private-token",
+                    },
+                    {"type": "Admitted", "status": "False", "reason": "NoReservation"},
+                ]
+            },
+        }
+    ]
+    observer.observe("test-job")
+    assert "QuotaReserved=False (Pending)" in observer.queue_diagnostic()
+    assert "Admitted=False (NoReservation)" in observer.queue_diagnostic()
+    assert "private-token" not in observer.queue_diagnostic()
+
+
+def test_failed_queue_fixture_continues_suite_and_preserves_failure_exit(jobfile, tmp_path, capsys):
+    payload = json.loads(jobfile.read_text())
+    payload["queue_name"] = "e2e"
+    jobfile.write_text(json.dumps(payload))
+    suite = tmp_path / "test_continuation.py"
+    suite.write_text("""
+from types import SimpleNamespace
+from unittest.mock import Mock
+import pytest
+from tests.e2e import observer as module
+
+@pytest.fixture
+def api():
+    return SimpleNamespace(project="unit-project")
+
+@pytest.fixture(autouse=True)
+def broken_queue(monkeypatch, request):
+    result = SimpleNamespace(
+        api=Mock(),
+        preflight=Mock(side_effect=module.ObserverError(
+            "LocalQueue 'unit-project/e2e': not found (HTTP 404)"
+        )),
+    )
+    monkeypatch.setattr(module, "Observer", lambda project: result)
+    yield
+    if request.node.name == "test_a_queued":
+        result.api.close.assert_called_once()
+    else:
+        result.api.close.assert_not_called()
+
+def test_a_queued(observer):
+    raise AssertionError("must fail before submission")
+
+def test_b_independent():
+    assert True
+""")
+    env = dict(
+        {k: v for k, v in os.environ.items() if not k.startswith("TRAINING_SERVICE_")},
+        TRAINING_SERVICE_URL="https://unit.invalid",
+        TRAINING_SERVICE_PROJECT="unit-project",
+        TRAINING_SERVICE_TOKEN="unit-placeholder",
+        TRAINING_SERVICE_EVIDENCE_DIR=str(tmp_path / "results"),
+        PYTEST_ADDOPTS="-x",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "tests.e2e.conftest",
+            str(suite),
+            "--job-file",
+            str(jobfile),
+            "--queue-profile",
+            "with-kueue",
+            "--observe-cluster",
+            "--maxfail=0",
+            "--junitxml",
+            str(tmp_path / "results/junit.xml"),
+        ],
+        cwd=deploy.ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "1 passed, 1 error" in result.stdout
+    report = json.loads((tmp_path / "results/tests.json").read_text())
+    assert report["passed"] == report["failed"] == 1
+    assert "LocalQueue 'unit-project/e2e': not found" in report["failures"][0]["reason"]
+    assert (
+        "LocalQueue 'unit-project/e2e': not found" in (tmp_path / "results/junit.xml").read_text()
+    )
+    terminal_summary({"outcome": "failed", "namespace": "unit-project"}, tmp_path / "results")
+    output = capsys.readouterr().out
+    assert "1 passed, 1 failed" in output
+    assert "LocalQueue 'unit-project/e2e': not found" in output
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["storage", "runtime", "private"],
+)
+def test_missing_deployment_prerequisites_stop_before_mutation(prepared_cluster, problem):
+    args, values, _, _, command = prepared_cluster
+    if problem == "storage":
         args.storage_class = None
     elif problem == "runtime":
         values["env"][0]["value"] = "YOUR_RUNTIME_IMAGE"
@@ -473,6 +699,7 @@ def test_preflight_only_never_builds_pushes_or_provisions(monkeypatch, tmp_path,
     monkeypatch.setattr(deploy, "command", command)
     monkeypatch.setattr(deploy, "RunEnvironment", environment)
     environment.return_value.namespace_uid = None
+    environment.return_value.kueue_setup_error = None
     deploy.run(args)
     preflight.assert_called_once()
     tls.assert_called_once()
@@ -493,10 +720,10 @@ def test_preflight_failure_prints_summary_without_creating_resources(monkeypatch
             str(tmp_path),
         ]
     )
-    monkeypatch.setattr(deploy, "preflight", Mock(side_effect=ValueError("Kueue Removed")))
+    monkeypatch.setattr(deploy, "preflight", Mock(side_effect=ValueError("StorageClass missing")))
     command = Mock()
     monkeypatch.setattr(deploy, "command", command)
-    with pytest.raises(ValueError, match="Kueue Removed"):
+    with pytest.raises(ValueError, match="StorageClass missing"):
         deploy.run(args)
     command.assert_not_called()
     assert "Result: FAILED" in capsys.readouterr().out

@@ -1,6 +1,7 @@
 """Read-only cluster observer, separate from the HTTP caller's credentials."""
 
 import json
+import re
 import subprocess
 import time
 from pathlib import PurePosixPath
@@ -8,9 +9,34 @@ from pathlib import PurePosixPath
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-from tests.e2e.support import pvc_path
+from tests.e2e.support import pvc_path, selector_matches
 
 TIMEOUT = 15
+
+
+class ObserverError(ValueError):
+    """A deliberately credential-free diagnostic safe to show in test reports."""
+
+
+def failure_reason(error):
+    if isinstance(error, ObserverError):
+        return str(error)
+    if isinstance(error, ApiException):
+        return (
+            f"Kubernetes observer returned HTTP {error.status}; "
+            "check observer permissions/connectivity"
+        )
+    return "Check kubeconfig, connectivity, observer permissions and fixtures (raw error withheld)"
+
+
+def conditions_summary(conditions):
+    # Never include arbitrary controller messages or API response bodies in evidence.
+    fields = []
+    for condition in conditions:
+        parts = [condition.get(key, "Unknown") for key in ("type", "status", "reason")]
+        if all(isinstance(p, str) and re.fullmatch(r"[A-Za-z0-9_]{1,80}", p) for p in parts):
+            fields.append(f"{parts[0]}={parts[1]} ({parts[2]})")
+    return "; ".join(fields) or "no conditions reported"
 
 
 def pages(fetch):
@@ -55,6 +81,9 @@ class Observer:
         self.queue = None
         self.profile = None
         self.preserved = []
+        self.queue_status = (
+            "no owned Workload observed; check RayJob integration/namespace enrollment"
+        )
 
     def __enter__(self):
         return self
@@ -83,38 +112,20 @@ class Observer:
 
     def preflight(self, payload, profile):
         self.profile = profile
-        self.core.read_namespace(self.project, _request_timeout=TIMEOUT)
+        project = self.core.read_namespace(self.project, _request_timeout=TIMEOUT)
         groups = client.ApisApi(self.api).get_api_versions(_request_timeout=TIMEOUT).groups
         kueue = any(g.name == "kueue.x-k8s.io" for g in groups)
         if profile == "no-kueue" and kueue:
-            raise ValueError(
+            raise ObserverError(
                 "Kueue APIs exist: use a Kueue-absent environment or record unqueued-opt-out"
             )
         if profile == "with-kueue":
             if not kueue:
-                raise ValueError("with-kueue requires prepared Kueue infrastructure")
+                raise ObserverError(
+                    "Kueue API group is absent; install Kueue and its RayJob integration"
+                )
             self.queue = payload["queue_name"]
-            local = self.custom.get_namespaced_custom_object(
-                "kueue.x-k8s.io",
-                "v1beta1",
-                self.project,
-                "localqueues",
-                self.queue,
-                _request_timeout=TIMEOUT,
-            )
-            cluster = self.custom.get_cluster_custom_object(
-                "kueue.x-k8s.io",
-                "v1beta1",
-                "clusterqueues",
-                local["spec"]["clusterQueue"],
-                _request_timeout=TIMEOUT,
-            )
-            if not any(
-                c["type"] == "Active" and c["status"] == "True"
-                for c in cluster.get("status", {}).get("conditions", [])
-            ):
-                raise ValueError("Selected ClusterQueue must be Active with prepared quota/flavors")
-            self.listing("workloads", "kueue.x-k8s.io", "v1beta1")
+            self.queue_preflight(project.metadata.labels or {}, payload)
         self.inventory()  # Fail on insufficient observer permissions before POST.
         # Preserve metadata only; never read Secrets or their values.
         for role in ("model", "dataset", "output"):
@@ -125,6 +136,69 @@ class Observer:
                     claim, self.project, _request_timeout=TIMEOUT
                 )
                 self.preserved.append((claim, record.metadata.uid))
+
+    def queue_preflight(self, labels, payload):
+        context = f"LocalQueue '{self.project}/{self.queue}'"
+        try:
+            local = self.custom.get_namespaced_custom_object(
+                "kueue.x-k8s.io",
+                "v1beta1",
+                self.project,
+                "localqueues",
+                self.queue,
+                _request_timeout=TIMEOUT,
+            )
+            context = f"ClusterQueue '{local['spec']['clusterQueue']}'"
+            cluster = self.custom.get_cluster_custom_object(
+                "kueue.x-k8s.io",
+                "v1beta1",
+                "clusterqueues",
+                local["spec"]["clusterQueue"],
+                _request_timeout=TIMEOUT,
+            )
+            if not any(
+                c.get("type") == "Active" and c.get("status") == "True"
+                for c in cluster.get("status", {}).get("conditions", [])
+            ):
+                raise ObserverError(
+                    f"{context} is not Active: "
+                    f"{conditions_summary(cluster.get('status', {}).get('conditions', []))}; "
+                    "check ResourceFlavors, admission checks and quota"
+                )
+            if not selector_matches(labels, cluster["spec"].get("namespaceSelector", {})):
+                raise ObserverError(
+                    f"{context} does not admit namespace '{self.project}': "
+                    "namespaceSelector mismatch"
+                )
+            covered = {
+                r
+                for group in cluster["spec"].get("resourceGroups", [])
+                for r in group.get("coveredResources", [])
+            }
+            gpu = payload.get("resources", {}).get("gpu_type", "nvidia.com/gpu")
+            missing = {"cpu", "memory", gpu} - covered
+            if missing:
+                raise ObserverError(
+                    f"{context} does not cover requested resources: {', '.join(sorted(missing))}"
+                )
+            context = f"Kueue Workloads in namespace '{self.project}'"
+            self.listing("workloads", "kueue.x-k8s.io", "v1beta1")
+        except ApiException as error:
+            reason = {
+                401: "observer credentials were rejected",
+                403: "observer permission denied",
+                404: "not found (check Kueue installation and queue names)",
+            }.get(
+                error.status, "Kubernetes request failed; check API connectivity/controller health"
+            )
+            raise ObserverError(f"{context}: {reason} (HTTP {error.status})") from None
+
+    def queue_diagnostic(self):
+        return (
+            f"Kueue LocalQueue '{self.project}/{self.queue}': {self.queue_status}"
+            if self.queue
+            else ""
+        )
 
     def observe(self, job_id):
         try:
@@ -175,6 +249,9 @@ class Observer:
                     self.admitted |= any(
                         c["type"] == "Admitted" and c["status"] == "True"
                         for c in item.get("status", {}).get("conditions", [])
+                    )
+                    self.queue_status = conditions_summary(
+                        item.get("status", {}).get("conditions", [])
                     )
         return inventory
 

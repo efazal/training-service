@@ -20,70 +20,15 @@ def namespace_manifest(name, run_id):
     return manifest
 
 
-def selector_matches(labels, selector):
-    if any(labels.get(k) != v for k, v in selector.get("matchLabels", {}).items()):
-        return False
-    for item in selector.get("matchExpressions", []):
-        key, operator, values = item["key"], item["operator"], item.get("values", [])
-        if operator == "In" and labels.get(key) not in values:
-            return False
-        if operator == "NotIn" and labels.get(key) in values:
-            return False
-        if operator == "Exists" and key not in labels:
-            return False
-        if operator == "DoesNotExist" and key in labels:
-            return False
-        if operator not in {"In", "NotIn", "Exists", "DoesNotExist"}:
-            return False
-    return True
-
-
 def cluster_preflight(args, command, values):
     """Read-only checks before image upload or creating a namespace."""
-    records = json.loads(command(["oc", "get", "datascienceclusters", "-o", "json"]))["items"]
-    if len(records) != 1:
-        raise ValueError("Expected one RHOAI DataScienceCluster with Ray and Kueue enabled")
-    dsc = records[0]
-    components = dsc.get("spec", {}).get("components", {})
-    for component in ("ray", "kueue"):
-        if components.get(component, {}).get("managementState") != "Managed":
-            raise ValueError(
-                f"DSC {dsc['metadata']['name']}: {component} is not Managed. "
-                "Ask the cluster administrator to enable "
-                f"spec.components.{component}.managementState=Managed. "
-                "The E2E runner never changes the DSC."
-            )
-        if not any(
-            c.get("type") == component.capitalize() + "Ready" and c.get("status") == "True"
-            for c in dsc.get("status", {}).get("conditions", [])
-        ):
-            raise ValueError(f"DSC {component} is enabled but not Ready; wait for reconciliation")
     if command(
         ["oc", "get", "namespace", args.namespace, "--ignore-not-found", "-o", "name"]
     ).strip():
         raise ValueError("Test namespace already exists; refusing to adopt or modify it")
-    args.cluster_queue = args.cluster_queue or components["kueue"].get(
-        "defaultClusterQueueName", "default"
-    )
-    queue = json.loads(command(["oc", "get", "clusterqueue", args.cluster_queue, "-o", "json"]))
-    if not any(
-        c.get("type") == "Active" and c.get("status") == "True"
-        for c in queue.get("status", {}).get("conditions", [])
-    ):
-        raise ValueError("Selected ClusterQueue is not Active; prepare quota/flavors first")
-    labels = namespace_manifest(args.namespace, "preflight")["metadata"]["labels"]
-    labels["kubernetes.io/metadata.name"] = args.namespace
-    if not selector_matches(labels, queue["spec"].get("namespaceSelector", {})):
-        raise ValueError("Selected ClusterQueue does not admit the test namespace labels")
-    covered = {
-        r
-        for group in queue["spec"].get("resourceGroups", [])
-        for r in group.get("coveredResources", [])
-    }
-    if not {"cpu", "memory", "nvidia.com/gpu"} <= covered:
-        raise ValueError(
-            "ClusterQueue must cover cpu, memory and nvidia.com/gpu for the tiny GPU fixture"
-        )
+    # Installation method and queue health are not global suite prerequisites.
+    # The queued lifecycle verifies actual Kueue APIs/policy before its POST.
+    args.cluster_queue = args.cluster_queue or "default"
     if not args.storage_class:
         raise ValueError(
             "Specify --storage-class with a ReadWriteMany-capable class for test fixtures"
@@ -215,6 +160,7 @@ class RunEnvironment:
         self.args, self.run_id, self.results, self.command = args, run_id, results, command
         self.namespace_uid = None
         self.pod_uid = None
+        self.kueue_setup_error = None
 
     def create(self, filename, document):
         path = self.results / filename
@@ -238,10 +184,19 @@ class RunEnvironment:
         args = self.args
         namespace = self.create("namespace.yaml", namespace_manifest(args.namespace, self.run_id))
         self.namespace_uid = namespace["metadata"]["uid"]
-        self.create(
-            "localqueue.yaml",
-            self.resource("LocalQueue", "e2e", spec={"clusterQueue": args.cluster_queue}),
-        )
+        try:
+            self.create(
+                "localqueue.yaml",
+                self.resource("LocalQueue", "e2e", spec={"clusterQueue": args.cluster_queue}),
+            )
+        except RuntimeError:
+            self.kueue_setup_error = (
+                f"LocalQueue '{args.namespace}/e2e' creation could not be confirmed for "
+                f"ClusterQueue '{args.cluster_queue}'; check Kueue APIs, create permissions "
+                "and admission webhooks. The queued test will diagnose the actual queue; "
+                "independent API tests will continue."
+            )
+            print(self.kueue_setup_error, flush=True)
         self.create(
             "storage.yaml",
             self.resource(
@@ -434,6 +389,10 @@ def terminal_summary(evidence, results):
         f"checkpoints: {checkpoints}"
     )
     print(f"Deployment cleanup: {evidence.get('deployment_cleanup', 'not deployed')}")
+    if evidence.get("kueue_setup_error"):
+        print(f"Kueue setup: {evidence['kueue_setup_error']}")
+    for failure in tests.get("failures", []):
+        print(f"Failed {failure['test']}: {failure['reason']}")
     print(f"Evidence/manifests: {results}")
     if evidence.get("namespace_created"):
         print(

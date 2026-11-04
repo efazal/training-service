@@ -8,7 +8,9 @@ The follow-up requests add Podman → Quay → Helm automation, a fresh labeled
 namespace, LocalQueue/PVC/fixture provisioning, and mandatory Kueue-admitted
 training. They supersede the ticket/plan's original “already deployed only”
 boundary. Shared cluster/operator/DSC/ClusterQueue/StorageClass provisioning and
-Jenkins remain excluded; users enable Ray/Kueue in the DSC first.
+Jenkins remain excluded; users prepare Ray/Kueue first. Direct installation is
+supported without DSC checks. Kueue failures fail the queued test with diagnostics
+while independent API tests continue; the final run still fails.
 
 | Plan IDs | Implemented test / remaining status |
 | --- | --- |
@@ -23,7 +25,7 @@ Jenkins remain excluded; users enable Ray/Kueue in the DSC first.
 | SEC-01/06/07 (partial) | Missing/invalid/malformed token, Bearer challenge, token echo guard, verified TLS/no redirects/proxies. Automatic public ingress CA discovery and separate explicit Route/Ray overrides; no Secret reads, private-key copies or TLS bypass. Expired/revoked personas, Secret scans and adversarial TLS deferred |
 | SEC-02–05/08–10 (partial/deferred) | Optional forbidden-project list; complete real least-privilege endpoint/persona matrix, permission changes and concurrent isolation deferred |
 | DATA-02–05/07–09 (partial/deferred) | Missing HF/S3 Secret/PVC context and PVC traversal rejection; positive inputs from chosen fixture. Private/gated/S3 outputs, credential/storage failures and access-mode matrix need dedicated fixtures |
-| QUEUE-01/02/09/10 (profile-dependent) | Default deploy run requires DSC Ray/Kueue Managed+Ready, labeled fresh namespace, LocalQueue, owned admitted Workload, SUCCEEDED, artifacts and GPU cleanup. Existing-deployment absent-Kueue/unqueued-opt-out profiles remain separate |
+| QUEUE-01/02/09/10 (profile-dependent) | Default deploy run assumes installed/configured Ray/Kueue (no DSC check), creates a labeled fresh namespace and LocalQueue, then requires an owned admitted Workload, SUCCEEDED, artifacts and GPU cleanup. Queue failures are test-local, not a suite-wide abort. Existing-deployment absent-Kueue/unqueued-opt-out profiles remain separate |
 | QUEUE-03–08/11 (partial/deferred) | Invalid resources/empty queue covered. Quota hold/release, mandatory-admission denial, disabled integrations and compatibility matrix require prepared scenarios |
 | READ-01–04/06/07 (partial) | Compact summaries/count bounds, pagination, created-job inclusion/status filters, payload/optional truthful timestamps, malformed token; exact inventory count/default-status/filter binding matrix deferred |
 | READ-05/08 (deferred) | External/failed-before-start records, metadata after API restart require prepared scenarios |
@@ -35,7 +37,7 @@ Jenkins remain excluded; users enable Ray/Kueue in the DSC first.
 | OPS-02–09 (partial/deferred) | Bounded config/auth failures and independent invocations; restart, ambiguous-response injection, concurrency/load, upgrade and outages need focused follow-ups |
 | TP | Disconnected, ROCm/CPU, operator/Trainer, estimation/custom code/new storage not introduced or certified |
 
-Optional fixture skips are visible; a selected profile missing prerequisites fails
-preflight. An all-skipped run fails. Smoke/unqueued-opt-out is **not** both
+Optional fixture skips are visible; a selected profile missing queue prerequisites fails
+its lifecycle test setup, not the entire suite. An all-skipped run fails. Smoke/unqueued-opt-out is **not** both
 scheduling profiles or customer readiness. Attach actual sanitized reports and
 component versions per environment; this table does not imply live execution.

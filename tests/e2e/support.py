@@ -8,6 +8,24 @@ from urllib.parse import unquote, urlsplit
 PROFILES = ("no-kueue", "with-kueue", "unqueued-opt-out")
 
 
+def selector_matches(labels, selector):
+    if any(labels.get(k) != v for k, v in selector.get("matchLabels", {}).items()):
+        return False
+    for item in selector.get("matchExpressions", []):
+        key, operator, values = item["key"], item["operator"], item.get("values", [])
+        if operator == "In" and labels.get(key) not in values:
+            return False
+        if operator == "NotIn" and labels.get(key) in values:
+            return False
+        if operator == "Exists" and key not in labels:
+            return False
+        if operator == "DoesNotExist" and key in labels:
+            return False
+        if operator not in {"In", "NotIn", "Exists", "DoesNotExist"}:
+            return False
+    return True
+
+
 def namespace(value):
     if len(value) > 63 or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", value):
         raise ValueError("Project must be a Kubernetes namespace name")

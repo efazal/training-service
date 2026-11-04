@@ -18,6 +18,7 @@ TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
 STATUSES = TERMINAL | {"PENDING", "RUNNING"}
 POLL_SECONDS = 5
 OUTCOMES = {"passed": 0, "failed": 0, "skipped": 0}
+FAILURES = []
 
 
 def pytest_addoption(parser):
@@ -56,6 +57,7 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     OUTCOMES.update(passed=0, failed=0, skipped=0)
+    FAILURES.clear()
     if config.option.collectonly:
         return
     missing = [
@@ -97,6 +99,11 @@ def pytest_configure(config):
 def pytest_runtest_logreport(report):
     if report.when == "call" or report.failed or report.skipped:
         OUTCOMES[report.outcome] += 1
+    if report.failed:
+        # Only explicitly sanitized observer diagnostics are copied to the summary.
+        for key, reason in report.user_properties:
+            if key == "observer_failure":
+                FAILURES.append({"test": report.nodeid, "reason": reason})
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -105,7 +112,9 @@ def pytest_sessionfinish(session, exitstatus):
     directory = os.getenv("TRAINING_SERVICE_EVIDENCE_DIR")
     if directory and not session.config.option.collectonly:
         Path(directory).mkdir(parents=True, exist_ok=True)
-        (Path(directory) / "tests.json").write_text(json.dumps(OUTCOMES, indent=2) + "\n")
+        (Path(directory) / "tests.json").write_text(
+            json.dumps({**OUTCOMES, "failures": FAILURES}, indent=2) + "\n"
+        )
 
 
 def pytest_terminal_summary(terminalreporter):
@@ -314,12 +323,13 @@ def training_job(api, pytestconfig):
 
 
 @pytest.fixture
-def observer(api, pytestconfig):
+def observer(api, pytestconfig, request):
     if not pytestconfig.getoption("observe_cluster"):
         yield None
         return
-    from tests.e2e.observer import Observer
+    from tests.e2e.observer import Observer, failure_reason
 
+    result = None
     try:
         result = Observer(api.project)
         payload = workload(
@@ -328,11 +338,12 @@ def observer(api, pytestconfig):
         result.preflight(payload, pytestconfig.getoption("queue_profile"))
         if pod := pytestconfig.getoption("artifact_pod"):
             result.artifact_mount(pod, pytestconfig.getoption("artifact_container"), payload)
-    except Exception:
-        pytest.fail(
-            "Observer preflight failed: check queue/profile, kubeconfig, permissions and fixtures",
-            pytrace=False,
-        )
+    except Exception as error:
+        if result is not None:
+            result.api.close()
+        reason = "Observer preflight failed: " + failure_reason(error)
+        request.node.user_properties.append(("observer_failure", reason))
+        pytest.fail(reason, pytrace=False)
     try:
         yield result
     finally:

@@ -65,15 +65,20 @@ def observe(observer, job_id):
     if observer:
         try:
             observer.observe(job_id)
-        except Exception:
-            pytest.fail(
-                "Cluster observation failed: check observer permissions/ownership", pytrace=False
-            )
+        except Exception as error:
+            from tests.e2e.observer import failure_reason
+
+            pytest.fail("Cluster observation failed: " + failure_reason(error), pytrace=False)
 
 
-def test_training_job_lifecycle(api, training_job, pytestconfig, observer):
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        lifecycle(api, training_job, pytestconfig, observer, executor)
+def test_training_job_lifecycle(api, training_job, pytestconfig, observer, request):
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            lifecycle(api, training_job, pytestconfig, observer, executor)
+    except (AssertionError, pytest.fail.Exception):
+        if observer and observer.queue:
+            request.node.user_properties.append(("observer_failure", observer.queue_diagnostic()))
+        raise
 
 
 def lifecycle(api, training_job, pytestconfig, observer, executor):
@@ -164,7 +169,10 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            pytest.fail(f"Training timed out: {api.project}/{job_id} is {status}")
+            queue = observer.queue_diagnostic() if observer else ""
+            pytest.fail(
+                f"Training timed out: {api.project}/{job_id} is {status}. {queue}", pytrace=False
+            )
         time.sleep(min(5, remaining))
 
     assert status == "SUCCEEDED", f"Training ended as {status}: inspect {api.project}/{job_id}"

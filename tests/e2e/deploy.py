@@ -19,7 +19,7 @@ import httpx
 import yaml
 
 from tests.e2e.environment import RunEnvironment, cluster_preflight, prepare_tls, terminal_summary
-from tests.e2e.support import namespace, workload
+from tests.e2e.support import namespace
 
 ROOT = Path(__file__).resolve().parents[2]
 CHART = ROOT / "charts/training-service"
@@ -43,6 +43,11 @@ def command(args, *, timeout=120, capture=True, env=None):
             f"{args[0]} {args[1]} could not finish; check local tooling/session"
         ) from None
     if result.returncode:
+        if args[1:3] == ["-m", "pytest"]:
+            raise RuntimeError(
+                f"Live E2E suite failed (exit {result.returncode}); "
+                "see individual test diagnostics, terminal summary and saved reports"
+            )
         raise RuntimeError(
             f"{args[0]} {args[1]} failed (exit {result.returncode}); "
             "check credentials, permissions and connectivity. Raw output withheld."
@@ -62,7 +67,7 @@ def arguments(argv=None):
     parser.add_argument("--platform", default="linux/amd64", choices=("linux/amd64", "linux/arm64"))
     parser.add_argument("--storage-class", help="Existing ReadWriteMany-capable StorageClass")
     parser.add_argument(
-        "--cluster-queue", help="Existing Active ClusterQueue (DSC default if omitted)"
+        "--cluster-queue", type=namespace, help="Existing ClusterQueue (default: default)"
     )
     parser.add_argument(
         "--ray-ca-bundle",
@@ -135,25 +140,12 @@ def preflight(args):
         "persistentvolumeclaims",
         "pods",
         "pods/exec",
-        "localqueues.kueue.x-k8s.io",
     ):
         allowed = command(["oc", "auth", "can-i", "create", resource, "-n", args.namespace]).strip()
         if allowed != "yes":
             raise ValueError(f"Deployment identity needs create access to {resource}")
     command(["helm", "lint", CHART, "-f", args.values])
     return values
-
-
-def observer_preflight(args):
-    from tests.e2e.observer import Observer
-
-    try:
-        with Observer(args.namespace) as observer:
-            payload = workload(args.job_file, "with-kueue")
-            observer.preflight(payload, "with-kueue")
-            observer.artifact_mount(args.artifact_pod, args.artifact_container, payload)
-    except Exception:
-        raise ValueError("Observer preflight failed: check kubeconfig and permissions") from None
 
 
 def wait_ready(url, timeout, ca_bundle):
@@ -190,7 +182,7 @@ def run(args):
     succeeded = False
     environment = RunEnvironment(args, run_id, results, command)
     try:
-        print("Checking Ray/Kueue DSC, fresh namespace, queue, storage and tooling", flush=True)
+        print("Checking fresh namespace, storage, deployment permissions and tooling", flush=True)
         values = preflight(args)
         evidence["tls"] = prepare_tls(args, command, results, values)
         print("Public TLS trust configured; certificate verification enabled", flush=True)
@@ -226,7 +218,6 @@ def run(args):
         evidence["image"] = args.image_repository + "@" + digest
         print(f"Creating fresh Kueue-enrolled namespace {args.namespace} and fixtures", flush=True)
         environment.provision()
-        observer_preflight(args)
         print(f"Deploying isolated release {release} in {args.namespace}", flush=True)
         existing = json.loads(
             command(
@@ -358,6 +349,7 @@ def run(args):
             "tests/e2e",
             "-s",
             "--tb=short",
+            "--maxfail=0",
             "--junitxml",
             str(results / "junit.xml"),
             "--job-timeout",
@@ -436,6 +428,7 @@ def run(args):
         finally:
             evidence["namespace_created"] = bool(environment.namespace_uid)
             evidence["namespace_uid"] = environment.namespace_uid
+            evidence["kueue_setup_error"] = environment.kueue_setup_error
             evidence["cluster_queue"] = args.cluster_queue
             (results / "run.json").write_text(json.dumps(evidence, indent=2) + "\n")
             terminal_summary(evidence, results)
