@@ -18,7 +18,8 @@ from pathlib import Path
 import httpx
 import yaml
 
-from tests.e2e.support import PROFILES, namespace, workload
+from tests.e2e.environment import RunEnvironment, cluster_preflight, terminal_summary
+from tests.e2e.support import namespace, workload
 
 ROOT = Path(__file__).resolve().parents[2]
 CHART = ROOT / "charts/training-service"
@@ -55,20 +56,29 @@ def arguments(argv=None):
         "--image-repository", required=True, help="quay.io/your-org/training-service"
     )
     parser.add_argument(
-        "--namespace", required=True, type=namespace, help="Existing dedicated namespace"
+        "--namespace", type=namespace, help="New namespace (default: training-e2e-<run>)"
     )
     parser.add_argument("--values", required=True, type=Path, help="Credential-free Helm values")
     parser.add_argument("--platform", default="linux/amd64", choices=("linux/amd64", "linux/arm64"))
-    parser.add_argument("--job-file", type=Path, help="Opt into real training/compute allocation")
-    parser.add_argument("--queue-profile", choices=PROFILES)
-    parser.add_argument("--artifact-pod", help="Prepared read-only PVC verifier pod in the project")
-    parser.add_argument("--artifact-container", default="verifier")
+    parser.add_argument("--storage-class", help="Existing ReadWriteMany-capable StorageClass")
+    parser.add_argument(
+        "--cluster-queue", help="Existing Active ClusterQueue (DSC default if omitted)"
+    )
+    parser.add_argument(
+        "--ray-ca-bundle", type=Path, help="Public Ray gateway CA PEM (never a key)"
+    )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Read-only checks; no build, push or deployment",
+    )
     parser.add_argument("--forbidden-project", type=namespace)
     parser.add_argument(
         "--keep-deployment", action="store_true", help="Keep successful test deployment too"
     )
     parser.add_argument("--build-timeout", type=int, default=1800)
     parser.add_argument("--deploy-timeout", type=int, default=300)
+    parser.add_argument("--fixture-timeout", type=int, default=900)
     parser.add_argument("--job-timeout", type=int, default=1800)
     parser.add_argument("--stream-timeout", type=int, default=60)
     parser.add_argument("--cleanup-timeout", type=int, default=180)
@@ -82,6 +92,7 @@ def preflight(args):
     for option in (
         "build_timeout",
         "deploy_timeout",
+        "fixture_timeout",
         "job_timeout",
         "stream_timeout",
         "cleanup_timeout",
@@ -101,43 +112,46 @@ def preflight(args):
         raise ValueError("--values must be valid YAML; raw values are not logged") from None
     if not isinstance(values, dict):
         raise ValueError("Helm values must contain an object")
-    if args.queue_profile and not args.job_file:
-        raise ValueError("--queue-profile requires --job-file")
-    if args.artifact_pod and not args.job_file:
-        raise ValueError("--artifact-pod requires --job-file")
-    if args.job_file:
-        payload = workload(args.job_file, args.queue_profile)
-        # Validate observer/profile prerequisites BEFORE building or deploying.
-        from tests.e2e.observer import Observer
-
-        try:
-            with Observer(args.namespace) as observer:
-                observer.preflight(payload, args.queue_profile)
-                if args.artifact_pod:
-                    observer.artifact_mount(args.artifact_pod, args.artifact_container, payload)
-        except Exception:
-            raise ValueError(
-                "Observer preflight failed: check kubeconfig, profile and permissions"
-            ) from None
+    cluster_preflight(args, command, values)
     ssl.create_default_context(cafile=os.getenv("TRAINING_SERVICE_CA_BUNDLE") or None)
     command(["podman", "info", "--format", "{{.Host.Arch}}"])
     command(["podman", "login", "--get-login", "quay.io"])
-    command(["oc", "get", "namespace", args.namespace, "-o", "name"])
     nodes = json.loads(command(["oc", "get", "nodes", "-o", "json"]))["items"]
     architecture = args.platform.partition("/")[2]
-    if not any(n["metadata"]["labels"].get("kubernetes.io/arch") == architecture for n in nodes):
-        raise ValueError("--platform has no matching cluster node architecture")
+    if not any(
+        n["metadata"]["labels"].get("kubernetes.io/arch") == architecture
+        and int(n.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu", "0")) > 0
+        for n in nodes
+    ):
+        raise ValueError("--platform has no matching NVIDIA GPU node architecture")
     for resource in (
         "deployments",
         "services",
         "routes.route.openshift.io",
         "secrets",
         "serviceaccounts",
+        "configmaps",
+        "persistentvolumeclaims",
+        "pods",
+        "pods/exec",
+        "localqueues.kueue.x-k8s.io",
     ):
         allowed = command(["oc", "auth", "can-i", "create", resource, "-n", args.namespace]).strip()
         if allowed != "yes":
             raise ValueError(f"Deployment identity needs create access to {resource}")
     command(["helm", "lint", CHART, "-f", args.values])
+
+
+def observer_preflight(args):
+    from tests.e2e.observer import Observer
+
+    try:
+        with Observer(args.namespace) as observer:
+            payload = workload(args.job_file, "with-kueue")
+            observer.preflight(payload, "with-kueue")
+            observer.artifact_mount(args.artifact_pod, args.artifact_container, payload)
+    except Exception:
+        raise ValueError("Observer preflight failed: check kubeconfig and permissions") from None
 
 
 def wait_ready(url, timeout):
@@ -155,20 +169,16 @@ def wait_ready(url, timeout):
 
 
 def run(args):
-    preflight(args)
-    commit = command(["git", "rev-parse", "HEAD"]).strip()
     run_id = uuid.uuid4().hex[:10]
     release = "training-e2e-" + run_id
-    tag = "e2e-" + commit[:12] + "-" + run_id
-    image = args.image_repository + ":" + tag
+    args.namespace = args.namespace or release
+    args.queue_profile = "with-kueue"
     results = args.results_dir.resolve() / run_id
     results.mkdir(parents=True, exist_ok=False)
     evidence = {
-        "commit": commit,
-        "dirty": bool(command(["git", "status", "--porcelain"]).strip()),
         "namespace": args.namespace,
         "release": release,
-        "profile": args.queue_profile or "smoke",
+        "profile": "with-kueue",
         "outcome": "incomplete",
         "chart_sha256": hashlib.sha256(
             b"".join(p.read_bytes() for p in sorted(CHART.rglob("*")) if p.is_file())
@@ -176,7 +186,18 @@ def run(args):
     }
     deployed = False
     succeeded = False
+    environment = RunEnvironment(args, run_id, results, command)
     try:
+        print("Checking Ray/Kueue DSC, fresh namespace, queue, storage and tooling", flush=True)
+        preflight(args)
+        if args.preflight_only:
+            evidence["outcome"] = "preflight_passed"
+            return
+        commit = command(["git", "rev-parse", "HEAD"]).strip()
+        evidence["commit"] = commit
+        evidence["dirty"] = bool(command(["git", "status", "--porcelain"]).strip())
+        tag = "e2e-" + commit[:12] + "-" + run_id
+        image = args.image_repository + ":" + tag
         print(f"Building {image} for {args.platform}", flush=True)
         command(
             [
@@ -199,6 +220,9 @@ def run(args):
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise RuntimeError("Podman did not return a valid pushed image digest")
         evidence["image"] = args.image_repository + "@" + digest
+        print(f"Creating fresh Kueue-enrolled namespace {args.namespace} and fixtures", flush=True)
+        environment.provision()
+        observer_preflight(args)
         print(f"Deploying isolated release {release} in {args.namespace}", flush=True)
         existing = json.loads(
             command(
@@ -338,23 +362,19 @@ def run(args):
             "--cleanup-timeout",
             str(args.cleanup_timeout),
         ]
-        if args.job_file:
-            test_args += [
-                "--job-file",
-                str(args.job_file),
-                "--queue-profile",
-                args.queue_profile,
-                "--observe-cluster",
-                "--check-logs",
-                "--check-stream",
-            ]
-        if args.artifact_pod:
-            test_args += [
-                "--artifact-pod",
-                args.artifact_pod,
-                "--artifact-container",
-                args.artifact_container,
-            ]
+        test_args += [
+            "--job-file",
+            str(args.job_file),
+            "--queue-profile",
+            "with-kueue",
+            "--observe-cluster",
+            "--check-logs",
+            "--check-stream",
+            "--artifact-pod",
+            args.artifact_pod,
+            "--artifact-container",
+            args.artifact_container,
+        ]
         if args.forbidden_project:
             test_args += ["--forbidden-project", args.forbidden_project]
         print(f"Testing {url}; results: {results}", flush=True)
@@ -362,8 +382,19 @@ def run(args):
         command(
             test_args, timeout=args.job_timeout + args.cleanup_timeout + 600, capture=False, env=env
         )
+        # An overridden pytest selection must not silently turn this into a smoke-only pass.
+        lifecycle_path = results / "lifecycle.json"
+        lifecycle = json.loads(lifecycle_path.read_text()) if lifecycle_path.is_file() else {}
+        if not all(
+            lifecycle.get(key)
+            for key in ("succeeded", "queue_admitted", "gpu_cleanup", "snapshot_logs", "sse")
+        ) or not isinstance(lifecycle.get("artifacts"), dict):
+            raise RuntimeError("Required queued training/log/artifact/cleanup evidence is missing")
         succeeded = True
         evidence["outcome"] = "passed"
+    except BaseException:
+        evidence["outcome"] = "failed"
+        raise
     finally:
         try:
             if deployed and succeeded and not args.keep_deployment:
@@ -387,13 +418,22 @@ def run(args):
                     evidence["deployment_cleanup"] = "incomplete"
                     print(f"Cleanup incomplete: helm uninstall {release} -n {args.namespace}")
                     raise
+                try:
+                    environment.cleanup_setup_pod()
+                    evidence["fixture_cleanup"] = "verifier pod removed"
+                except RuntimeError:
+                    evidence["outcome"] = "fixture_cleanup_failed"
+                    evidence["fixture_cleanup"] = "incomplete; inspect retained verifier pod"
+                    raise
             elif deployed:
                 evidence["deployment_cleanup"] = "retained"
                 print(f"Retained deployment. Cleanup: helm uninstall {release} -n {args.namespace}")
         finally:
+            evidence["namespace_created"] = bool(environment.namespace_uid)
+            evidence["namespace_uid"] = environment.namespace_uid
+            evidence["cluster_queue"] = args.cluster_queue
             (results / "run.json").write_text(json.dumps(evidence, indent=2) + "\n")
-            print(f"Evidence: {results}", flush=True)
-            print("Quay image and training outputs are retained; no customer storage was removed.")
+            terminal_summary(evidence, results)
 
 
 def main():

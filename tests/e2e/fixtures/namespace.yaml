@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  # The runner replaces the name and run ID, then uses create (never apply/adopt).
+  name: training-e2e
+  labels:
+    kueue.openshift.io/managed: "true"
+    opendatahub.io/dashboard: "true"
+    training.rhoai.io/e2e-run: replaced-by-runner

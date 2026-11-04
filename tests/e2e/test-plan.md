@@ -2,9 +2,12 @@
 
 Status: planned coverage, not an execution report. Last updated: 2 November 2026.
 
-Implementation note (3 November): the follow-up request adds opt-in
-Podman/Quay/Helm automation, superseding the original existing-deployment-only
-boundary below. Cluster/operator/DSC/queue/storage provisioning remains excluded.
+Implementation note (4 November): follow-up requests add manually invoked
+Podman/Quay/Helm automation and fresh Kueue-labeled namespace, LocalQueue,
+PVC and tiny training fixture provisioning. The normal deployment run always
+requires real Kueue-admitted training. These supersede the original
+existing-deployment-only boundary below. Shared cluster/operator/DSC/ClusterQueue/
+StorageClass provisioning remains excluded; users enable Ray/Kueue in the DSC.
 See [instructions](README.md) and [coverage status](coverage.md). IDs/priorities
 below are the maintained backlog, not a list of passing tests.
 

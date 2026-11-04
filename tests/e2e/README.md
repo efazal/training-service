@@ -10,18 +10,32 @@ unit-only. See the [full plan](test-plan.md) and [coverage/gaps](coverage.md).
 Prepare once:
 
 - Install `uv`, Podman, Helm 3.13+ and `oc`; start your Podman machine if needed.
-- `oc login` to your existing Ray-enabled test cluster; `podman login quay.io`.
+- `oc login` to your test cluster; `podman login quay.io`.
   Never enable shell tracing or copy tokens into files.
-- Use an existing **dedicated namespace**. The deployment identity needs Helm
-  install/uninstall permissions, namespace/node reads, Route/service/pod reads,
-  pod exec for version evidence, and permission to install the chart's
+- An administrator must enable **both Ray and Kueue in the DSC**
+  (`spec.components.ray.managementState: Managed` and
+  `spec.components.kueue.managementState: Managed`) and wait for
+  `RayReady=True` / `KueueReady=True`. Existing CRDs/controllers alone are not
+  sufficient. On other clusters this is a user/admin prerequisite, not something
+  the script enables. Configure Kueue's RayJob integration, ResourceFlavors and
+  an Active ClusterQueue with sufficient CPU, memory and NVIDIA GPU quota.
+- Select a **ReadWriteMany-capable StorageClass**, writable by OpenShift-assigned
+  nonroot UIDs. The built-in fixture needs one NVIDIA GPU, 4 CPUs, 32Gi memory,
+  5Gi storage and outbound access to the public Hugging Face model repository.
+  This is not a disconnected/ROCm or CPU-only test.
+- The deployment identity needs namespace creation, Helm install/uninstall,
+  DSC/StorageClass/node reads, Route/service/pod reads,
+  pod exec for evidence, and permission to install the chart's
   TokenReview/SAR ClusterRole and ClusterRoleBinding. This is separate from the
   HTTP caller token below; admin credentials cannot prove restricted-user isolation.
-- Use your own Quay repo. If private, prepare a namespace pull Secret and reference
-  it through `imagePullSecrets`. The runner never reads/copies registry credentials.
+- Use your own **public** Quay repo, or cluster-wide image pull credentials.
+  Every run creates a fresh namespace; the runner never reads/copies a pull Secret
+  from another namespace. Both service and runtime images must be pullable there.
 - Copy [values.example.yaml](values.example.yaml) outside the repo and supply a
   compatible Ray + Training Hub runtime, authenticated Ray gateway and public CA.
-  The chart's optional `volumes`/`volumeMounts` mount an existing CA ConfigMap.
+  `--ray-ca-bundle` provisions a public certificate ConfigMap named
+  `training-service-ray-ca`, mounted by the example values. Omit the CA option
+  and the example CA environment/volume entries for a publicly trusted gateway.
   This PR does not change SDK/Ray pins or establish a new compatibility matrix.
 
 From the repository root:
@@ -30,36 +44,64 @@ From the repository root:
 export TRAINING_SERVICE_TOKEN="$(oc whoami -t)"
 # Only for a Route signed by a private CA (public certificate, not a token):
 export TRAINING_SERVICE_CA_BUNDLE=/path/to/ingress-ca.pem
-make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --namespace YOUR_TEST_PROJECT --values /path/to/e2e-values.yaml"
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS --ray-ca-bundle /path/to/ray-ca.pem"
 ```
 
 The runner validates prerequisites, builds the existing `Containerfile` with Podman,
 pushes a unique `e2e-<commit>-<run>` tag, pins Helm to the **pushed digest**, waits
-for readiness/TLS, discovers the Route and executes HTTP sanity tests. No manual
-build/push/deploy/test sequence is needed. Default `--platform linux/amd64` works
-for AMD64 clusters, including from ARM Macs; use `linux/arm64` for ARM nodes.
+for readiness/TLS, discovers the Route and executes HTTP sanity **and real
+Kueue-admitted training**. No manual namespace, queue, PVC, dataset, model download,
+verifier pod, build/push/deploy/test sequence is needed. Default
+`--platform linux/amd64` targets AMD64 clusters, including from ARM Macs; use
+`linux/arm64` for ARM nodes.
 Podman must support that platform (emulation can be slow).
 
-Each invocation installs a new `training-e2e-<run>` release. It never adopts an
-existing release, creates a namespace, changes DSC/queues, installs operators or
-provisions storage. Smoke includes negative POSTs using nonexistent references:
-it is **not strictly read-only**, but allocates no compute on a correct service.
-A configured training runtime is required.
+Each invocation creates a new `training-e2e-<run>` namespace and Helm release.
+The [namespace manifest](fixtures/namespace.yaml) includes
+`kueue.openshift.io/managed: "true"`, `opendatahub.io/dashboard: "true"`, and a
+unique E2E ownership label. It creates LocalQueue `e2e` backed by the existing
+DSC-default ClusterQueue (override with `--cluster-queue`), a 5Gi RWX PVC and a
+fixture/verifier pod. The pod downloads a pinned public Qwen2.5-0.5B-Instruct
+revision and prepares eight chat examples; training uses PVC references and
+needs no HF token. The generated request and manifests are saved with results.
+The ClusterQueue selector must admit these labels. The runner never changes the
+DSC, operators, ClusterQueue quota or ResourceFlavors.
 
-Successful deployments are uninstalled with a bounded wait; `--keep-deployment`
-retains one for manual inspection. Failed/interrupted deployments are retained
-with their exact cleanup command. Quay tags and training outputs are retained;
-remove test images later under your registry retention policy. No registry image
-or customer storage deletion is automated.
+Add `--namespace NEW_NAME` to choose the new namespace. An existing namespace is
+always rejected, never adopted. The normal deployment run has no smoke-only or
+no-Kueue switch: admission, training, logs, outputs and cleanup are required.
 
-## Real training: Kueue absent and enabled
-
-Add a small known-good [workload JSON](job.example.json). Replace all sample
-PVC/model/dataset/output references. Project-local storage and HF/S3 Secrets must
-already exist. Main currently supports basic `lora_sft`, not all Training Hub APIs.
+To check prerequisites without building, uploading or creating cluster resources:
 
 ```bash
-make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --namespace YOUR_TEST_PROJECT --values /path/to/e2e-values.yaml --job-file /path/to/tiny-job.json --queue-profile no-kueue --artifact-pod e2e-output-verifier"
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS --ray-ca-bundle /path/to/ray-ca.pem --preflight-only"
+```
+
+The terminal summary reports pass/fail/skip counts, training success, Kueue
+admission, GPU cleanup, checkpoint verification and evidence paths. Missing
+required lifecycle evidence fails even if pytest was accidentally filtered.
+
+Successful deployments and the fixture/verifier pod are removed with bounded
+waits; `--keep-deployment` retains both for manual inspection. Failed/interrupted
+deployments and fixtures are retained for diagnosis. The **namespace, LocalQueue,
+PVC, outputs and Quay tag are retained**, and each run creates new ones;
+review these test-only resources periodically rather than expecting automatic
+namespace/storage deletion. The exact Helm cleanup command is printed on failure.
+Remove test images later under your registry retention policy. No registry image
+or customer storage deletion is automated.
+
+## Additional profiles against an existing deployment
+
+The normal deployment command above **always includes Kueue**. To separately
+test an already-deployed service without Kueue, use `make test-e2e`, not the
+deployment runner. Supply a known-good [workload JSON](job.example.json), existing
+PVC/model/dataset/output references and a prepared
+[read-only verifier pod](artifact-verifier.example.yaml). Main currently supports
+basic `lora_sft`, not all Training Hub APIs.
+
+```bash
+# Set TRAINING_SERVICE_URL, TRAINING_SERVICE_PROJECT and TRAINING_SERVICE_TOKEN first.
+make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile no-kueue --observe-cluster --artifact-pod e2e-output-verifier --check-logs --check-stream -s"
 ```
 
 - `no-kueue`: **omit `queue_name` entirely**. Preflight requires Kueue's API group
@@ -74,8 +116,8 @@ make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-serv
   A default LocalQueue silently selected by the SDK fails unqueued proof.
   The runner never disables mandatory admission.
 
-Repeat with `--queue-profile with-kueue` and a queued fixture on the prepared
-Kueue environment. Both profiles need independent passing evidence before handoff.
+Both scheduling configurations need independent passing evidence before
+advertising support for both; the default Kueue run does not certify Kueue absence.
 
 Training must reach `SUCCEEDED`, preserve the submitted request/submitter, appear
 in paginated/status-filtered reads, return driver snapshots and deliver two
@@ -84,7 +126,7 @@ enough to observe streaming and running owned GPU pods; fast-disappearing cluste
 fail observation, rather than manufacture evidence. SSE checks incremental framing/
 delivery, not that every line was generated after opening the connection.
 
-The runner enables log checks and the cluster observer for training. The observer
+The deployment runner always enables log checks and the cluster observer. The observer
 uses **kubeconfig**, never the HTTP caller token; it cannot make a denied API call
 succeed. It needs namespace get, PVC get, RayJob get/list, RayCluster list, batch
 Job list and pod get/list. With Kueue also: Workload list, LocalQueue get and
@@ -95,10 +137,11 @@ gone. Global free-GPU counts need not rise if other workloads consume capacity.
 
 ### Verify saved output independently
 
-`--artifact-pod` selects a prepared Python-enabled pod (default container
+The deployment runner creates its verifier automatically. For an existing
+deployment, `--artifact-pod` selects a prepared Python-enabled pod (default container
 `verifier`) mounting the **complete output PVC read-only**, without subPath. See
 [artifact-verifier.example.yaml](artifact-verifier.example.yaml). Prepare it once
-with your approved image/PVC; the runner does not create it. The observer requires
+with your approved image/PVC. The observer requires
 pod get and pods/exec create. Exec only reads the unique output directory.
 
 Current LoRA verification checks nonempty LORA config and safetensors headers/
@@ -132,6 +175,9 @@ make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile with-k
 | `--cleanup-timeout 180` | Terminal/resource cleanup deadline |
 | `--request-timeout 30` | Per HTTP timeout, existing-deployment command |
 | `--build-timeout 1800`, `--deploy-timeout 300` | Build/push and rollout/Route deadlines, deployment runner |
+| `--fixture-timeout 900` | PVC/model preparation deadline, deployment runner |
+| `--namespace NEW_NAME`, `--cluster-queue existing-cq` | New namespace name and existing ClusterQueue override |
+| `--preflight-only` | Read-only cluster/tooling/config checks; no build/push/deploy |
 | `--forbidden-project other-project` | Existing project the HTTP caller cannot access; not an admin-token test |
 | `--keep-failed-job` | Existing-deployment only: retain FAILED/STOPPED for inspection, still fail |
 | `--junitxml /path/results.xml` | Optional sanitized report, existing-deployment command |
@@ -153,7 +199,8 @@ versions not independently observed must be recorded separately for the release
 matrix, not inferred from tags. Smoke/skipped checks do not certify readiness;
 all-skipped runs fail. [coverage.md](coverage.md) lists remaining gaps.
 
-Names are short UUIDs; output prefixes gain that name. Fixtures are never modified.
+Names are short UUIDs; output prefixes gain that name. Existing-deployment input
+fixtures are never modified; the deployment runner writes only its new namespace/PVC.
 Cleanup registered before POST reconciles lost responses by name without replay.
 It refuses mismatched stored submissions, waits for terminal status and uses only
 API DELETE. Timeouts/token expiry/interruption report resources needing inspection.

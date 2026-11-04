@@ -1,0 +1,31 @@
+"""Runs in a test-owned init container; downloads only a pinned public model."""
+
+import json
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"
+
+snapshot_download(
+    repo_id=MODEL,
+    revision=REVISION,
+    token=False,
+    local_dir="/data/models/qwen",
+    ignore_patterns=["*.bin", "*.gguf", "*.onnx", "*.h5", "*.msgpack"],
+)
+dataset = Path("/data/datasets/tiny-chat.jsonl")
+dataset.parent.mkdir(parents=True, exist_ok=True)
+rows = [
+    {
+        "messages": [
+            {"role": "user", "content": f"What is {i} plus one?"},
+            {"role": "assistant", "content": f"{i} plus one is {i + 1}."},
+        ]
+    }
+    for i in range(8)
+]
+dataset.write_text("".join(json.dumps(row) + "\n" for row in rows))
+Path("/data/outputs").mkdir(exist_ok=True)
+print("Pinned public model and eight training records prepared.", flush=True)
