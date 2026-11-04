@@ -9,6 +9,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml
+from kubernetes import client
+from kubernetes.client.exceptions import ApiException
+
+from tests.e2e.registry import PullSecret, kubeconfig_client
 
 FIXTURES = Path(__file__).with_name("fixtures")
 RUN_LABEL = "training.rhoai.io/e2e-run"
@@ -59,12 +63,23 @@ def cluster_preflight(args, command, values):
         )
     if values.get("imagePullSecrets"):
         raise ValueError(
-            "Fresh namespaces require public images or cluster-wide pull credentials; "
-            "no Secret is copied"
+            "Do not reference existing imagePullSecrets in a fresh namespace; "
+            "use --use-podman-auth to create a test-only Quay pull secret."
         )
     for resource in ("namespaces", "clusterroles", "clusterrolebindings"):
         if command(["oc", "auth", "can-i", "create", resource]).strip() != "yes":
             raise ValueError(f"Deployment identity needs create access to {resource}")
+    if not args.keep_resources:
+        for resource in ("namespaces", "clusterroles", "clusterrolebindings"):
+            if command(["oc", "auth", "can-i", "delete", resource]).strip() != "yes":
+                raise ValueError(
+                    f"Deployment identity needs delete access to {resource} for cleanup"
+                )
+        for resource in ("clusterroles", "clusterrolebindings"):
+            if command(["oc", "auth", "can-i", "list", resource]).strip() != "yes":
+                raise ValueError(
+                    f"Deployment identity needs list access to {resource} to verify cleanup"
+                )
 
 
 def public_certificates(pem, source):
@@ -160,8 +175,10 @@ class RunEnvironment:
     def __init__(self, args, run_id, results, command):
         self.args, self.run_id, self.results, self.command = args, run_id, results, command
         self.namespace_uid = None
+        self.namespace_creation_attempted = False
         self.pod_uid = None
         self.kueue_setup_error = None
+        self.pull_secret = PullSecret(args.namespace, run_id) if args.use_podman_auth else None
 
     def create(self, filename, document):
         path = self.results / filename
@@ -272,8 +289,11 @@ class RunEnvironment:
 
     def provision(self):
         args = self.args
+        self.namespace_creation_attempted = True
         namespace = self.create("namespace.yaml", namespace_manifest(args.namespace, self.run_id))
         self.namespace_uid = namespace["metadata"]["uid"]
+        if self.pull_secret:
+            self.pull_secret.create(self.namespace_uid)
         group = self.fixture_group(namespace)
         try:
             self.create(
@@ -382,6 +402,8 @@ class RunEnvironment:
                 ],
             },
         )
+        if self.pull_secret:
+            pod["spec"]["imagePullSecrets"] = [{"name": self.pull_secret.name}]
         self.pod_uid = self.create("fixtures.yaml", pod)["metadata"]["uid"]
         self.wait_for_fixtures()
         payload = json.loads((Path(__file__).with_name("job.example.json")).read_text())
@@ -396,55 +418,95 @@ class RunEnvironment:
         args.artifact_pod = "e2e-output-verifier"
         args.artifact_container = "verifier"
 
-    def cleanup_setup_pod(self):
-        # Namespace/PVC/LocalQueue are retained for output inspection; never delete a namespace.
-        if not self.namespace_uid:
+    def cleanup(self, release, deployed, evidence):
+        """Remove only our fresh namespace, after uninstalling cluster-scoped Helm resources."""
+        evidence["namespace_cleanup"] = "not created"
+        if not self.namespace_uid and not self.namespace_creation_attempted:
             return
-        current = json.loads(
-            self.command(["oc", "get", "namespace", self.args.namespace, "-o", "json"])
-        )
-        if (
-            current["metadata"]["uid"] != self.namespace_uid
-            or current["metadata"].get("labels", {}).get(RUN_LABEL) != self.run_id
-        ):
-            raise RuntimeError("Namespace ownership changed; refusing fixture cleanup")
-        pod = json.loads(
-            self.command(
-                ["oc", "get", "pod/e2e-output-verifier", "-n", self.args.namespace, "-o", "json"]
-            )
-        )
-        if (
-            pod["metadata"]["uid"] != self.pod_uid
-            or pod["metadata"].get("labels", {}).get(RUN_LABEL) != self.run_id
-        ):
-            raise RuntimeError("Verifier pod ownership changed; refusing fixture cleanup")
-        # A UID precondition also protects against replacement between the read and delete.
-        from kubernetes import client, config
-
+        print(f"Cleaning up test resources in {self.args.namespace}", flush=True)
         try:
-            with config.new_client_from_config() as api:
-                client.CoreV1Api(api).delete_namespaced_pod(
-                    "e2e-output-verifier",
+            with kubeconfig_client() as api:
+                core = client.CoreV1Api(api)
+                try:
+                    current = core.read_namespace(self.args.namespace, _request_timeout=15)
+                except ApiException as error:
+                    if error.status != 404:
+                        raise
+                    if deployed:
+                        raise RuntimeError(
+                            "Namespace missing; inspect Helm cluster-scoped resources"
+                        ) from None
+                    evidence["namespace_cleanup"] = "already absent"
+                    return
+                if (self.namespace_uid and current.metadata.uid != self.namespace_uid) or (
+                    current.metadata.labels or {}
+                ).get(RUN_LABEL) != self.run_id:
+                    raise RuntimeError("Namespace ownership changed; refusing resource cleanup")
+                # Recover an ambiguous namespace POST only when its unique run label matches.
+                self.namespace_uid = current.metadata.uid
+                if deployed:
+                    self.command(
+                        [
+                            "helm",
+                            "uninstall",
+                            release,
+                            "-n",
+                            self.args.namespace,
+                            "--ignore-not-found",
+                            "--wait",
+                            "--timeout",
+                            f"{self.args.cleanup_timeout}s",
+                        ],
+                        timeout=self.args.cleanup_timeout + 30,
+                    )
+                    remaining_rbac = json.loads(
+                        self.command(
+                            [
+                                "oc",
+                                "get",
+                                "clusterroles,clusterrolebindings",
+                                "-l",
+                                "app.kubernetes.io/instance=" + release,
+                                "-o",
+                                "json",
+                            ]
+                        )
+                    )
+                    if remaining_rbac.get("items"):
+                        raise RuntimeError(
+                            "Helm cluster-scoped RBAC remains; inspect the test release"
+                        )
+                    evidence["deployment_cleanup"] = "removed"
+                core.delete_namespace(
                     self.args.namespace,
                     body=client.V1DeleteOptions(
-                        preconditions=client.V1Preconditions(uid=self.pod_uid)
+                        preconditions=client.V1Preconditions(uid=self.namespace_uid)
                     ),
                     _request_timeout=15,
                 )
+                deadline = time.monotonic() + self.args.cleanup_timeout
+                while True:
+                    try:
+                        remaining = core.read_namespace(self.args.namespace, _request_timeout=15)
+                    except ApiException as error:
+                        if error.status != 404:
+                            raise
+                        evidence["namespace_cleanup"] = "removed"
+                        evidence["fixture_cleanup"] = "removed with namespace (including test PVC)"
+                        return
+                    if remaining.metadata.uid != self.namespace_uid:
+                        raise RuntimeError("Namespace was replaced during cleanup")
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Namespace deletion deadline exceeded; inspect finalizers"
+                        )
+                    time.sleep(min(2, max(0, deadline - time.monotonic())))
+        except RuntimeError:
+            raise
         except Exception:
-            raise RuntimeError("Verifier pod cleanup failed; inspect retained fixtures") from None
-        self.command(
-            [
-                "oc",
-                "wait",
-                "pod/e2e-output-verifier",
-                "-n",
-                self.args.namespace,
-                "--for=delete",
-                "--timeout=60s",
-            ],
-            timeout=75,
-        )
+            raise RuntimeError(
+                "Resource cleanup failed; inspect the test namespace/release"
+            ) from None
 
 
 def terminal_summary(evidence, results):
@@ -470,13 +532,15 @@ def terminal_summary(evidence, results):
         f"checkpoints: {checkpoints}"
     )
     print(f"Deployment cleanup: {evidence.get('deployment_cleanup', 'not deployed')}")
+    print(f"Namespace cleanup: {evidence.get('namespace_cleanup', 'not created')}")
+    if evidence.get("cleanup_error"):
+        print(f"Cleanup error: {evidence['cleanup_error']}")
+    if "registry_secret_cleanup" in evidence:
+        print(f"Registry credential cleanup: {evidence['registry_secret_cleanup']}")
     if evidence.get("kueue_setup_error"):
         print(f"Kueue setup: {evidence['kueue_setup_error']}")
     for failure in tests.get("failures", []):
         print(f"Failed {failure['test']}: {failure['reason']}")
     print(f"Evidence/manifests: {results}")
-    if evidence.get("namespace_created"):
-        print(
-            "Test namespace, LocalQueue and PVC outputs retained for inspection; "
-            "no namespace/storage was deleted."
-        )
+    if evidence.get("namespace_cleanup") == "removed":
+        print("Test namespace and storage deleted; local reports retained. Quay image unchanged.")

@@ -11,6 +11,11 @@ boundary. Shared cluster/operator/DSC/ClusterQueue/StorageClass provisioning and
 Jenkins remain excluded; users prepare Ray/Kueue first. Direct installation is
 supported without DSC checks. Kueue failures fail the queued test with diagnostics
 while independent API tests continue; the final run still fails.
+The later cleanup requirement supersedes the plan's namespace-preservation rule
+only for `test-e2e-deploy`'s newly created, UID/run-label-owned namespace: default
+cleanup runs after success/failure/interruption, including test PVCs and leftover
+Ray resources. `--keep-resources` retains debugging resources, never temporary
+registry credentials. Existing-deployment tests preserve customer namespaces/data.
 
 | Plan IDs | Implemented test / remaining status |
 | --- | --- |
@@ -33,7 +38,7 @@ while independent API tests continue; the final run still fails.
 | LOG-06/07 (deferred) | Closing successful follow exercises disconnect; reconnect, slow consumer, lifetime/leaks and malicious ownership/gateway fixtures still required |
 | DEL-01–03/05/06 (partial) | Terminal delete/eventual/repeated 404; controller-UID observer confirms owned job/cluster/batch Job/pod/Workload disappearance and observed GPU pods gone; PVC UIDs/output preserved, shared RayJob API survives |
 | DEL-04/07/08 (deferred) | Active/shared/unowned/retrying/UID-race/finalizer cases remain unit-tested only; baseline does not inject these faults |
-| OPS-01 (extended) | `deploy.py`: read-only preflight, Podman/Quay/Helm or explicit digest-pinned image reuse, fresh namespace/fixtures, unique release/tag, pushed/reused digest, namespace-allocated fixture fsGroup and write check, progress/failed-init detection, readiness/Route TLS, running image IDs/service versions, terminal summary/result evidence |
+| OPS-01 (extended) | `deploy.py`: read-only preflight, Podman/Quay/Helm or explicit digest-pinned image reuse, fresh namespace/fixtures, unique release/tag, pushed/reused digest, namespace-allocated fixture fsGroup and write check, progress/failed-init detection, readiness/Route TLS, running image IDs/service versions, terminal summary/result evidence; owned Helm/namespace/PVC cleanup by default, handled pytest interrupt/grace period, explicit resource-retention option |
 | OPS-02–09 (partial/deferred) | Bounded config/auth failures and independent invocations; restart, ambiguous-response injection, concurrency/load, upgrade and outages need focused follow-ups |
 | TP | Disconnected, ROCm/CPU, operator/Trainer, estimation/custom code/new storage not introduced or certified |
 
@@ -41,3 +46,13 @@ Optional fixture skips are visible; a selected profile missing queue prerequisit
 its lifecycle test setup, not the entire suite. An all-skipped run fails. Smoke/unqueued-opt-out is **not** both
 scheduling profiles or customer readiness. Attach actual sanitized reports and
 component versions per environment; this table does not imply live execution.
+
+Private Quay images: `--use-podman-auth` opts into a temporary namespace-local
+pull Secret from Podman's Quay credential. Unit tests cover auth-file/helper
+resolution, unrelated-credential exclusion, kubeconfig TLS preservation/warnings,
+debug logging guards, Secret UID
+ownership, ambiguous-create cleanup and cleanup on failed/retained workflows.
+The deploy runner checks service-pod pull-secret references and reports credential
+cleanup. These plumbing checks with public images alone do not certify actual
+private pulls; use a private repository for that live evidence. No cluster-wide
+credential or registry visibility changes are made.

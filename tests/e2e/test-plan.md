@@ -11,6 +11,11 @@ StorageClass provisioning remains excluded; users prepare Ray/Kueue independentl
 Direct installation is supported; do not gate the suite on DSC management state.
 Kueue failures must identify the cause, fail the queued test and allow independent
 API tests to continue, with a nonzero final result.
+The deployment runner now deletes its own fresh namespace/test PVCs and uninstalls
+Helm (including cluster-scoped RBAC) after success, failure or interruption by
+default. `--keep-resources` opts into debugging retention; temporary registry
+credentials are always removed. This supersedes namespace-preservation guidance
+below only for run-owned deployment fixtures, not existing customer deployments.
 See [instructions](README.md) and [coverage status](coverage.md). IDs/priorities
 below are the maintained backlog, not a list of passing tests.
 

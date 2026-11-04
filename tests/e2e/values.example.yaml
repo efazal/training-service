@@ -2,7 +2,7 @@
 # The runner discovers the cluster's public ingress CA and provisions the CA ConfigMap.
 # Use --ray-ca-bundle only when the gateway needs a different issuer.
 # Never put tokens, passwords or Secret values here.
-imagePullSecrets: [] # Public images or cluster-wide pull credentials; never copy Secrets.
+imagePullSecrets: [] # For private Quay images use --use-podman-auth; the runner sets the reference.
 env:
   - name: TRAINING_RAY_IMAGE
     value: quay.io/YOUR_ORG/ray-traininghub@sha256:REPLACE_WITH_TESTED_DIGEST

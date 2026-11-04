@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -139,13 +140,161 @@ def test_subprocess_errors_withhold_raw_output(monkeypatch, cmd):
     assert "exit 1" in str(error.value)
 
 
+@pytest.mark.parametrize("answer,exit_code,expected", [("yes\n", 0, "yes\n"), ("no\n", 1, "no")])
+def test_can_i_denial_is_a_normal_permission_answer(monkeypatch, answer, exit_code, expected):
+    monkeypatch.setattr(
+        deploy.subprocess,
+        "run",
+        Mock(
+            return_value=subprocess.CompletedProcess(
+                [], exit_code, stdout=answer, stderr="private-token"
+            )
+        ),
+    )
+    assert deploy.command(["oc", "auth", "can-i", "create", "namespaces"]) == expected
+
+
+def test_can_i_connection_failure_is_not_treated_as_denied_permission(monkeypatch):
+    monkeypatch.setattr(
+        deploy.subprocess,
+        "run",
+        Mock(return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="private-token")),
+    )
+    with pytest.raises(RuntimeError, match="Raw output withheld"):
+        deploy.command(["oc", "auth", "can-i", "create", "namespaces"])
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("teardown_problem", [None, "timeout", "interrupt"])
+def test_pytest_deadline_allows_fixture_teardown_before_killing(
+    monkeypatch, interrupted, teardown_problem
+):
+    error = KeyboardInterrupt() if interrupted else subprocess.TimeoutExpired("pytest", 1)
+    process = MagicMock()
+    process.__enter__.return_value = process
+    process.communicate.side_effect = [
+        error,
+        *(
+            [subprocess.TimeoutExpired("teardown", 7)]
+            if teardown_problem == "timeout"
+            else [KeyboardInterrupt()]
+            if teardown_problem == "interrupt"
+            else []
+        ),
+        ("", ""),
+    ]
+    popen = Mock(return_value=process)
+    monkeypatch.setattr(deploy.subprocess, "Popen", popen)
+    with pytest.raises(KeyboardInterrupt if interrupted else RuntimeError):
+        deploy.command(
+            [sys.executable, "-m", "pytest", "tests/e2e"],
+            timeout=1,
+            cleanup_timeout=7,
+            capture=False,
+        )
+    process.send_signal.assert_called_once_with(signal.SIGINT)
+    assert process.communicate.call_args_list[1].kwargs["timeout"] == 7
+    assert process.kill.called == (teardown_problem is not None)
+    assert popen.call_args.kwargs["start_new_session"] is True
+
+
+def test_sigterm_enters_runner_cleanup_instead_of_abandoning_it():
+    script = """
+import os, signal
+from tests.e2e import deploy
+
+deploy.arguments = lambda: None
+def run(args):
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+    finally:
+        print("owned-cleanup-ran", flush=True)
+deploy.run = run
+previous = signal.getsignal(signal.SIGTERM)
+result = deploy.main()
+assert signal.getsignal(signal.SIGTERM) == previous
+raise SystemExit(result)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=deploy.ROOT, capture_output=True, text=True, timeout=15
+    )
+    assert result.returncode == 130
+    assert "owned-cleanup-ran" in result.stdout
+
+
+def test_real_pytest_timeout_runs_fixture_teardown(tmp_path):
+    ready, finished = tmp_path / "ready", tmp_path / "finished"
+    suite = tmp_path / "test_interrupt.py"
+    suite.write_text(f"""
+from pathlib import Path
+import time
+import pytest
+
+@pytest.fixture
+def resource():
+    Path({str(ready)!r}).touch()
+    try:
+        yield
+    finally:
+        Path({str(finished)!r}).touch()
+
+def test_wait(resource):
+    time.sleep(60)
+""")
+    with pytest.raises(RuntimeError, match="could not finish"):
+        deploy.command(
+            [sys.executable, "-m", "pytest", "-c", "/dev/null", str(suite)],
+            timeout=5,
+            cleanup_timeout=5,
+        )
+    assert ready.is_file(), "Fixture must have started before the test deadline"
+    assert finished.is_file(), "Handled interrupt must execute fixture teardown"
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_partial_setup_failure_or_interruption_still_cleans_owned_namespace(
+    monkeypatch, tmp_path, interrupted
+):
+    args = deploy.arguments(
+        [
+            "--image-repository",
+            "quay.io/test/training-service",
+            "--reuse-image",
+            "quay.io/test/training-service@sha256:" + "a" * 64,
+            "--values",
+            "unused.yaml",
+            "--results-dir",
+            str(tmp_path),
+        ]
+    )
+    monkeypatch.setattr(deploy, "preflight", Mock())
+    monkeypatch.setattr(deploy, "prepare_tls", Mock(return_value={}))
+    monkeypatch.setattr(deploy, "command", Mock(return_value="commit"))
+    environment = Mock(namespace_uid="owned-uid", kueue_setup_error=None)
+    environment.provision.side_effect = (
+        KeyboardInterrupt() if interrupted else ValueError("setup failed")
+    )
+    environment.cleanup.side_effect = lambda release, deployed, evidence: evidence.update(
+        namespace_cleanup="removed"
+    )
+    monkeypatch.setattr(deploy, "RunEnvironment", Mock(return_value=environment))
+    with pytest.raises(KeyboardInterrupt if interrupted else ValueError):
+        deploy.run(args)
+    assert environment.cleanup.call_args.args[1] is False
+    report = json.loads(next(tmp_path.glob("*/run.json")).read_text())
+    assert report["outcome"] == "failed"
+    assert report["namespace_cleanup"] == "removed"
+
+
 @pytest.mark.parametrize(
     "failure,keep,missing_evidence",
     [(False, False, False), (False, True, False), (True, False, False), (False, False, True)],
 )
 @pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("cleanup_failure", [None, "error", "interrupt"])
 def test_runner_build_push_digest_install_test_cleanup(
-    monkeypatch, tmp_path, failure, keep, missing_evidence, reuse
+    monkeypatch, tmp_path, failure, keep, missing_evidence, reuse, private, cleanup_failure
 ):
     values = tmp_path / "values.yaml"
     values.write_text("env: []\n")
@@ -159,7 +308,8 @@ def test_runner_build_push_digest_install_test_cleanup(
             str(values),
             "--results-dir",
             str(tmp_path / "results"),
-            *(["--keep-deployment"] if keep else []),
+            *(["--keep-resources"] if keep else []),
+            *(["--use-podman-auth"] if private else []),
             *(
                 ["--reuse-image", "quay.io/test/training-service@sha256:" + "a" * 64]
                 if reuse
@@ -172,6 +322,17 @@ def test_runner_build_push_digest_install_test_cleanup(
     monkeypatch.setattr(deploy, "prepare_tls", Mock(return_value={"ingress_ca_source": "test"}))
     monkeypatch.setattr(deploy, "wait_ready", Mock())
     environment = Mock(namespace_uid="test-namespace-uid", kueue_setup_error=None)
+    environment.pull_secret.name = "unit-pull-secret"
+    environment.pull_secret.cleanup.return_value = "removed"
+
+    def cleanup(release, deployed, evidence):
+        if cleanup_failure:
+            if cleanup_failure == "interrupt":
+                raise KeyboardInterrupt
+            raise RuntimeError("namespace deletion failed")
+        evidence.update(namespace_cleanup="removed", deployment_cleanup="removed")
+
+    environment.cleanup.side_effect = cleanup
 
     def provision():
         args.job_file = tmp_path / "generated-workload.json"
@@ -195,7 +356,9 @@ def test_runner_build_push_digest_install_test_cleanup(
         if command[:3] == ["oc", "get", "route"]:
             return json.dumps({"spec": {"host": "test.example.com"}})
         if command[:3] == ["oc", "get", "pods"]:
-            return '{"items": []}'
+            return json.dumps(
+                {"items": [{"spec": {"imagePullSecrets": [{"name": "unit-pull-secret"}]}}]}
+            )
         if command[:2] == ["oc", "exec"]:
             return json.dumps(
                 {"training-service": "0.1.0", "ray": "2.55.1", "codeflare-sdk": "0.38.2"}
@@ -203,6 +366,7 @@ def test_runner_build_push_digest_install_test_cleanup(
         if command[:2] == ["oc", "version"]:
             return "{}"
         if "pytest" in command:
+            assert kwargs["cleanup_timeout"] == args.cleanup_timeout
             assert kwargs["env"]["TRAINING_SERVICE_CA_BUNDLE"] == str(args.ingress_ca_bundle)
             if failure:
                 raise RuntimeError("live tests failed")
@@ -225,8 +389,11 @@ def test_runner_build_push_digest_install_test_cleanup(
 
     monkeypatch.setattr(deploy, "command", run)
     failed = failure or missing_evidence
-    if failed:
-        with pytest.raises(RuntimeError, match="live tests failed|evidence is missing"):
+    cleanup_failed = bool(cleanup_failure and not keep)
+    if failed or cleanup_failed:
+        with pytest.raises(
+            RuntimeError, match="live tests failed|evidence is missing|cleanup incomplete"
+        ):
             deploy.run(args)
     else:
         deploy.run(args)
@@ -249,6 +416,7 @@ def test_runner_build_push_digest_install_test_cleanup(
     prefix = "image.tag=reused" if reuse else "image.tag=e2e-"
     assert any(c.startswith(prefix) and c.endswith("@" + digest) for c in install)
     assert install[2].startswith("training-e2e-") and "upgrade" not in install
+    assert ("imagePullSecrets[0].name=unit-pull-secret" in install) == private
     invocation = next(c for c in commands if "pytest" in c)
     assert invocation[invocation.index("--queue-profile") + 1] == "with-kueue"
     assert "--maxfail=0" in invocation
@@ -256,12 +424,25 @@ def test_runner_build_push_digest_install_test_cleanup(
         invocation
     )
     environment.provision.assert_called_once()
-    assert environment.cleanup_setup_pod.called == (not failed and not keep)
-    assert any(c[:2] == ["helm", "uninstall"] for c in commands) == (not failed and not keep)
+    assert environment.cleanup.called == (not keep)
     report = json.loads(next((tmp_path / "results").glob("*/run.json")).read_text())
-    assert report["outcome"] == ("failed" if failed else "passed")
+    assert report["outcome"] == (
+        "cleanup_failed" if cleanup_failed else "failed" if failed else "passed"
+    )
     assert report["image"].endswith("@" + digest)
     assert report["image_reused"] == reuse
+    assert environment.pull_secret.cleanup.called == (private and (keep or cleanup_failed))
+    if private:
+        assert report["registry_secret_cleanup"] == (
+            "removed" if keep or cleanup_failed else "removed with namespace"
+        )
+    assert report["namespace_cleanup"] == (
+        "retained (--keep-resources)"
+        if keep
+        else "incomplete; inspect test namespace"
+        if cleanup_failed
+        else "removed"
+    )
 
 
 @pytest.fixture
@@ -372,6 +553,34 @@ def test_cluster_preflight_accepts_directly_installed_kueue(prepared_cluster):
         for call in command.call_args_list
         if call.args[0][1] == "get"
     )
+
+
+def test_cleanup_permission_failure_names_required_resource(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    original = command.side_effect
+
+    def denied(cmd, **kwargs):
+        if cmd[:5] == ["oc", "auth", "can-i", "delete", "namespaces"]:
+            return "no"
+        return original(cmd, **kwargs)
+
+    command.side_effect = denied
+    with pytest.raises(ValueError, match="delete access to namespaces for cleanup"):
+        cluster_preflight(args, command, values)
+
+
+@pytest.mark.parametrize("option", ["--keep-resources", "--keep-deployment"])
+def test_debug_retention_option_and_alias(prepared_cluster, option):
+    args = deploy.arguments(
+        [
+            "--image-repository",
+            "quay.io/test/training-service",
+            "--values",
+            "unused.yaml",
+            option,
+        ]
+    )
+    assert args.keep_resources is True
 
 
 def test_localqueue_setup_failure_does_not_abort_other_fixtures(prepared_cluster, tmp_path):
@@ -624,8 +833,18 @@ def test_cluster_preflight_rejects_existing_namespace(prepared_cluster):
         cluster_preflight(args, command, values)
 
 
-def test_environment_creates_queued_fixture_and_readonly_verifier(prepared_cluster, tmp_path):
+@pytest.mark.parametrize("private", [False, True])
+def test_environment_creates_queued_fixture_and_readonly_verifier(
+    prepared_cluster, tmp_path, monkeypatch, private
+):
+    from tests.e2e import environment as module
+
     args, values, _, _, command = prepared_cluster
+    args.use_podman_auth = private
+    secret = Mock(name="pull-secret")
+    secret.name = "unit-pull-secret"
+    factory = Mock(return_value=secret)
+    monkeypatch.setattr(module, "PullSecret", factory)
     cluster_preflight(args, command, values)
     environment = RunEnvironment(args, "run-123", tmp_path, Mock())
     documents = []
@@ -652,6 +871,9 @@ def test_environment_creates_queued_fixture_and_readonly_verifier(prepared_clust
     assert documents[1]["spec"]["clusterQueue"] == "default"
     assert documents[2]["spec"]["accessModes"] == ["ReadWriteMany"]
     pod = documents[-1]["spec"]
+    assert pod.get("imagePullSecrets", []) == ([{"name": "unit-pull-secret"}] if private else [])
+    assert factory.called == private
+    assert secret.create.called == private
     assert not pod["automountServiceAccountToken"]
     assert pod["securityContext"]["fsGroup"] == 1001420000
     assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
@@ -665,7 +887,9 @@ def test_environment_creates_queued_fixture_and_readonly_verifier(prepared_clust
 
 @pytest.mark.parametrize("annotation", ["supplemental-groups", "uid-range"])
 def test_fixture_uses_namespace_allocated_group(prepared_cluster, tmp_path, annotation):
-    environment = RunEnvironment(prepared_cluster[0], "run", tmp_path, Mock())
+    environment = RunEnvironment(
+        prepared_cluster[0], "run", tmp_path, Mock(return_value='{"items":[]}')
+    )
     assert (
         environment.fixture_group(
             {
@@ -827,54 +1051,111 @@ def test_fixture_write_failure_happens_before_model_download(monkeypatch):
     download.assert_not_called()
 
 
-def test_fixture_cleanup_refuses_replaced_namespace(prepared_cluster, tmp_path):
-    args = prepared_cluster[0]
-    command = Mock(
-        return_value=json.dumps(
-            {"metadata": {"uid": "replacement", "labels": {RUN_LABEL: "run-123"}}}
-        )
+@pytest.fixture
+def cleanup_environment(monkeypatch, prepared_cluster, tmp_path):
+    from tests.e2e import environment as module
+
+    environment = RunEnvironment(
+        prepared_cluster[0], "run", tmp_path, Mock(return_value='{"items":[]}')
     )
-    environment = RunEnvironment(args, "run-123", tmp_path, command)
-    environment.namespace_uid = "original"
-    with pytest.raises(RuntimeError, match="ownership changed"):
-        environment.cleanup_setup_pod()
-    assert command.call_count == 1
-
-
-@pytest.mark.parametrize("replacement", [False, True])
-def test_fixture_cleanup_uses_pod_uid_precondition(
-    monkeypatch, prepared_cluster, tmp_path, replacement
-):
-    from kubernetes import client, config
-
-    args = prepared_cluster[0]
-    command = Mock(
-        side_effect=[
-            json.dumps({"metadata": {"uid": "namespace-uid", "labels": {RUN_LABEL: "run"}}}),
-            json.dumps(
-                {
-                    "metadata": {
-                        "uid": "replacement" if replacement else "pod-uid",
-                        "labels": {RUN_LABEL: "run"},
-                    }
-                }
-            ),
-            "",
-        ]
-    )
-    environment = RunEnvironment(args, "run", tmp_path, command)
-    environment.namespace_uid, environment.pod_uid = "namespace-uid", "pod-uid"
+    environment.namespace_uid = "namespace-uid"
+    environment.namespace_creation_attempted = True
     core = Mock()
-    monkeypatch.setattr(config, "new_client_from_config", MagicMock())
-    monkeypatch.setattr(client, "CoreV1Api", Mock(return_value=core))
-    if replacement:
-        with pytest.raises(RuntimeError, match="ownership changed"):
-            environment.cleanup_setup_pod()
-        core.delete_namespaced_pod.assert_not_called()
+    namespace = SimpleNamespace(
+        metadata=SimpleNamespace(uid="namespace-uid", labels={RUN_LABEL: "run"})
+    )
+    core.read_namespace.side_effect = [namespace, ApiException(status=404)]
+    monkeypatch.setattr(module, "kubeconfig_client", MagicMock())
+    monkeypatch.setattr(module.client, "CoreV1Api", Mock(return_value=core))
+    return environment, core, namespace
+
+
+@pytest.mark.parametrize("replacement", ["uid", "label"])
+def test_cleanup_refuses_replaced_or_foreign_namespace(cleanup_environment, replacement):
+    environment, core, current = cleanup_environment
+    if replacement == "uid":
+        current.metadata.uid = "replacement"
     else:
-        environment.cleanup_setup_pod()
-        assert core.delete_namespaced_pod.call_args.kwargs["body"].preconditions.uid == "pod-uid"
-        assert command.call_args.args[0][1] == "wait"
+        current.metadata.labels[RUN_LABEL] = "another-run"
+    with pytest.raises(RuntimeError, match="ownership changed"):
+        environment.cleanup("unique-release", True, {})
+    core.delete_namespace.assert_not_called()
+    environment.command.assert_not_called()
+
+
+@pytest.mark.parametrize("deployed", [False, True])
+@pytest.mark.parametrize("ambiguous_post", [False, True])
+def test_cleanup_uninstalls_helm_before_uid_guarded_namespace_delete(
+    cleanup_environment, deployed, ambiguous_post
+):
+    environment, core, _ = cleanup_environment
+    if ambiguous_post:
+        environment.namespace_uid = None
+    operations = Mock()
+    operations.attach_mock(environment.command, "helm")
+    operations.attach_mock(core.delete_namespace, "delete")
+    evidence = {}
+    environment.cleanup("unique-release", deployed, evidence)
+    assert evidence["namespace_cleanup"] == "removed"
+    assert "test PVC" in evidence["fixture_cleanup"]
+    assert environment.namespace_uid == "namespace-uid"
+    assert core.delete_namespace.call_args.kwargs["body"].preconditions.uid == "namespace-uid"
+    assert environment.command.called == deployed
+    if deployed:
+        assert operations.mock_calls[0].args[0][:3] == ["helm", "uninstall", "unique-release"]
+        assert evidence["deployment_cleanup"] == "removed"
+
+
+def test_cleanup_does_not_delete_namespace_if_helm_uninstall_fails(cleanup_environment):
+    environment, core, _ = cleanup_environment
+    environment.command.side_effect = RuntimeError("helm uninstall failed")
+    with pytest.raises(RuntimeError, match="helm uninstall failed"):
+        environment.cleanup("unique-release", True, {})
+    core.delete_namespace.assert_not_called()
+
+
+def test_cleanup_does_not_hide_leftover_cluster_scoped_rbac(cleanup_environment):
+    environment, core, _ = cleanup_environment
+    environment.command.return_value = '{"items":[{"kind":"ClusterRole"}]}'
+    with pytest.raises(RuntimeError, match="RBAC remains"):
+        environment.cleanup("unique-release", True, {})
+    core.delete_namespace.assert_not_called()
+
+
+def test_cleanup_never_claims_success_for_pending_deletion(cleanup_environment, monkeypatch):
+    from tests.e2e import environment as module
+
+    environment, core, current = cleanup_environment
+    core.read_namespace.side_effect = None
+    core.read_namespace.return_value = current
+    monkeypatch.setattr(module.time, "monotonic", Mock(side_effect=[0, 999]))
+    with pytest.raises(RuntimeError, match="deletion deadline"):
+        environment.cleanup("unique-release", False, {})
+
+
+def test_cleanup_is_noop_before_namespace_creation(cleanup_environment):
+    environment, core, _ = cleanup_environment
+    environment.namespace_uid = None
+    environment.namespace_creation_attempted = False
+    evidence = {}
+    environment.cleanup("unique-release", False, evidence)
+    core.read_namespace.assert_not_called()
+    core.delete_namespace.assert_not_called()
+    assert evidence["namespace_cleanup"] == "not created"
+
+
+@pytest.mark.parametrize("deployed", [False, True])
+def test_cleanup_missing_namespace_is_not_proof_of_helm_cleanup(cleanup_environment, deployed):
+    environment, core, _ = cleanup_environment
+    core.read_namespace.side_effect = ApiException(status=404)
+    evidence = {}
+    if deployed:
+        with pytest.raises(RuntimeError, match="cluster-scoped"):
+            environment.cleanup("unique-release", deployed, evidence)
+    else:
+        environment.cleanup("unique-release", deployed, evidence)
+        assert evidence["namespace_cleanup"] == "already absent"
+    core.delete_namespace.assert_not_called()
 
 
 def test_preflight_only_never_builds_pushes_or_provisions(monkeypatch, tmp_path, capsys):

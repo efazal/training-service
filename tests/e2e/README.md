@@ -22,15 +22,17 @@ Prepare once:
   nonroot UIDs. The built-in fixture needs one NVIDIA GPU, 4 CPUs, 32Gi memory,
   5Gi storage and outbound access to the public Hugging Face model repository.
   This is not a disconnected/ROCm or CPU-only test.
-- The deployment identity needs namespace creation, Helm install/uninstall,
+- The deployment identity needs namespace creation/deletion, Helm install/uninstall,
   StorageClass/node reads, Route/service/pod reads, `get` access to ConfigMap
   `openshift-config-managed/default-ingress-cert` for public TLS trust discovery,
   pod exec for evidence, and permission to install the chart's
-  TokenReview/SAR ClusterRole and ClusterRoleBinding. This is separate from the
+  TokenReview/SAR ClusterRole and ClusterRoleBinding (list/delete for cleanup verification).
+  This is separate from the
   HTTP caller token below; admin credentials cannot prove restricted-user isolation.
-- Use your own **public** Quay repo, or cluster-wide image pull credentials.
-  Every run creates a fresh namespace; the runner never reads/copies a pull Secret
-  from another namespace. Both service and runtime images must be pullable there.
+- Use your own Quay repo. Public images need no credential transfer. For a private
+  repo, add `--use-podman-auth` as described below: local Podman login alone does
+  not authorize Kubernetes image pulls. The runner never copies a pre-existing
+  cluster Secret or changes cluster-wide pull credentials.
 - Copy [values.example.yaml](values.example.yaml) outside the repo and supply a
   compatible Ray + Training Hub runtime and authenticated Ray gateway.
   The runner automatically reads the cluster's **public ingress certificate
@@ -78,6 +80,49 @@ files copied by the `Containerfile` are unchanged; an unchanged `Containerfile`
 alone is insufficient. Test-harness-only changes do not require an image rebuild.
 Select a known-compatible image explicitly; there is no silent latest-tag cache.
 
+### Private Quay images
+
+Add `--use-podman-auth` to the deploy command (also supported with `--reuse-image`):
+
+```bash
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS --use-podman-auth"
+```
+
+This is explicit permission to send your **Quay credential** to the test cluster.
+Prefer a read-only robot account with access only to the test repositories when
+reusing an image. Cluster administrators and identities permitted to read Secrets
+in the test namespace can access that credential. The runner honors the existing
+Kubernetes API TLS settings in kubeconfig, just like `oc`; it does not modify
+them. If `insecure-skip-tls-verify` is already enabled, it warns and continues:
+the API-server identity is not verified when sending registry credentials. Use
+that setting only for a trusted development cluster; verified TLS is recommended.
+Kubernetes HTTP debug logging remains blocked to prevent credential disclosure.
+Route/gateway certificate verification is unchanged. Secret get/create/delete and
+default ServiceAccount get/patch permissions are required in the new namespace.
+
+The runner reads Podman's normal local auth locations (or the file selected by
+`REGISTRY_AUTH_FILE`) and resolves configured native credential helpers. It copies
+**only the `quay.io` login**, not other registry entries, into an in-memory
+`kubernetes.io/dockerconfigjson` Secret request. Unsupported/missing credentials
+fail with login guidance, not raw helper/API output. Leave `imagePullSecrets: []`
+in values; the runner supplies the newly created Secret name to Helm, the
+fixture/verifier pod and the new namespace's default ServiceAccount. Default-SA
+Ray/submitter pods inherit the reference; custom runtime ServiceAccounts need
+their own approved pull configuration. This flag supports Quay, not arbitrary
+registries or per-repository auth-file entries. Images using a different registry
+must already be pullable in the cluster.
+
+No credential file or Secret manifest is written to the repository, evidence,
+Helm values/history or command arguments. Only the Secret **name** is supplied to
+Helm. The runner checks namespace/Secret ownership and uses a UID precondition to
+remove its Secret on success, failure or interruption, even with
+`--keep-resources`. Its default-ServiceAccount reference is removed too; other
+Secrets/references are untouched. A retained private deployment may need fresh
+credentials before it can pull again. Cleanup failure is reported and makes the
+run fail; inspect the named test-only Secret. Uncatchable termination or machine
+loss can leave it behind, so verify cleanup in that case. No credentials are read
+when this flag is omitted.
+
 Each invocation creates a new `training-e2e-<run>` namespace and Helm release.
 The [namespace manifest](fixtures/namespace.yaml) includes
 `kueue.openshift.io/managed: "true"`, `opendatahub.io/dashboard: "true"`, and a
@@ -121,14 +166,32 @@ Missing required lifecycle evidence fails even if pytest was accidentally filter
 `--preflight-only` checks deployment/tooling/TLS prerequisites, **not Kueue
 readiness**; actual queue checks belong to the selected lifecycle test.
 
-Successful deployments and the fixture/verifier pod are removed with bounded
-waits; `--keep-deployment` retains both for manual inspection. Failed/interrupted
-deployments and fixtures are retained for diagnosis. The **namespace, LocalQueue,
-PVC, outputs and Quay tag are retained**, and each run creates new ones;
-review these test-only resources periodically rather than expecting automatic
-namespace/storage deletion. The exact Helm cleanup command is printed on failure.
-Remove test images later under your registry retention policy. No registry image
-or customer storage deletion is automated.
+On success, failure or interruption, the runner **cleans up by default**: uninstall
+the isolated Helm release (including its cluster-scoped RBAC), then delete the
+run-owned namespace, LocalQueue, verifier, temporary credentials, test PVC and
+remaining Ray resources. Namespace ownership/run label and UID are verified;
+deletion uses a UID precondition and bounded polling, never forced finalizer removal.
+Partial setup failures also trigger cleanup. This may cancel a still-running test
+job in this isolated namespace; it does not change the API's terminal-only DELETE
+contract. Cleanup failure makes the run fail and reports manual recovery guidance.
+If Helm uninstall fails, the namespace/release history is retained for safe recovery.
+PVC deletion follows the StorageClass reclaim policy; the runner never directly
+deletes PVs or changes shared storage policy.
+
+Add **`--keep-resources`** to retain the namespace, deployment and test storage for
+debugging; `--keep-deployment` remains a compatibility alias. Temporary registry
+credentials are still removed. Retained active jobs can consume GPUs: stop them
+and uninstall the reported Helm release before deleting that test-only namespace.
+Reports, manifests and JUnit/JSON evidence always remain in the local results directory.
+Test images remain in Quay under your registry retention policy. No registry image,
+pre-existing namespace, customer storage or shared CRD deletion is automated.
+
+On a pytest deadline/interruption, send pytest SIGINT (its handled interrupt) and
+allow `--cleanup-timeout` for fixture teardown before killing a stuck child. The
+parent then performs the same owned-namespace cleanup. SIGTERM uses this handled
+interruption path too. A second interrupt stops/reaps the pytest child; interrupting
+resource cleanup reports a cleanup failure rather than a passing run. Uncatchable termination
+(SIGKILL or machine loss) cannot run finalizers; inspect the reported namespace.
 
 ## Additional profiles against an existing deployment
 
@@ -216,6 +279,7 @@ make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile with-k
 | `--request-timeout 30` | Per HTTP timeout, existing-deployment command |
 | `--build-timeout 1800`, `--deploy-timeout 300` | Build/push and rollout/Route deadlines, deployment runner |
 | `--reuse-image IMAGE@sha256:DIGEST` | Reuse a known-compatible image in `--image-repository`, skipping build/push |
+| `--use-podman-auth` | Temporary namespace-local Quay pull credentials from Podman; honors kubeconfig TLS and warns if verification is disabled |
 | `--fixture-timeout 900` | PVC/model preparation deadline, deployment runner |
 | `--namespace NEW_NAME`, `--cluster-queue existing-cq` | New namespace name and existing ClusterQueue override |
 | `--preflight-only` | Read-only cluster/tooling/config checks; no build/push/deploy |

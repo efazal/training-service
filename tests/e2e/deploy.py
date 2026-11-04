@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from pathlib import Path
 import httpx
 import yaml
 
+from tests.e2e import registry
 from tests.e2e.environment import RunEnvironment, cluster_preflight, prepare_tls, terminal_summary
 from tests.e2e.support import namespace
 
@@ -25,24 +27,41 @@ ROOT = Path(__file__).resolve().parents[2]
 CHART = ROOT / "charts/training-service"
 
 
-def command(args, *, timeout=120, capture=True, env=None):
+def command(args, *, timeout=120, capture=True, env=None, cleanup_timeout=None):
     """Do not echo commands/output that could contain credentials or chart values."""
     try:
-        result = subprocess.run(
-            [str(arg) for arg in args],
-            cwd=ROOT,
-            env=env,
-            timeout=timeout,
-            stdout=subprocess.PIPE if capture else None,
-            stderr=subprocess.PIPE if capture else None,
-            text=True,
-            check=False,
-        )
+        options = {
+            "cwd": ROOT,
+            "env": env,
+            "text": True,
+            "stdout": subprocess.PIPE if capture else None,
+            "stderr": subprocess.PIPE if capture else None,
+        }
+        argv = [str(arg) for arg in args]
+        if cleanup_timeout is None:
+            result = subprocess.run(argv, timeout=timeout, check=False, **options)
+        else:
+            with subprocess.Popen(argv, start_new_session=True, **options) as process:
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                    # Pytest handles SIGINT and runs fixture teardown; SIGTERM does not.
+                    process.send_signal(signal.SIGINT)
+                    try:
+                        process.communicate(timeout=cleanup_timeout)
+                    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                        process.kill()
+                        process.communicate(timeout=15)
+                    raise
+                result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     except (OSError, subprocess.TimeoutExpired):
         raise RuntimeError(
             f"{args[0]} {args[1]} could not finish; check local tooling/session"
         ) from None
     if result.returncode:
+        if args[:3] == ["oc", "auth", "can-i"] and result.returncode == 1:
+            if (result.stdout or "").strip() == "no":
+                return "no"
         if args[1:3] == ["-m", "pytest"]:
             raise RuntimeError(
                 f"Live E2E suite failed (exit {result.returncode}); "
@@ -62,6 +81,11 @@ def arguments(argv=None):
     )
     parser.add_argument(
         "--reuse-image", help="Reuse a known-compatible IMAGE@sha256:DIGEST; skip Podman build/push"
+    )
+    parser.add_argument(
+        "--use-podman-auth",
+        action="store_true",
+        help="Provision a temporary Quay pull secret using existing local Podman credentials",
     )
     parser.add_argument(
         "--namespace", type=namespace, help="New namespace (default: training-e2e-<run>)"
@@ -84,7 +108,11 @@ def arguments(argv=None):
     )
     parser.add_argument("--forbidden-project", type=namespace)
     parser.add_argument(
-        "--keep-deployment", action="store_true", help="Keep successful test deployment too"
+        "--keep-resources",
+        "--keep-deployment",
+        dest="keep_resources",
+        action="store_true",
+        help="Retain this run's namespace/resources for debugging (registry credentials removed)",
     )
     parser.add_argument("--build-timeout", type=int, default=1800)
     parser.add_argument("--deploy-timeout", type=int, default=300)
@@ -127,6 +155,19 @@ def preflight(args):
     if not isinstance(values, dict):
         raise ValueError("Helm values must contain an object")
     cluster_preflight(args, command, values)
+    if args.use_podman_auth:
+        for verb, resource in (
+            ("get", "secrets"),
+            ("delete", "secrets"),
+            ("get", "serviceaccounts"),
+            ("patch", "serviceaccounts"),
+        ):
+            if (
+                command(["oc", "auth", "can-i", verb, resource, "-n", args.namespace]).strip()
+                != "yes"
+            ):
+                raise ValueError(f"Private registry support needs {verb} access to {resource}")
+        registry.preflight()
     if not args.reuse_image:
         command(["podman", "info", "--format", "{{.Host.Arch}}"])
         command(["podman", "login", "--get-login", "quay.io"])
@@ -187,13 +228,12 @@ def run(args):
         ).hexdigest(),
     }
     deployed = False
-    succeeded = False
     environment = RunEnvironment(args, run_id, results, command)
     try:
         print("Checking fresh namespace, storage, deployment permissions and tooling", flush=True)
         values = preflight(args)
         evidence["tls"] = prepare_tls(args, command, results, values)
-        print("Public TLS trust configured; certificate verification enabled", flush=True)
+        print("Route/gateway TLS trust configured; certificate verification enabled", flush=True)
         if args.preflight_only:
             evidence["outcome"] = "preflight_passed"
             return
@@ -259,42 +299,45 @@ def run(args):
             raise RuntimeError("Generated release name already exists; refusing to adopt it")
         # Names are unique: never upgrade/adopt an existing release or namespace.
         deployed = True  # Includes partially failed installations for diagnostics.
-        command(
-            [
-                "helm",
-                "install",
-                release,
-                CHART,
-                "-n",
-                args.namespace,
-                "-f",
-                args.values,
+        install_args = [
+            "helm",
+            "install",
+            release,
+            CHART,
+            "-n",
+            args.namespace,
+            "-f",
+            args.values,
+            "--set-string",
+            "fullnameOverride=" + release,
+            "--set-string",
+            "serviceAccount.name=" + release,
+            "--set",
+            "serviceAccount.create=true",
+            "--set-string",
+            "image.repository=" + args.image_repository,
+            "--set-string",
+            "image.tag=" + tag + "@" + digest,
+            "--set",
+            "image.pullPolicy=Always",
+            "--set",
+            "route.enabled=true",
+            "--set",
+            "route.tls.enabled=true",
+            "--set",
+            "route.path=",
+            "--set",
+            "route.host=",
+            "--wait",
+            "--timeout",
+            f"{args.deploy_timeout}s",
+        ]
+        if args.use_podman_auth:
+            install_args += [
                 "--set-string",
-                "fullnameOverride=" + release,
-                "--set-string",
-                "serviceAccount.name=" + release,
-                "--set",
-                "serviceAccount.create=true",
-                "--set-string",
-                "image.repository=" + args.image_repository,
-                "--set-string",
-                "image.tag=" + tag + "@" + digest,
-                "--set",
-                "image.pullPolicy=Always",
-                "--set",
-                "route.enabled=true",
-                "--set",
-                "route.tls.enabled=true",
-                "--set",
-                "route.path=",
-                "--set",
-                "route.host=",
-                "--wait",
-                "--timeout",
-                f"{args.deploy_timeout}s",
-            ],
-            timeout=args.deploy_timeout + 30,
-        )
+                "imagePullSecrets[0].name=" + environment.pull_secret.name,
+            ]
+        command(install_args, timeout=args.deploy_timeout + 30)
         route = json.loads(
             command(["oc", "get", "route", release, "-n", args.namespace, "-o", "json"])
         )
@@ -324,6 +367,14 @@ def run(args):
             for p in pods["items"]
             for c in p.get("status", {}).get("containerStatuses", [])
         ]
+        if args.use_podman_auth:
+            if not pods["items"] or any(
+                environment.pull_secret.name
+                not in {ref.get("name") for ref in pod.get("spec", {}).get("imagePullSecrets", [])}
+                for pod in pods["items"]
+            ):
+                raise RuntimeError("Service pods do not reference the test registry pull secret")
+            evidence["registry_pull_secret_attached"] = True
         versions = json.loads(
             command(
                 [
@@ -398,7 +449,11 @@ def run(args):
         print(f"Testing {url}; results: {results}", flush=True)
         # Live tests produce only sanitized assertions; no --showlocals or verbose HTTP logging.
         command(
-            test_args, timeout=args.job_timeout + args.cleanup_timeout + 600, capture=False, env=env
+            test_args,
+            timeout=args.job_timeout + args.cleanup_timeout + 600,
+            capture=False,
+            env=env,
+            cleanup_timeout=args.cleanup_timeout,
         )
         # An overridden pytest selection must not silently turn this into a smoke-only pass.
         lifecycle_path = results / "lifecycle.json"
@@ -408,54 +463,58 @@ def run(args):
             for key in ("succeeded", "queue_admitted", "gpu_cleanup", "snapshot_logs", "sse")
         ) or not isinstance(lifecycle.get("artifacts"), dict):
             raise RuntimeError("Required queued training/log/artifact/cleanup evidence is missing")
-        succeeded = True
         evidence["outcome"] = "passed"
     except BaseException:
         evidence["outcome"] = "failed"
         raise
     finally:
+        cleanup_errors = []
         try:
-            if deployed and succeeded and not args.keep_deployment:
-                try:
-                    command(
-                        [
-                            "helm",
-                            "uninstall",
-                            release,
-                            "-n",
-                            args.namespace,
-                            "--wait",
-                            "--timeout",
-                            f"{args.cleanup_timeout}s",
-                        ],
-                        timeout=args.cleanup_timeout + 30,
-                    )
-                    evidence["deployment_cleanup"] = "removed"
-                except RuntimeError:
-                    evidence["outcome"] = "deployment_cleanup_failed"
-                    evidence["deployment_cleanup"] = "incomplete"
-                    print(f"Cleanup incomplete: helm uninstall {release} -n {args.namespace}")
-                    raise
-                try:
-                    environment.cleanup_setup_pod()
-                    evidence["fixture_cleanup"] = "verifier pod removed"
-                except RuntimeError:
-                    evidence["outcome"] = "fixture_cleanup_failed"
-                    evidence["fixture_cleanup"] = "incomplete; inspect retained verifier pod"
-                    raise
-            elif deployed:
+            if not args.keep_resources:
+                environment.cleanup(release, deployed, evidence)
+            elif environment.namespace_uid:
+                evidence["namespace_cleanup"] = "retained (--keep-resources)"
                 evidence["deployment_cleanup"] = "retained"
-                print(f"Retained deployment. Cleanup: helm uninstall {release} -n {args.namespace}")
+                print(f"Retained test resources in {args.namespace}; active jobs may hold GPUs.")
+        except (RuntimeError, OSError, KeyboardInterrupt) as error:
+            cleanup_errors.append(type(error).__name__)
+            evidence["cleanup_error"] = (
+                str(error) if isinstance(error, RuntimeError) else type(error).__name__
+            )
+            evidence["namespace_cleanup"] = "incomplete; inspect test namespace"
+            print(
+                f"Cleanup incomplete: inspect {args.namespace}; helm uninstall {release} "
+                f"-n {args.namespace}, then delete only this run's namespace."
+            )
         finally:
-            evidence["namespace_created"] = bool(environment.namespace_uid)
-            evidence["namespace_uid"] = environment.namespace_uid
-            evidence["kueue_setup_error"] = environment.kueue_setup_error
-            evidence["cluster_queue"] = args.cluster_queue
-            (results / "run.json").write_text(json.dumps(evidence, indent=2) + "\n")
-            terminal_summary(evidence, results)
+            try:
+                if args.use_podman_auth:
+                    if evidence.get("namespace_cleanup") in {"removed", "already absent"}:
+                        evidence["registry_secret_cleanup"] = "removed with namespace"
+                    else:
+                        evidence["registry_secret_cleanup"] = environment.pull_secret.cleanup()
+            except (RuntimeError, KeyboardInterrupt):
+                cleanup_errors.append("registry credential cleanup")
+                evidence["registry_secret_cleanup"] = "incomplete; inspect test namespace"
+            finally:
+                if cleanup_errors:
+                    evidence["test_outcome"] = evidence["outcome"]
+                    evidence["outcome"] = "cleanup_failed"
+                evidence["namespace_created"] = bool(environment.namespace_uid)
+                evidence["namespace_uid"] = environment.namespace_uid
+                evidence["kueue_setup_error"] = environment.kueue_setup_error
+                evidence["cluster_queue"] = args.cluster_queue
+                (results / "run.json").write_text(json.dumps(evidence, indent=2) + "\n")
+                terminal_summary(evidence, results)
+        if cleanup_errors:
+            raise RuntimeError("E2E resource cleanup incomplete; see summary and saved reports")
 
 
 def main():
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, interrupt)
     try:
         run(arguments())
     except (ValueError, RuntimeError) as error:
@@ -470,10 +529,12 @@ def main():
         return 1
     except KeyboardInterrupt:
         print(
-            "Interrupted: inspect the reported job/deployment; active jobs are not force-deleted.",
+            "Interrupted: cleanup was attempted for this run's isolated resources; see summary.",
             file=sys.stderr,
         )
         return 130
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
 
 
