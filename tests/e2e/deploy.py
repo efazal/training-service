@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 import yaml
 
-from tests.e2e.environment import RunEnvironment, cluster_preflight, terminal_summary
+from tests.e2e.environment import RunEnvironment, cluster_preflight, prepare_tls, terminal_summary
 from tests.e2e.support import namespace, workload
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,7 +65,9 @@ def arguments(argv=None):
         "--cluster-queue", help="Existing Active ClusterQueue (DSC default if omitted)"
     )
     parser.add_argument(
-        "--ray-ca-bundle", type=Path, help="Public Ray gateway CA PEM (never a key)"
+        "--ray-ca-bundle",
+        type=Path,
+        help="Override the discovered ingress CA for a custom Ray gateway (public PEM only)",
     )
     parser.add_argument(
         "--preflight-only",
@@ -113,7 +115,6 @@ def preflight(args):
     if not isinstance(values, dict):
         raise ValueError("Helm values must contain an object")
     cluster_preflight(args, command, values)
-    ssl.create_default_context(cafile=os.getenv("TRAINING_SERVICE_CA_BUNDLE") or None)
     command(["podman", "info", "--format", "{{.Host.Arch}}"])
     command(["podman", "login", "--get-login", "quay.io"])
     nodes = json.loads(command(["oc", "get", "nodes", "-o", "json"]))["items"]
@@ -140,6 +141,7 @@ def preflight(args):
         if allowed != "yes":
             raise ValueError(f"Deployment identity needs create access to {resource}")
     command(["helm", "lint", CHART, "-f", args.values])
+    return values
 
 
 def observer_preflight(args):
@@ -154,8 +156,8 @@ def observer_preflight(args):
         raise ValueError("Observer preflight failed: check kubeconfig and permissions") from None
 
 
-def wait_ready(url, timeout):
-    tls = ssl.create_default_context(cafile=os.getenv("TRAINING_SERVICE_CA_BUNDLE") or None)
+def wait_ready(url, timeout, ca_bundle):
+    tls = ssl.create_default_context(cafile=ca_bundle)
     deadline = time.monotonic() + timeout
     with httpx.Client(verify=tls, follow_redirects=False, trust_env=False, timeout=10) as http:
         while time.monotonic() < deadline:
@@ -189,7 +191,9 @@ def run(args):
     environment = RunEnvironment(args, run_id, results, command)
     try:
         print("Checking Ray/Kueue DSC, fresh namespace, queue, storage and tooling", flush=True)
-        preflight(args)
+        values = preflight(args)
+        evidence["tls"] = prepare_tls(args, command, results, values)
+        print("Public TLS trust configured; certificate verification enabled", flush=True)
         if args.preflight_only:
             evidence["outcome"] = "preflight_passed"
             return
@@ -287,7 +291,7 @@ def run(args):
             raise RuntimeError("Route returned an invalid hostname")
         url = "https://" + host
         evidence["url"] = url
-        wait_ready(url, args.deploy_timeout)
+        wait_ready(url, args.deploy_timeout, args.ingress_ca_bundle)
         pods = json.loads(
             command(
                 [
@@ -345,6 +349,7 @@ def run(args):
             TRAINING_SERVICE_URL=url,
             TRAINING_SERVICE_PROJECT=args.namespace,
             TRAINING_SERVICE_EVIDENCE_DIR=str(results),
+            TRAINING_SERVICE_CA_BUNDLE=str(args.ingress_ca_bundle),
         )
         test_args = [
             sys.executable,

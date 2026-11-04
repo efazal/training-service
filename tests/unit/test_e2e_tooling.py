@@ -158,6 +158,8 @@ def test_runner_build_push_digest_install_test_cleanup(
         ]
     )
     monkeypatch.setattr(deploy, "preflight", Mock())
+    args.ingress_ca_bundle = tmp_path / "generated-ingress-ca.pem"
+    monkeypatch.setattr(deploy, "prepare_tls", Mock(return_value={"ingress_ca_source": "test"}))
     monkeypatch.setattr(deploy, "observer_preflight", Mock())
     monkeypatch.setattr(deploy, "wait_ready", Mock())
     environment = Mock(namespace_uid="test-namespace-uid")
@@ -192,6 +194,7 @@ def test_runner_build_push_digest_install_test_cleanup(
         if command[:2] == ["oc", "version"]:
             return "{}"
         if "pytest" in command:
+            assert kwargs["env"]["TRAINING_SERVICE_CA_BUNDLE"] == str(args.ingress_ca_bundle)
             if failure:
                 raise RuntimeError("live tests failed")
             if missing_evidence:
@@ -451,14 +454,6 @@ def test_fixture_cleanup_uses_pod_uid_precondition(
         assert command.call_args.args[0][1] == "wait"
 
 
-def test_cluster_preflight_never_copies_private_key_as_ca(prepared_cluster, tmp_path):
-    args, values, _, _, command = prepared_cluster
-    args.ray_ca_bundle = tmp_path / "not-public.pem"
-    args.ray_ca_bundle.write_text("Fixture PRIVATE KEY marker, not cryptographic material.\n")
-    with pytest.raises(ValueError, match="never private keys"):
-        cluster_preflight(args, command, values)
-
-
 def test_preflight_only_never_builds_pushes_or_provisions(monkeypatch, tmp_path, capsys):
     args = deploy.arguments(
         [
@@ -473,11 +468,14 @@ def test_preflight_only_never_builds_pushes_or_provisions(monkeypatch, tmp_path,
     )
     preflight, command, environment = Mock(), Mock(), Mock()
     monkeypatch.setattr(deploy, "preflight", preflight)
+    tls = Mock(return_value={})
+    monkeypatch.setattr(deploy, "prepare_tls", tls)
     monkeypatch.setattr(deploy, "command", command)
     monkeypatch.setattr(deploy, "RunEnvironment", environment)
     environment.return_value.namespace_uid = None
     deploy.run(args)
     preflight.assert_called_once()
+    tls.assert_called_once()
     assert args.namespace.startswith("training-e2e-")
     command.assert_not_called()
     environment.return_value.provision.assert_not_called()

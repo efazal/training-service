@@ -1,4 +1,6 @@
-# Copy outside the repo. Supply your tested image, gateway and public CA.
+# Copy outside the repo. Supply your tested image and authenticated Ray gateway.
+# The runner discovers the cluster's public ingress CA and provisions the CA ConfigMap.
+# Use --ray-ca-bundle only when the gateway needs a different issuer.
 # Never put tokens, passwords or Secret values here.
 imagePullSecrets: [] # Public images or cluster-wide pull credentials; never copy Secrets.
 env:

@@ -24,7 +24,8 @@ Prepare once:
   5Gi storage and outbound access to the public Hugging Face model repository.
   This is not a disconnected/ROCm or CPU-only test.
 - The deployment identity needs namespace creation, Helm install/uninstall,
-  DSC/StorageClass/node reads, Route/service/pod reads,
+  DSC/StorageClass/node reads, Route/service/pod reads, `get` access to ConfigMap
+  `openshift-config-managed/default-ingress-cert` for public TLS trust discovery,
   pod exec for evidence, and permission to install the chart's
   TokenReview/SAR ClusterRole and ClusterRoleBinding. This is separate from the
   HTTP caller token below; admin credentials cannot prove restricted-user isolation.
@@ -32,20 +33,32 @@ Prepare once:
   Every run creates a fresh namespace; the runner never reads/copies a pull Secret
   from another namespace. Both service and runtime images must be pullable there.
 - Copy [values.example.yaml](values.example.yaml) outside the repo and supply a
-  compatible Ray + Training Hub runtime, authenticated Ray gateway and public CA.
-  `--ray-ca-bundle` provisions a public certificate ConfigMap named
-  `training-service-ray-ca`, mounted by the example values. Omit the CA option
-  and the example CA environment/volume entries for a publicly trusted gateway.
+  compatible Ray + Training Hub runtime and authenticated Ray gateway.
+  The runner automatically reads the cluster's **public ingress certificate
+  bundle** from `openshift-config-managed/default-ingress-cert` (`ca-bundle.crt`).
+  It saves it only under the ignored per-run results directory, uses it for
+  Route TLS, and provisions `training-service-ray-ca` for the gateway using the
+  example's read-only mount. No PEM needs to be prepared or committed; no Secret
+  or private key is read. Discovery uses the authenticated `oc` connection,
+  never an unverified peer certificate.
   This PR does not change SDK/Ray pins or establish a new compatibility matrix.
 
 From the repository root:
 
 ```bash
 export TRAINING_SERVICE_TOKEN="$(oc whoami -t)"
-# Only for a Route signed by a private CA (public certificate, not a token):
-export TRAINING_SERVICE_CA_BUNDLE=/path/to/ingress-ca.pem
-make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS --ray-ca-bundle /path/to/ray-ca.pem"
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS"
 ```
+
+For a Ray gateway with a certificate from a different issuer, override only its
+trust with `--ray-ca-bundle /path/to/custom-ray-ca.pem`. To override Route trust,
+set `TRAINING_SERVICE_CA_BUNDLE=/path/to/custom-ingress-ca.pem`; this does not
+override Ray trust. Unset stale overrides to restore automatic discovery.
+For a publicly trusted Ray gateway, remove the example's CA environment/volume
+entries to use the container's system trust store. If ConfigMap discovery is
+denied/missing, the runner fails with permission/override guidance; it never
+disables certificate or hostname verification. Both explicit overrides together
+(or just the Route override when Ray uses system trust) avoid the ConfigMap read.
 
 The runner validates prerequisites, builds the existing `Containerfile` with Podman,
 pushes a unique `e2e-<commit>-<run>` tag, pins Helm to the **pushed digest**, waits
@@ -74,7 +87,7 @@ no-Kueue switch: admission, training, logs, outputs and cleanup are required.
 To check prerequisites without building, uploading or creating cluster resources:
 
 ```bash
-make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS --ray-ca-bundle /path/to/ray-ca.pem --preflight-only"
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS --preflight-only"
 ```
 
 The terminal summary reports pass/fail/skip counts, training success, Kueue
@@ -178,6 +191,7 @@ make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile with-k
 | `--fixture-timeout 900` | PVC/model preparation deadline, deployment runner |
 | `--namespace NEW_NAME`, `--cluster-queue existing-cq` | New namespace name and existing ClusterQueue override |
 | `--preflight-only` | Read-only cluster/tooling/config checks; no build/push/deploy |
+| `--ray-ca-bundle /path/to/custom-ray-ca.pem` | Override automatic ingress trust for a custom Ray gateway |
 | `--forbidden-project other-project` | Existing project the HTTP caller cannot access; not an admin-token test |
 | `--keep-failed-job` | Existing-deployment only: retain FAILED/STOPPED for inspection, still fail |
 | `--junitxml /path/results.xml` | Optional sanitized report, existing-deployment command |
@@ -198,6 +212,8 @@ checksums and lifecycle/queue/GPU/artifact evidence. Runtime Training Hub/operat
 versions not independently observed must be recorded separately for the release
 matrix, not inferred from tags. Smoke/skipped checks do not certify readiness;
 all-skipped runs fail. [coverage.md](coverage.md) lists remaining gaps.
+Discovered public certificates and their ConfigMap manifest stay in this ignored
+results directory; `run.json` records trust sources and the ingress bundle checksum.
 
 Names are short UUIDs; output prefixes gain that name. Existing-deployment input
 fixtures are never modified; the deployment runner writes only its new namespace/PVC.

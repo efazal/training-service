@@ -1,6 +1,8 @@
 """Create only isolated E2E fixtures; never reconcile shared DSC/queue policy."""
 
+import hashlib
 import json
+import os
 import ssl
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -114,17 +116,29 @@ def cluster_preflight(args, command, values):
             "Fresh namespaces require public images or cluster-wide pull credentials; "
             "no Secret is copied"
         )
+    for resource in ("namespaces", "clusterroles", "clusterrolebindings"):
+        if command(["oc", "auth", "can-i", "create", resource]).strip() != "yes":
+            raise ValueError(f"Deployment identity needs create access to {resource}")
+
+
+def public_certificates(pem, source):
+    """Validate public certificate material before saving or copying it to a ConfigMap."""
+    if not isinstance(pem, str) or not pem.strip():
+        raise ValueError(f"{source} contains no public certificates")
+    if "PRIVATE KEY" in pem:
+        raise ValueError(f"{source} must contain public certificates only, never private keys")
+    try:
+        ssl.create_default_context().load_verify_locations(cadata=pem)
+    except (ssl.SSLError, ValueError):
+        raise ValueError(f"{source} does not contain a valid PEM certificate bundle") from None
+    return pem
+
+
+def prepare_tls(args, command, results, values):
+    """Use authenticated ConfigMap reads, never Secrets or unverified peer certificates."""
+    configured = {e["name"]: e.get("value") for e in values.get("env", [])}
     ca_file_configured = configured.get("TRAINING_SERVICE_RAY_CA_FILE")
-    if ca_file_configured and not args.ray_ca_bundle:
-        raise ValueError(
-            "--ray-ca-bundle is required to provision the public Ray CA in a fresh namespace"
-        )
-    if args.ray_ca_bundle:
-        if "PRIVATE KEY" in args.ray_ca_bundle.read_text():
-            raise ValueError(
-                "--ray-ca-bundle must contain public certificates only, never private keys"
-            )
-        ssl.create_default_context(cafile=args.ray_ca_bundle)
+    if ca_file_configured or args.ray_ca_bundle:
         volumes = {
             v["name"]
             for v in values.get("volumes", [])
@@ -140,9 +154,60 @@ def cluster_preflight(args, command, values):
                 "Mount training-service-ray-ca read-only at the configured Ray CA directory; "
                 "see values.example.yaml"
             )
-    for resource in ("namespaces", "clusterroles", "clusterrolebindings"):
-        if command(["oc", "auth", "can-i", "create", resource]).strip() != "yes":
-            raise ValueError(f"Deployment identity needs create access to {resource}")
+    route_override = os.getenv("TRAINING_SERVICE_CA_BUNDLE")
+    ray_override = args.ray_ca_bundle
+    route_pem = (
+        public_certificates(Path(route_override).read_text(), "TRAINING_SERVICE_CA_BUNDLE")
+        if route_override
+        else None
+    )
+    ray_pem = (
+        public_certificates(args.ray_ca_bundle.read_text(), "--ray-ca-bundle")
+        if args.ray_ca_bundle
+        else None
+    )
+    source = "openshift-config-managed/default-ingress-cert"
+    discovered = None
+    discovered_file = None
+    if not route_override or (ca_file_configured and not args.ray_ca_bundle):
+        try:
+            configmap = json.loads(
+                command(
+                    [
+                        "oc",
+                        "get",
+                        "configmap",
+                        "default-ingress-cert",
+                        "-n",
+                        "openshift-config-managed",
+                        "-o",
+                        "json",
+                    ]
+                )
+            )
+        except (RuntimeError, ValueError):
+            raise ValueError(
+                f"Cannot discover the public ingress CA from ConfigMap {source}. "
+                "Grant get access, or set TRAINING_SERVICE_CA_BUNDLE and (if needed) "
+                "--ray-ca-bundle. TLS verification is never disabled."
+            ) from None
+        discovered = public_certificates(configmap.get("data", {}).get("ca-bundle.crt"), source)
+        discovered_file = results / "ingress-ca.pem"
+        discovered_file.write_text(discovered)
+    args.ingress_ca_bundle = Path(route_override) if route_override else discovered_file
+    if ca_file_configured and not args.ray_ca_bundle:
+        args.ray_ca_bundle = discovered_file
+        ray_pem = discovered
+    ray_source = "system trust"
+    if ray_override:
+        ray_source = "--ray-ca-bundle"
+    elif ray_pem:
+        ray_source = source
+    return {
+        "ingress_ca_source": "TRAINING_SERVICE_CA_BUNDLE" if route_override else source,
+        "ingress_ca_sha256": hashlib.sha256((route_pem or discovered).encode()).hexdigest(),
+        "ray_ca_source": ray_source,
+    }
 
 
 class RunEnvironment:
