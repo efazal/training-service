@@ -64,6 +64,12 @@ helm upgrade --install training-service ./charts/training-service \
   --set-string image.tag="$IMAGE_TAG"
 ```
 
+The service image and training image are separate settings. Before submitting
+training, set `trainingRuntime.image` in your values file to the tested Ray image
+containing Training Hub. The chart passes it to the service internally; users
+do not need a `TRAINING_RAY_IMAGE` entry under `env`. This setting has no default
+runtime image. Legacy `env` configuration still works, but setting both is rejected.
+
 For a private registry, create the pull secret first and pass it through chart
 values:
 
@@ -95,6 +101,9 @@ replicaCount: 1
 image:
   repository: quay.io/example/training-service
   tag: dev-abcdef0
+
+trainingRuntime:
+  image: quay.io/YOUR_ORG/ray-traininghub@sha256:YOUR_TESTED_DIGEST
 
 resources:
   requests:

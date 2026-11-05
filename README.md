@@ -61,8 +61,10 @@ algorithm.
 The `202` response returns the RayJob name as `id` and a project-scoped
 `Location` header; it does not mean training has completed.
 
-Set `TRAINING_RAY_IMAGE` through the chart's existing `env` values or the
-process environment. The image must contain Ray and Training Hub with a Ray
+Set the chart's dedicated `trainingRuntime.image` value to the Ray workload
+image, separate from `image.repository`/`image.tag` for the API service. For
+non-Helm deployments, set the process environment variable `TRAINING_RAY_IMAGE`.
+The image must contain Ray and Training Hub with a Ray
 version compatible with the API's Ray 2.58.0. The API image pins the RHOAI 3.6
 CodeFlare SDK 0.40.1 and Ray 2.58.0 wheels. There is no default training
 image; submission returns `503` until one is configured. CodeFlare accepts
@@ -80,6 +82,17 @@ LoRA GRPO submitted and reached verl but did not finish due to a TRL/verl
 import incompatibility in the runtime image. A compatible image is required
 before relying on GRPO training. This image is not confirmed as cluster-shipped
 in every target RHOAI release.
+
+```yaml
+image:
+  repository: quay.io/YOUR_ORG/training-service
+  tag: YOUR_SERVICE_TAG
+trainingRuntime:
+  image: quay.io/YOUR_ORG/ray-traininghub@sha256:YOUR_TESTED_DIGEST
+```
+
+Legacy values files using `env: [{name: TRAINING_RAY_IMAGE, value: ...}]`
+still work. Move that entry to `trainingRuntime.image`; setting both is rejected.
 
 `pvc://` URIs refer to project PVCs. `hf://` and `s3://` URIs refer to
 project Secrets; the selected training image also needs `datasets` and

@@ -404,15 +404,7 @@ def run(args):
         evidence["service_component_versions"] = {
             k: versions[k] for k in ("training-service", "ray", "codeflare-sdk")
         }
-        values = yaml.safe_load(args.values.read_text())
-        evidence["runtime_image"] = next(
-            (
-                e.get("value", "valueFrom: not inspected")
-                for e in values.get("env", [])
-                if e.get("name") == "TRAINING_RAY_IMAGE"
-            ),
-            "not observed: configured through envFrom",
-        )
+        evidence["runtime_image"] = args.runtime_image
         evidence["runtime_training_hub_version"] = (
             "not observed; record tested runtime release separately"
         )

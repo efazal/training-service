@@ -213,7 +213,9 @@ unique E2E ownership label. It creates LocalQueue `e2e` backed by the existing
 ClusterQueue `default` (override with `--cluster-queue`), a 5Gi RWX PVC and a
 fixture/verifier pod. The pod downloads a pinned public Qwen2.5-0.5B-Instruct
 revision and prepares eight chat examples plus twelve math examples; training uses PVC references and
-needs no HF token. The runner exports the runtime's Training Hub registry into
+needs no HF token. Set `trainingRuntime.image` in the E2E values file to the
+tested Ray/Training Hub image; it is separate from the API service image the runner
+builds or reuses. The runner exports that runtime's Training Hub registry into
 a test-owned ConfigMap, configures algorithm discovery in Helm, and checks the
 compact list, details, schema opt-in, native parameter examples and error responses. The generated
 request and manifests (including the catalog) are saved with results.

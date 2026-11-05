@@ -27,13 +27,16 @@ podman run --rm --entrypoint python -v "$PWD/scripts:/scripts:ro" \
   "$RUNTIME_IMAGE" /scripts/export_algorithm_catalog.py "$RUNTIME_IMAGE" > catalog.json
 oc create configmap training-algorithms --from-file=catalog.json -n YOUR_NAMESPACE
 helm upgrade --install training-service charts/training-service -n YOUR_NAMESPACE \
-  -f YOUR_VALUES.yaml --set algorithmCatalog.name=training-algorithms
+  -f YOUR_VALUES.yaml --set algorithmCatalog.name=training-algorithms \
+  --set-string trainingRuntime.image="$RUNTIME_IMAGE"
 ```
 
 `algorithmCatalog.namespace` defaults to the Helm release namespace. Without Helm,
 set `TRAINING_SERVICE_CATALOG_NAME` and `TRAINING_SERVICE_CATALOG_NAMESPACE`.
 Do not also set those environment variables when using `algorithmCatalog` values.
-Keep `TRAINING_RAY_IMAGE` and the catalog's `runtime.image` identical. Refresh the
+Keep Helm's `trainingRuntime.image` and the catalog's `runtime.image` identical.
+The chart sets the internal `TRAINING_RAY_IMAGE` environment variable for the service.
+For non-Helm deployments, configure that environment variable directly. Refresh the
 ConfigMap when the runtime changes. No catalog cache or service restart is needed.
 
 Use a namespace-local Role granting `get` on `configmaps`, with

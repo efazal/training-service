@@ -5,6 +5,11 @@ image:
   pullPolicy: IfNotPresent
   tag: ""
 
+# Ray workload image containing Training Hub, separate from the API service image.
+# Required for training submissions; use a tested image tag or digest for your cluster.
+trainingRuntime:
+  image: ""
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -26,8 +31,8 @@ authentication:
   tokenReview:
     enabled: true
 
-# Runtime configuration is intentionally generic until the authentication,
-# authorization, and SDK work defines the service's stable environment names.
+# Additional settings, such as the Ray gateway URL and trusted CA path.
+# Use trainingRuntime.image instead of setting TRAINING_RAY_IMAGE here.
 env: []
 envFrom: []
 

@@ -1,3 +1,12 @@
+{{- $trainingRuntime := .Values.trainingRuntime | default dict -}}
+{{- $runtimeImage := $trainingRuntime.image | default "" -}}
+{{- if $runtimeImage -}}
+{{- range .Values.env -}}
+{{- if eq .name "TRAINING_RAY_IMAGE" -}}
+{{- fail "Configure trainingRuntime.image or env TRAINING_RAY_IMAGE, not both; prefer trainingRuntime.image." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,11 +66,15 @@ spec:
             httpGet:
               path: /readyz
               port: http
-          {{- if or .Values.writableTemp.enabled .Values.env .Values.algorithmCatalog.name }}
+          {{- if or .Values.writableTemp.enabled .Values.env $runtimeImage .Values.algorithmCatalog.name }}
           env:
             {{- if .Values.writableTemp.enabled }}
             - name: HF_HOME
               value: /tmp/huggingface
+            {{- end }}
+            {{- if $runtimeImage }}
+            - name: TRAINING_RAY_IMAGE
+              value: {{ $runtimeImage | quote }}
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}

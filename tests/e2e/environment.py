@@ -42,10 +42,13 @@ def cluster_preflight(args, command, values):
         )
     command(["oc", "get", "storageclass", args.storage_class, "-o", "name"])
     configured = {e["name"]: e.get("value") for e in values.get("env", [])}
-    runtime = configured.get("TRAINING_RAY_IMAGE")
-    if not runtime or "REPLACE" in runtime or "YOUR_" in runtime:
+    runtime = (values.get("trainingRuntime") or {}).get("image")
+    if runtime and "TRAINING_RAY_IMAGE" in configured:
+        raise ValueError("Configure trainingRuntime.image or env TRAINING_RAY_IMAGE, not both")
+    runtime = runtime or configured.get("TRAINING_RAY_IMAGE")
+    if not isinstance(runtime, str) or not runtime or "REPLACE" in runtime or "YOUR_" in runtime:
         raise ValueError(
-            "Values must specify a tested TRAINING_RAY_IMAGE literal for the fixture init container"
+            "Values must specify a tested trainingRuntime.image for the fixture init container"
         )
     args.runtime_image = runtime
     gateway = configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL")
