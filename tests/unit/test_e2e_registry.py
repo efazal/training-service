@@ -204,10 +204,35 @@ def secret_api(monkeypatch):
     core.read_namespaced_service_account.return_value = account
 
     def patch(name, namespace, body, **kwargs):
-        if isinstance(body, list):
-            index = int(body[-1]["path"].rsplit("/", 1)[1])
-            assert account.image_pull_secrets[index].name == body[1]["value"]
-            account.image_pull_secrets.pop(index)
+        if isinstance(body, dict):
+            account.image_pull_secrets = [
+                client.V1LocalObjectReference(**ref) for ref in body["imagePullSecrets"]
+            ]
+        else:
+            for operation in body:
+                path = operation["path"]
+                if operation["op"] == "test":
+                    value = (
+                        account.metadata.resource_version
+                        if path == "/metadata/resourceVersion"
+                        else account.image_pull_secrets[int(path.split("/")[2])].name
+                    )
+                    if value != operation["value"]:
+                        raise ApiException(status=422)
+                elif operation["op"] == "add":
+                    if path == "/imagePullSecrets":
+                        account.image_pull_secrets = [
+                            client.V1LocalObjectReference(**ref) for ref in operation["value"]
+                        ]
+                    else:
+                        assert path == "/imagePullSecrets/-"
+                        account.image_pull_secrets.append(
+                            client.V1LocalObjectReference(**operation["value"])
+                        )
+                else:
+                    assert operation["op"] == "remove"
+                    account.image_pull_secrets.pop(int(path.rsplit("/", 1)[1]))
+        account.metadata.resource_version = str(int(account.metadata.resource_version) + 1)
         return account
 
     core.patch_namespaced_service_account.side_effect = patch
@@ -220,7 +245,16 @@ def secret_api(monkeypatch):
     return core
 
 
-def test_secret_is_memory_only_and_attached_to_fresh_default_sa(authfile, secret_api, capsys):
+@pytest.mark.parametrize("existing", [None, [], ["cluster-pull"]])
+def test_secret_is_memory_only_and_attached_to_fresh_default_sa(
+    authfile, secret_api, capsys, existing
+):
+    account = secret_api.read_namespaced_service_account.return_value
+    account.image_pull_secrets = (
+        None
+        if existing is None
+        else [client.V1LocalObjectReference(name=name) for name in existing]
+    )
     secret = registry.PullSecret("unit-ns", "unit-run")
     secret.create("namespace-uid")
     call = secret_api.create_namespaced_secret.call_args
@@ -232,9 +266,64 @@ def test_secret_is_memory_only_and_attached_to_fresh_default_sa(authfile, secret
     assert secret_api.patch_namespaced_service_account.call_args.args == (
         "default",
         "unit-ns",
-        {"imagePullSecrets": [{"name": secret.name}]},
+        [
+            {"op": "test", "path": "/metadata/resourceVersion", "value": "10"},
+            {
+                "op": "add",
+                "path": "/imagePullSecrets/-" if existing else "/imagePullSecrets",
+                "value": {"name": secret.name} if existing else [{"name": secret.name}],
+            },
+        ],
     )
+    assert [ref.name for ref in account.image_pull_secrets] == [*(existing or []), secret.name]
     assert "synthetic-secret" not in capsys.readouterr().out
+
+
+def test_secret_attachment_does_not_duplicate_existing_reference(authfile, secret_api):
+    secret = registry.PullSecret("unit-ns", "unit-run")
+    secret.create("namespace-uid")
+    secret_api.patch_namespaced_service_account.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [409, 422])
+def test_secret_attachment_preserves_concurrently_injected_references(
+    authfile, secret_api, monkeypatch, status
+):
+    account = secret_api.read_namespaced_service_account.return_value
+    account.image_pull_secrets = [client.V1LocalObjectReference(name="cluster-pull")]
+    patch = secret_api.patch_namespaced_service_account.side_effect
+    calls = 0
+
+    def concurrent_update(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            account.image_pull_secrets.append(client.V1LocalObjectReference(name="injected-pull"))
+            account.metadata.resource_version = "11"
+            raise ApiException(status=status)
+        return patch(*args, **kwargs)
+
+    secret_api.patch_namespaced_service_account.side_effect = concurrent_update
+    monkeypatch.setattr(registry.time, "sleep", Mock())
+    secret = registry.PullSecret("unit-ns", "unit-run")
+    secret.create("namespace-uid")
+    assert calls == 2
+    assert [ref.name for ref in account.image_pull_secrets] == [
+        "cluster-pull",
+        "injected-pull",
+        secret.name,
+    ]
+
+
+def test_secret_attachment_conflicts_remain_bounded(authfile, secret_api, monkeypatch):
+    account = secret_api.read_namespaced_service_account.return_value
+    account.image_pull_secrets = [client.V1LocalObjectReference(name="cluster-pull")]
+    secret_api.patch_namespaced_service_account.side_effect = ApiException(status=409)
+    monkeypatch.setattr(registry.time, "monotonic", Mock(side_effect=[0, 31]))
+    with pytest.raises(RuntimeError, match="Cannot provision"):
+        registry.PullSecret("unit-ns", "unit-run").create("namespace-uid")
+    assert secret_api.patch_namespaced_service_account.call_count == 1
+    assert [ref.name for ref in account.image_pull_secrets] == ["cluster-pull"]
 
 
 @pytest.mark.parametrize("change", ["namespace", "secret", "label", "owner"])
@@ -333,13 +422,16 @@ def test_registry_preflight_is_readonly_and_checks_connection_before_auth(monkey
 
 
 def test_default_sa_creation_race_is_bounded_and_retried(authfile, secret_api, monkeypatch):
-    secret_api.patch_namespaced_service_account.side_effect = [ApiException(status=404), None]
+    secret_api.read_namespaced_service_account.side_effect = [
+        ApiException(status=404),
+        secret_api.read_namespaced_service_account.return_value,
+    ]
     sleep = Mock()
     monkeypatch.setattr(registry.time, "sleep", sleep)
     secret = registry.PullSecret("unit-ns", "unit-run")
     secret.create("namespace-uid")
     sleep.assert_called_once_with(1)
-    assert secret_api.patch_namespaced_service_account.call_count == 2
+    assert secret_api.read_namespaced_service_account.call_count == 2
 
 
 def test_secret_removed_even_if_sa_detachment_fails(secret_api):

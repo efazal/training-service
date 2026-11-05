@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.e2e.support import PROFILES, namespace, workload
+from tests.e2e.support import PROFILES, api_token, namespace, workload
 
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
 STATUSES = TERMINAL | {"PENDING", "RUNNING"}
@@ -62,11 +62,15 @@ def pytest_configure(config):
         return
     missing = [
         name
-        for name in ("TRAINING_SERVICE_URL", "TRAINING_SERVICE_PROJECT", "TRAINING_SERVICE_TOKEN")
+        for name in ("TRAINING_SERVICE_URL", "TRAINING_SERVICE_PROJECT")
         if not os.getenv(name, "").strip()
     ]
     if missing:
         raise pytest.UsageError("Live E2E tests require: " + ", ".join(missing))
+    try:
+        os.environ["TRAINING_SERVICE_TOKEN"] = api_token()
+    except ValueError as error:
+        raise pytest.UsageError(str(error)) from None
     for option in ("job_timeout", "cleanup_timeout", "request_timeout", "stream_timeout"):
         if config.getoption(option) <= 0:
             raise pytest.UsageError(f"--{option.replace('_', '-')} must be positive")

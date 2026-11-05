@@ -47,9 +47,18 @@ Prepare once:
 From the repository root:
 
 ```bash
-export TRAINING_SERVICE_TOKEN="$(oc whoami -t)"
 make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS"
 ```
+
+Both E2E commands use `oc whoami -t` from your current login when
+`TRAINING_SERVICE_TOKEN` is unset or blank. No manual token export is needed.
+Set `TRAINING_SERVICE_TOKEN` explicitly to use another API caller, or to test an
+existing service on another cluster without changing your `oc` login. An explicit
+token always wins; an invalid/expired override is never silently replaced.
+Run `unset TRAINING_SERVICE_TOKEN` to remove an old override and use your current
+login again. Tokens are captured in memory, never printed or saved to reports.
+The token must be valid for the cluster hosting the service; overriding it does
+not change the kubeconfig context used for deployment or cluster observation.
 
 For a Ray gateway with a certificate from a different issuer, override only its
 trust with `--ray-ca-bundle /path/to/custom-ray-ca.pem`. To override Route trust,
@@ -203,7 +212,7 @@ PVC/model/dataset/output references and a prepared
 basic `lora_sft`, not all Training Hub APIs.
 
 ```bash
-# Set TRAINING_SERVICE_URL, TRAINING_SERVICE_PROJECT and TRAINING_SERVICE_TOKEN first.
+# Set TRAINING_SERVICE_URL and TRAINING_SERVICE_PROJECT; the token defaults to oc.
 make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile no-kueue --observe-cluster --artifact-pod e2e-output-verifier --check-logs --check-stream -s"
 ```
 
@@ -259,7 +268,6 @@ Pre-existing Secrets, shared CRDs and outputs are never deleted.
 ```bash
 export TRAINING_SERVICE_URL=https://training-service.example.com
 export TRAINING_SERVICE_PROJECT=YOUR_TEST_PROJECT
-export TRAINING_SERVICE_TOKEN="$(oc whoami -t)"
 make test-e2e
 ```
 
@@ -320,4 +328,4 @@ API, then verify owned pods/clusters disappear before uninstalling the test serv
 Repeat twice with identical fixtures to check independent job/output identities.
 No `set -x`, pytest `--showlocals`, HTTP debug logging, sensitive fixtures or token
 CLI arguments. Raw build/Helm/cluster output is withheld; stages/exit status are
-reported. Unset `TRAINING_SERVICE_TOKEN` when finished.
+reported. Unset any explicit `TRAINING_SERVICE_TOKEN` override when finished.

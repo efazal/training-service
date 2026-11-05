@@ -166,17 +166,43 @@ class PullSecret:
                 deadline = time.monotonic() + 30
                 while True:
                     try:
+                        account = core.read_namespaced_service_account(
+                            "default", self.namespace, _request_timeout=TIMEOUT
+                        )
+                        if any(ref.name == self.name for ref in account.image_pull_secrets or []):
+                            break
+                        # ServiceAccount pull secrets are atomic; append without replacing
+                        # controller-injected references, and retry if the account changes.
                         core.patch_namespaced_service_account(
                             "default",
                             self.namespace,
-                            {"imagePullSecrets": [{"name": self.name}]},
+                            [
+                                {
+                                    "op": "test",
+                                    "path": "/metadata/resourceVersion",
+                                    "value": account.metadata.resource_version,
+                                },
+                                {
+                                    "op": "add",
+                                    "path": (
+                                        "/imagePullSecrets/-"
+                                        if account.image_pull_secrets
+                                        else "/imagePullSecrets"
+                                    ),
+                                    "value": (
+                                        {"name": self.name}
+                                        if account.image_pull_secrets
+                                        else [{"name": self.name}]
+                                    ),
+                                },
+                            ],
                             _request_timeout=TIMEOUT,
                         )
                         break
                     except ApiException as error:
-                        if error.status != 404 or time.monotonic() >= deadline:
+                        if error.status not in {404, 409, 422} or time.monotonic() >= deadline:
                             raise
-                        time.sleep(1)  # The namespace's default SA is created asynchronously.
+                        time.sleep(1)  # Wait for default-SA creation or a concurrent update.
         except Exception:
             raise RuntimeError(
                 "Cannot provision the test-only Quay pull secret; check kubeconfig, "

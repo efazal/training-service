@@ -12,7 +12,9 @@ from unittest.mock import MagicMock, Mock
 import httpx
 import pytest
 from kubernetes.client.exceptions import ApiException
-from tests.e2e import deploy
+from tests.e2e import conftest as live_config
+from tests.e2e import deploy, support
+from tests.e2e import test_training_jobs as training_jobs
 from tests.e2e.conftest import LiveAPI
 from tests.e2e.environment import (
     RUN_LABEL,
@@ -1006,11 +1008,19 @@ def test_reused_image_must_be_digest_pinned_in_selected_repository(prepared_clus
         deploy.preflight(args)
 
 
-def test_reuse_preflight_needs_no_podman_or_push_credentials(monkeypatch, prepared_cluster):
+@pytest.mark.parametrize("token_source", ["override", "oc"])
+def test_reuse_preflight_needs_no_podman_or_push_credentials(
+    monkeypatch, prepared_cluster, token_source
+):
     args, _, _, _, _ = prepared_cluster
     args.reuse_image = args.image_repository + "@sha256:" + "a" * 64
     args.values.write_text("env: []\n")
-    monkeypatch.setenv("TRAINING_SERVICE_TOKEN", "unit-placeholder")
+    if token_source == "override":
+        monkeypatch.setenv("TRAINING_SERVICE_TOKEN", "unit-placeholder")
+    else:
+        monkeypatch.delenv("TRAINING_SERVICE_TOKEN", raising=False)
+    token_lookup = Mock(return_value=subprocess.CompletedProcess([], 0, "unit-placeholder\n", ""))
+    monkeypatch.setattr(support.subprocess, "run", token_lookup)
     monkeypatch.setattr(deploy, "cluster_preflight", Mock())
     which = Mock(side_effect=lambda name: None if name == "podman" else "/usr/bin/" + name)
     monkeypatch.setattr(deploy.shutil, "which", which)
@@ -1033,6 +1043,8 @@ def test_reuse_preflight_needs_no_podman_or_push_credentials(monkeypatch, prepar
     monkeypatch.setattr(deploy, "command", query)
     deploy.preflight(args)
     assert [call.args[0] for call in which.call_args_list] == ["helm", "oc", "git"]
+    assert os.environ["TRAINING_SERVICE_TOKEN"] == "unit-placeholder"
+    assert token_lookup.call_count == (token_source == "oc")
 
 
 def test_fixture_write_failure_happens_before_model_download(monkeypatch):
@@ -1298,8 +1310,162 @@ def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes
                 follow_logs(api, "/jobs/e2e-owned", 1)
 
 
-def test_runner_missing_http_credential_fails_before_build(monkeypatch, tmp_path):
+def stream_clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(
+        training_jobs,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        ),
+    )
+    return now
+
+
+def test_stream_reconnects_after_quiet_read_and_preserves_incremental_events(monkeypatch):
+    now = stream_clock(monkeypatch)
+    calls = []
+
+    class QuietStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'event: log\ndata: {"message":"first"}\n\n'
+            now[0] += 15
+            raise httpx.ReadTimeout("No logs during model loading")
+
+    def transport(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(
+                200, headers={"Content-Type": "text/event-stream"}, stream=QuietStream()
+            )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=b'event: log\ndata: {"message":"second"}\n\n',
+        )
+
+    with httpx.Client(
+        base_url="https://unit.invalid",
+        headers={"Authorization": "Bearer unit-token"},
+        transport=httpx.MockTransport(transport),
+    ) as http:
+        assert follow_logs(LiveAPI(http, "test-project"), "/jobs/e2e-owned", 60) == 2
+    assert len(calls) == 2
+
+
+def test_stream_quiet_reads_exhaust_only_the_overall_deadline(monkeypatch):
+    now = stream_clock(monkeypatch)
+    read_timeouts = []
+
+    def transport(request):
+        read_timeout = request.extensions["timeout"]["read"]
+        read_timeouts.append(read_timeout)
+        now[0] += read_timeout
+        raise httpx.ReadTimeout("No new log events")
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        with pytest.raises(pytest.fail.Exception, match="SSE deadline exceeded"):
+            follow_logs(LiveAPI(http, "test-project"), "/jobs/e2e-owned", 60)
+    assert read_timeouts == [15, 15, 15, 9]
+    assert now[0] == 60
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout])
+def test_stream_does_not_retry_other_transport_errors(monkeypatch, failure):
+    stream_clock(monkeypatch)
+    transport = Mock(side_effect=failure("Cannot connect"))
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        with pytest.raises(pytest.fail.Exception, match="SSE connection/read failed"):
+            follow_logs(LiveAPI(http, "test-project"), "/jobs/e2e-owned", 60)
+    assert transport.call_count == 1
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_stream_does_not_retry_http_failures(monkeypatch, status):
+    stream_clock(monkeypatch)
+    transport = Mock(return_value=httpx.Response(status))
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        with pytest.raises(pytest.fail.Exception, match=f"Log stream returned HTTP {status}"):
+            follow_logs(LiveAPI(http, "test-project"), "/jobs/e2e-owned", 60)
+    assert transport.call_count == 1
+
+
+def test_explicit_api_token_takes_precedence_over_oc_session(monkeypatch):
+    monkeypatch.setenv("TRAINING_SERVICE_TOKEN", "explicit-test-token")
+    run = Mock()
+    monkeypatch.setattr(support.subprocess, "run", run)
+    assert support.api_token() == "explicit-test-token"
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("configured", [None, "", "  "])
+def test_api_token_defaults_to_current_oc_session(monkeypatch, capsys, configured):
+    if configured is None:
+        monkeypatch.delenv("TRAINING_SERVICE_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("TRAINING_SERVICE_TOKEN", configured)
+    run = Mock(return_value=subprocess.CompletedProcess([], 0, "session-test-token\n", ""))
+    monkeypatch.setattr(support.subprocess, "run", run)
+    assert support.api_token() == "session-test-token"
+    assert run.call_args.args[0] == ["oc", "whoami", "-t"]
+    assert run.call_args.kwargs["capture_output"] is True
+    assert run.call_args.kwargs["timeout"] == 15
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        subprocess.CompletedProcess([], 1, "private-output", "private-output"),
+        subprocess.CompletedProcess([], 0, "", "private-output"),
+        subprocess.CompletedProcess([], 0, "private-output\nnot-a-token", ""),
+        FileNotFoundError("private-output"),
+        subprocess.TimeoutExpired("oc", 15, output="private-output"),
+    ],
+)
+def test_oc_token_failures_are_actionable_and_redacted(monkeypatch, capsys, result):
     monkeypatch.delenv("TRAINING_SERVICE_TOKEN", raising=False)
+    run = Mock(side_effect=result) if isinstance(result, Exception) else Mock(return_value=result)
+    monkeypatch.setattr(support.subprocess, "run", run)
+    with pytest.raises(ValueError, match="oc login") as error:
+        support.api_token()
+    assert "TRAINING_SERVICE_TOKEN" in str(error.value)
+    assert "private-output" not in str(error.value)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_existing_deployment_config_resolves_default_api_token(monkeypatch):
+    monkeypatch.setenv("TRAINING_SERVICE_URL", "https://unit.invalid")
+    monkeypatch.setenv("TRAINING_SERVICE_PROJECT", "unit-project")
+    monkeypatch.delenv("TRAINING_SERVICE_TOKEN", raising=False)
+    run = Mock(return_value=subprocess.CompletedProcess([], 0, "session-test-token\n", ""))
+    monkeypatch.setattr(support.subprocess, "run", run)
+    config = Mock()
+    config.option.collectonly = False
+    config.getoption.side_effect = lambda option: (
+        30
+        if option in {"job_timeout", "cleanup_timeout", "request_timeout", "stream_timeout"}
+        else False
+    )
+    config.getini.return_value = False
+    live_config.pytest_configure(config)
+    assert os.environ["TRAINING_SERVICE_TOKEN"] == "session-test-token"
+
+
+def test_runner_missing_oc_credential_fails_before_build(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRAINING_SERVICE_TOKEN", raising=False)
+    monkeypatch.setattr(
+        support.subprocess,
+        "run",
+        Mock(return_value=subprocess.CompletedProcess([], 1, "", "not logged in")),
+    )
     args = deploy.arguments(
         [
             "--image-repository",

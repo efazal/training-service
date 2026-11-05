@@ -1,11 +1,38 @@
 """Shared preflight checks for the live suite and deployment runner."""
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 PROFILES = ("no-kueue", "with-kueue", "unqueued-opt-out")
+
+
+def api_token():
+    """Use an explicit caller token, otherwise capture the current oc token in memory."""
+    if token := os.getenv("TRAINING_SERVICE_TOKEN", "").strip():
+        return token
+    try:
+        result = subprocess.run(
+            ["oc", "whoami", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=15,
+        )
+        token = result.stdout.strip()
+        if result.returncode == 0 and token and not any(char.isspace() for char in token):
+            return token
+    except (OSError, subprocess.SubprocessError):
+        pass
+    raise ValueError(
+        "Cannot obtain an API token from the current oc session. Run oc login for the "
+        "target cluster, or set TRAINING_SERVICE_TOKEN to an explicit API caller token. "
+        "Raw credential output withheld."
+    )
 
 
 def selector_matches(labels, selector):

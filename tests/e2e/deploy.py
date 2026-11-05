@@ -21,7 +21,7 @@ import yaml
 
 from tests.e2e import registry
 from tests.e2e.environment import RunEnvironment, cluster_preflight, prepare_tls, terminal_summary
-from tests.e2e.support import namespace
+from tests.e2e.support import api_token, namespace
 
 ROOT = Path(__file__).resolve().parents[2]
 CHART = ROOT / "charts/training-service"
@@ -141,8 +141,7 @@ def preflight(args):
     ):
         if getattr(args, option) <= 0:
             raise ValueError(f"--{option.replace('_', '-')} must be positive")
-    if not os.getenv("TRAINING_SERVICE_TOKEN", "").strip():
-        raise ValueError("Set TRAINING_SERVICE_TOKEN in the environment (never a CLI argument)")
+    os.environ["TRAINING_SERVICE_TOKEN"] = api_token()
     for tool in ("helm", "oc", "git") if args.reuse_image else ("podman", "helm", "oc", "git"):
         if not shutil.which(tool):
             raise ValueError(f"Required executable not found: {tool}")

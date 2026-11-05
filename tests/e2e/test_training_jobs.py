@@ -18,10 +18,10 @@ def follow_logs(api, path, timeout):
     """Consume real SSE while training runs, close the connection after two chunks."""
     deadline = time.monotonic() + timeout
     chunks = set()
-    while time.monotonic() < deadline:
+    while (remaining := deadline - time.monotonic()) > 0:
         try:
             with api.client.stream(
-                "GET", path + "/logs", params={"follow": "true"}, timeout=min(15, timeout)
+                "GET", path + "/logs", params={"follow": "true"}, timeout=min(15, remaining)
             ) as response:
                 if response.status_code == 409:
                     response.read()
@@ -53,6 +53,8 @@ def follow_logs(api, path, timeout):
                     pytest.fail(
                         "Stream ended without two distinct incremental log events", pytrace=False
                     )
+        except httpx.ReadTimeout:
+            pass  # Quiet training periods are allowed until the overall stream deadline.
         except httpx.HTTPError:
             pytest.fail(
                 "SSE connection/read failed before incremental logs were verified", pytrace=False
