@@ -1487,9 +1487,6 @@ components:
               type: object
               additionalProperties:
                 $ref: '#/components/schemas/AlgorithmParameter'
-            example_request:
-              type: object
-              description: Complete illustrative POST request, present only when the current contract accepts it.
             parameter_schema_url:
               type: string
             parameter_schema:

@@ -18,7 +18,7 @@ registry credentials. Existing-deployment tests preserve customer namespaces/dat
 
 | Plan IDs | Implemented test / remaining status |
 | --- | --- |
-| RHOAIENG-96354 | Real-runtime ConfigMap catalog, compact list, details/schema opt-in, contract-valid examples, unknown algorithm, invalid query, missing/invalid bearer tokens. Empty/malformed catalog and K8s 401/403/404/outages are unit-tested; not injected live. |
+| RHOAIENG-96354 | Real-runtime ConfigMap catalog, compact list, details/schema opt-in, native parameter examples without generated POST requests, unknown algorithm, invalid query, missing/invalid bearer tokens. Empty/malformed catalog and K8s 401/403/404/outages are unit-tested; not injected live. |
 | ERR-01–05/10 (partial) | `test_service.py`: envelope/media type, probes/OpenAPI, auth, malformed JSON/schema/media type, invalid queries/URI/resources/algorithm, missing job/project/PVC/Secret; duplicate during lifecycle |
 | ERR-06–09 (partial/opt-in) | Prepared invalid Kubernetes URL regression; broader outages/faults and field-level guidance deferred |
 | ALG-03/06/08 (partial) | Rejection matrix: unknown algorithm, bool-as-number, unsupported/invalid parameters, traversal; API confirms no job |

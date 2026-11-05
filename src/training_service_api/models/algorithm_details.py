@@ -28,12 +28,6 @@ class AlgorithmDetails(ContractModel):
     details_url: StrictStr = Field(json_schema_extra={"examples": ["/api/v1/algorithms/lora_sft"]})
     required_parameters: list[StrictStr]
     parameters: dict[str, AlgorithmParameter]
-    example_request: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Complete illustrative POST request, present only when the current contract accepts it."
-        ),
-    )
     parameter_schema_url: StrictStr
     parameter_schema: dict[str, Any] | None = Field(
         default=None, description="Exact native schema; present only with include=parameter_schema."

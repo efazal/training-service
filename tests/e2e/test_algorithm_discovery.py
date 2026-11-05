@@ -38,6 +38,7 @@ def test_follow_algorithm_details_and_opt_into_schema(api):
         detail = api.object(api.request("GET", summary["details_url"]))
         component_validator("AlgorithmDetails").validate(detail)
         assert "parameter_schema" not in detail
+        assert "example_request" not in detail
         assert {key: detail[key] for key in summary} == summary
         expanded = api.object(api.request("GET", detail["parameter_schema_url"]))
         schema = expanded.pop("parameter_schema")
@@ -45,10 +46,12 @@ def test_follow_algorithm_details_and_opt_into_schema(api):
         assert expanded == detail
         assert set(detail["parameters"]) == set(schema.get("properties", {}))
         assert detail["required_parameters"] == schema.get("required", [])
-        if "example_request" in detail:
-            example = detail["example_request"]
-            component_validator("CreateJobRequest").validate(example)
-            Draft202012Validator(schema).validate(example["algorithm"]["parameters"])
+        for name, parameter in detail["parameters"].items():
+            if "example" in parameter:
+                native = schema["properties"][name]
+                assert "example" in native
+                assert parameter["example"] == native["example"]
+                Draft202012Validator(native).validate(parameter["example"])
 
 
 def test_missing_algorithm_has_context(api, missing_job_id):

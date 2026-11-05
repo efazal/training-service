@@ -18,7 +18,6 @@ from training_service.contract import component_validator, json_schema, load_con
 from training_service.errors import ApiError
 from training_service.main import create_app
 from training_service_api.models.algorithm_details import AlgorithmDetails
-from training_service_api.models.create_job_request import CreateJobRequest
 
 HEADERS = {"Authorization": "Bearer test-only-token"}
 BASE = "/api/v1/algorithms"
@@ -146,7 +145,6 @@ def test_detail_lists_every_parameter_without_fabricating_defaults(client: TestC
         "type": "number",
         "description": "Learning rate used during training.",
         "nullable": True,
-        "example": 0.0001,
     }
     assert parameters["effective_batch_size"]["default"] == 8
     assert parameters["warmup_steps"]["default"] == 10
@@ -162,7 +160,7 @@ def test_detail_lists_every_parameter_without_fabricating_defaults(client: TestC
 
 
 @pytest.mark.parametrize("name", ["lora_sft", "sft", "osft", "lora_grpo", "grpo"])
-def test_all_examples_match_post_contract_and_native_schema(
+def test_all_details_describe_runtime_without_environment_specific_examples(
     client: TestClient, image_catalog: dict, name: str
 ) -> None:
     response = client.get(BASE + "/" + name, headers=HEADERS)
@@ -171,21 +169,37 @@ def test_all_examples_match_post_contract_and_native_schema(
     source = next(item for item in image_catalog["algorithms"] if item["name"] == name)
     assert set(data["parameters"]) == set(source["parameter_schema"]["properties"])
     assert data["required_parameters"] == source["parameter_schema"]["required"]
-    if name != "lora_sft":
-        assert "example_request" not in data
-        return
-    example = data["example_request"]
-    assert CreateJobRequest.model_validate(example).to_dict() == example
-    component_validator("CreateJobRequest").validate(example)
-    source = next(item for item in image_catalog["algorithms"] if item["name"] == name)
-    Draft202012Validator(source["parameter_schema"]).validate(example["algorithm"]["parameters"])
-    assert set(data["parameters"]) == set(source["parameter_schema"]["properties"])
-    assert data["required_parameters"] == source["parameter_schema"]["required"]
-    if name == "osft":
-        assert set(data["required_parameters"]) <= set(example["algorithm"]["parameters"])
+    assert "example_request" not in data
+    assert "Qwen/" not in response.text
+    assert "pvc://" not in response.text
+    assert any("availability does not imply" in note for note in data["notes"])
     if "grpo" in name:
         assert "reward_fn" not in data["parameters"]
         assert any("callbacks" in note for note in data["notes"])
+
+
+@pytest.mark.parametrize(
+    "name,value,valid",
+    [
+        ("learning_rate", 0.002, True),
+        ("warmup_steps", 0, True),
+        ("trust_remote_code", False, True),
+        ("learning_rate", "invalid", False),
+    ],
+)
+def test_parameter_examples_come_only_from_runtime_schema(
+    client, catalog_configmap, image_catalog, name, value, valid
+):
+    schema = image_catalog["algorithms"][2]["parameter_schema"]
+    schema["properties"][name]["example"] = value
+    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    response = client.get(BASE + "/lora_sft", headers=HEADERS)
+    assert response.status_code == 200
+    parameter = response.json()["parameters"][name]
+    if valid:
+        assert parameter["example"] == value
+    else:
+        assert "example" not in parameter
 
 
 def test_raw_schema_is_exact_and_opt_in_only(client: TestClient, image_catalog: dict) -> None:
@@ -203,8 +217,17 @@ def test_discovery_cannot_weaken_raw_submission_validation(image_catalog: dict) 
     schema = image_catalog["algorithms"][3]["parameter_schema"]
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate({})
-    with pytest.raises(ValidationError):
-        Draft202012Validator(schema).validate({"trust_remote_code": True})
+    valid = {
+        "unfreeze_rank_ratio": 0.5,
+        "effective_batch_size": 8,
+        "max_tokens_per_gpu": 1024,
+        "max_seq_len": 512,
+        "learning_rate": 0.0001,
+    }
+    Draft202012Validator(schema).validate({**valid, "trust_remote_code": False})
+    with pytest.raises(ValidationError) as error:
+        Draft202012Validator(schema).validate({**valid, "trust_remote_code": True})
+    assert error.value.validator == "const"
     public_summary = {
         "algorithms": [{"name": "sft", "supported_backends": ["ray"], "details_url": BASE + "/sft"}]
     }
@@ -244,12 +267,17 @@ def test_unknown_algorithm_and_invalid_include(client: TestClient) -> None:
         component_validator("ErrorResponse").validate(invalid.json())
 
 
-@pytest.mark.parametrize("failure", ["stale-image", "invalid-json", "invalid-schema", "missing"])
+@pytest.mark.parametrize(
+    "failure", ["stale-image", "missing-runtime", "invalid-json", "invalid-schema", "missing"]
+)
 def test_catalog_failures_return_503_in_all_views(
     client: TestClient, catalog_configmap, image_catalog: dict, failure: str
 ) -> None:
     if failure == "stale-image":
         image_catalog["runtime"]["image"] = "different-image"
+        catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    elif failure == "missing-runtime":
+        image_catalog.pop("runtime")
         catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
     elif failure == "invalid-json":
         catalog_configmap.data["catalog.json"] = "not-json"
@@ -281,7 +309,7 @@ def test_new_algorithms_remain_discoverable_without_hardcoding(
 
 
 @pytest.mark.parametrize("python_only", [False, True])
-def test_never_invents_examples_for_unknown_required_or_python_only_arguments(
+def test_required_and_python_only_arguments_do_not_produce_invented_requests(
     client: TestClient, catalog_configmap, image_catalog: dict, python_only: bool
 ) -> None:
     schema = image_catalog["algorithms"][2]["parameter_schema"]
@@ -293,7 +321,11 @@ def test_never_invents_examples_for_unknown_required_or_python_only_arguments(
     catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
     data = client.get(BASE + "/lora_sft", headers=HEADERS).json()
     assert "example_request" not in data
-    assert any("No valid POST example" in note for note in data["notes"])
+    if python_only:
+        assert any("callbacks" in note for note in data["notes"])
+    else:
+        assert "new_required_argument" in data["required_parameters"]
+        assert data["parameters"]["new_required_argument"]["type"] == "string"
 
 
 def test_swagger_includes_detail_route_and_opt_in(client: TestClient) -> None:
@@ -361,7 +393,20 @@ def test_kubernetes_network_failure(client, catalog_configmap, error):
 
 def test_empty_catalog_is_successful(client, catalog_configmap):
     catalog_configmap.data["catalog.json"] = '{"algorithms":[]}'
-    assert client.get(BASE, headers=HEADERS).json() == {"algorithms": []}
+    response = client.get(BASE, headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json() == {"algorithms": []}
+
+
+def test_catalog_validation_uses_explicit_image_over_process_environment(
+    monkeypatch, image_catalog
+):
+    monkeypatch.setenv("TRAINING_RAY_IMAGE", "unrelated-shell-image")
+    image = image_catalog["runtime"]["image"]
+    assert catalog.validate_catalog(image_catalog, runtime_image=image) == image_catalog
+    with pytest.raises(ApiError) as error:
+        catalog.validate_catalog(image_catalog, runtime_image="wrong-image")
+    assert error.value.status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -401,11 +446,15 @@ def test_duplicate_algorithm_names_rejected(image_catalog):
 
 def test_discovery_never_fetches_remote_schema_references(client, catalog_configmap, image_catalog):
     schema = image_catalog["algorithms"][2]["parameter_schema"]
-    schema["properties"]["learning_rate"] = {"$ref": "https://invalid.example/private-schema"}
+    schema["properties"]["learning_rate"] = {
+        "$ref": "https://invalid.example/private-schema",
+        "example": 0.001,
+    }
     catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
     response = client.get(BASE + "/lora_sft?include=parameter_schema", headers=HEADERS)
     assert response.status_code == 200
     assert "example_request" not in response.json()
+    assert "example" not in response.json()["parameters"]["learning_rate"]
     assert response.json()["parameter_schema"] == schema
 
 

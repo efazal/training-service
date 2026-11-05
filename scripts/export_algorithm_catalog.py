@@ -54,6 +54,8 @@ def json_type(annotation: Any) -> dict[str, Any] | None:
     if origin is typing.Literal:
         return {"enum": list(arguments)}
     if origin in (list, tuple, collections.abc.Sequence) or annotation is list:
+        if origin is tuple and not (len(arguments) == 2 and arguments[1] is Ellipsis):
+            return None
         items = json_type(arguments[0]) if arguments else {}
         return {"type": "array", "items": items} if items is not None else None
     if origin is dict or annotation is dict:
@@ -79,8 +81,6 @@ def describe(hub: Any, name: str) -> dict[str, Any]:
     backends = registry.list_backends(name)
     if not backends:
         raise ValueError(f"Training Hub algorithm {name} has no registered backend")
-    # Ray's bundled GRPO example uses verl, not ART's co-located local engine.
-    default_backend = "verl" if "verl" in backends else backends[0]
     entrypoint = getattr(hub, name, None)
     functions = [algorithm.train]
     if callable(entrypoint):
@@ -96,9 +96,13 @@ def describe(hub: Any, name: str) -> dict[str, Any]:
                 for key, parameter in inspect.signature(function).parameters.items()
             }
         )
-    properties: dict[str, Any] = {
-        "backend": {"type": "string", "enum": backends, "default": default_backend}
-    }
+    backend_schema: dict[str, Any] = {"type": "string", "enum": backends}
+    backend_parameter = parameters.get("backend")
+    default_backend = backend_parameter.default if backend_parameter is not None else None
+    # Report only an explicit callable default, never infer one from registry order.
+    if isinstance(default_backend, str) and default_backend in backends:
+        backend_schema["default"] = default_backend
+    properties: dict[str, Any] = {"backend": backend_schema}
     required, unavailable, unavailable_required = [], [], []
     for key, parameter in parameters.items():
         if (
@@ -130,12 +134,13 @@ def describe(hub: Any, name: str) -> dict[str, Any]:
         "required": required,
         "additionalProperties": False,
         "x-training-hub": {
-            "default_backend": default_backend,
             "unavailable_callable_parameters": unavailable,
             "unavailable_required_parameters": unavailable_required,
             "managed_parameters": sorted(MANAGED - {"self"}),
         },
     }
+    if "default" in backend_schema:
+        schema["x-training-hub"]["default_backend"] = backend_schema["default"]
     return {
         "name": name,
         "description": inspect.getdoc(entrypoint or algorithm) or name,

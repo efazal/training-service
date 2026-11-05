@@ -2,10 +2,12 @@
 
 `GET /api/v1/algorithms` returns compact summaries and `details_url` links.
 `GET /api/v1/algorithms/{name}` returns readable parameter types, known defaults,
-required parameters, and an illustrative POST body when submission supports it.
+required parameters, and examples only when supplied by the runtime schema.
+Discovery does not generate POST requests or choose models, storage, or resources.
 Add `?include=parameter_schema` only when the native JSON Schema is needed.
 An empty configured catalog returns `200 {"algorithms": []}`. An unconfigured,
 missing, malformed or image-mismatched catalog returns `503 backend_unavailable`.
+Nonempty catalogs must identify their runtime when `TRAINING_RAY_IMAGE` is configured.
 Unknown names return `404 not_found`; invalid `include` returns `400 bad_request`.
 
 ## Configure a deployment
@@ -40,11 +42,48 @@ Discovery describes the image registry; it does not enable new submission
 algorithms. This branch retains basic `lora_sft` submission support. Native
 schemas remain intact, and Python callbacks are not JSON-submittable.
 
+## Example training request
+
+This is documentation, not a generated discovery response or a recommended
+configuration. Replace the model and dataset paths, output path, and resources
+for your environment. The PVC must exist in the target project and contain the
+model and algorithm-compatible JSONL data. Submit this body to
+`POST /api/v1/projects/YOUR_PROJECT/training-jobs` with your bearer token.
+
+```json
+{
+  "name": "lora-sft-example",
+  "backend": "ray",
+  "model": {"uri": "pvc://YOUR_PVC/models/YOUR_MODEL/"},
+  "dataset": {"uri": "pvc://YOUR_PVC/datasets/train.jsonl"},
+  "algorithm": {
+    "name": "lora_sft",
+    "parameters": {
+      "learning_rate": 0.0001,
+      "num_epochs": 2,
+      "effective_batch_size": 8,
+      "max_seq_len": 2048
+    }
+  },
+  "resources": {
+    "num_nodes": 1,
+    "gpus_per_node": 1,
+    "gpu_type": "nvidia.com/gpu",
+    "cpus_per_node": "8",
+    "memory_per_node": "32Gi"
+  },
+  "output": {"destination_uri": "pvc://YOUR_PVC/outputs/lora-sft-example/"}
+}
+```
+
+Add `queue_name` if your project requires a Kueue LocalQueue. The values above
+are illustrative, not algorithm defaults or a guarantee of GPU/model fit.
+
 ## Verification
 
 `make test` runs mocked Kubernetes unit tests; no cluster is needed.
 `make test-e2e-deploy` also exports the selected runtime's registry into a
 test-owned ConfigMap before Helm installation. It checks compact responses,
-details/schema links, examples, unknown names and authentication, alongside the
+details/schema links, native parameter examples, unknown names and authentication, alongside the
 existing queued training lifecycle. Namespace cleanup removes the catalog too.
 See [the E2E runner instructions](../tests/e2e/README.md).

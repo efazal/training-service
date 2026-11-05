@@ -9,10 +9,7 @@ from fastapi import Request
 from jsonschema import Draft202012Validator
 
 from training_service import catalog
-from training_service.contract import component_validator
 from training_service.errors import ApiError
-from training_service.jobs import _validate_request
-from training_service_api.models.create_job_request import CreateJobRequest
 
 _SUMMARIES = {
     "lora_sft": "Supervised fine-tuning using LoRA adapters.",
@@ -29,17 +26,6 @@ _PARAMETER_DESCRIPTIONS = {
         "Total samples per optimizer update across GPUs and gradient accumulation."
     ),
     "max_seq_len": "Maximum number of tokens per training sample.",
-}
-# Illustrative values, not inferred defaults. Include them only when the runtime
-# schema accepts them. Unknown required arguments do not get invented values.
-_EXAMPLES = {
-    "learning_rate": 0.0001,
-    "num_epochs": 2,
-    "effective_batch_size": 8,
-    "max_seq_len": 2048,
-    "max_tokens_per_gpu": 2048,
-    "unfreeze_rank_ratio": 0.1,
-    "num_iterations": 2,
 }
 
 
@@ -92,7 +78,7 @@ def _types(schema: dict[str, Any] | bool) -> list[str]:
 
 
 def _has_references(value: Any) -> bool:
-    """Do not resolve catalog references or fetch remote schemas to invent examples."""
+    """Do not resolve catalog references or fetch remote schemas to validate examples."""
     if isinstance(value, dict):
         return (
             "$ref" in value
@@ -122,7 +108,7 @@ def _parameter(schema: dict[str, Any] | bool, name: str, docs: dict[str, str]) -
         result["choices"] = schema["enum"]
     if "const" in schema:
         result["choices"] = [schema["const"]]
-    candidate = schema.get("example", _EXAMPLES.get(name))
+    candidate = schema.get("example")
     if (
         candidate is not None
         and not _has_references(schema)
@@ -130,60 +116,6 @@ def _parameter(schema: dict[str, Any] | bool, name: str, docs: dict[str, str]) -
     ):
         result["example"] = candidate
     return result
-
-
-def _example_request(algorithm: dict[str, Any]) -> dict[str, Any] | None:
-    """Offer a complete POST body only if both contract and native schema accept it."""
-    schema = algorithm["parameter_schema"]
-    if not algorithm["supported_backends"] or _has_references(schema):
-        return None
-    metadata = schema.get("x-training-hub", {})
-    if metadata.get("unavailable_required_parameters"):
-        return None
-    properties = schema.get("properties", {})
-    parameters = {
-        name: value
-        for name, value in _EXAMPLES.items()
-        if name in properties and Draft202012Validator(properties[name]).is_valid(value)
-    }
-    for name in schema.get("required", []):
-        if name not in parameters:
-            prop = properties.get(name, {})
-            if isinstance(prop, bool):
-                return None
-            if "example" in prop:
-                parameters[name] = prop["example"]
-            elif prop.get("default") is not None:
-                parameters[name] = prop["default"]
-            else:
-                return None
-    name = "qwen-" + algorithm["name"].replace("_", "-")
-    request = {
-        "name": name,
-        "backend": algorithm["supported_backends"][0] if algorithm["supported_backends"] else "ray",
-        "model": {"uri": "hf://hf-token/Qwen/Qwen2.5-1.5B-Instruct"},
-        "dataset": {"uri": "pvc://taas-storage/datasets/train.jsonl"},
-        "algorithm": {"name": algorithm["name"], "parameters": parameters},
-        "resources": {
-            "num_nodes": 1,
-            "gpus_per_node": 1,
-            "gpu_type": "nvidia.com/gpu",
-            "cpus_per_node": "16",
-            "memory_per_node": "64Gi",
-        },
-        "output": {"destination_uri": f"pvc://taas-storage/outputs/{name}/"},
-    }
-    if not (
-        Draft202012Validator(schema).is_valid(parameters)
-        and component_validator("CreateJobRequest").is_valid(request)
-    ):
-        return None
-    # Reuse admission validation: runtime presence alone is not POST support.
-    try:
-        _validate_request(CreateJobRequest.model_validate(request))
-    except ApiError:
-        return None
-    return request
 
 
 def get_algorithm(request: Request, name: str, include: str | None = None) -> dict[str, Any]:
@@ -207,24 +139,18 @@ def get_algorithm(request: Request, name: str, include: str | None = None) -> di
         parameter_schema_url=result["details_url"] + "?include=parameter_schema",
     )
     notes = [
-        "Examples are illustrative, not defaults. Omitted parameters use runtime/backend defaults.",
-        "Use an existing project, Secret and PVC. Supply an algorithm-compatible dataset; "
-        "adjust resources for the model. An example is not a guarantee of model or GPU fit.",
+        "Omitted parameters use runtime/backend defaults. Parameter examples, when supplied "
+        "by the runtime schema, are illustrative and are not defaults.",
+        "Runtime availability does not imply API submission support. Check the submission "
+        "contract for accepted algorithms and parameters.",
     ]
     metadata = schema.get("x-training-hub", {})
-    if metadata.get("unavailable_callable_parameters"):
+    if metadata.get("unavailable_callable_parameters") or metadata.get(
+        "unavailable_required_parameters"
+    ):
         notes.append(
             "Python callbacks and custom rollout functions cannot be supplied as JSON. "
             "Only JSON-configurable training modes are available through this API."
-        )
-    example = _example_request(algorithm)
-    if example is not None:
-        result["example_request"] = example
-    else:
-        notes.append(
-            "No valid POST example is available for this algorithm under the current API contract. "
-            "Runtime availability does not imply submission support; Python-only arguments "
-            "cannot be submitted as JSON."
         )
     result["notes"] = notes
     if "runtime" in payload:

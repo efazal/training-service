@@ -66,7 +66,7 @@ def unavailable(reason: str) -> ApiError:
     return ApiError(503, "backend_unavailable", "Algorithm catalog unavailable: " + reason)
 
 
-def validate_catalog(payload: Any) -> dict[str, Any]:
+def validate_catalog(payload: Any, runtime_image: str | None = None) -> dict[str, Any]:
     """Reject malformed descriptors before exposing them through the API."""
     try:
         Draft202012Validator(_CATALOG_SCHEMA).validate(payload)
@@ -77,7 +77,9 @@ def validate_catalog(payload: Any) -> dict[str, Any]:
             names.add(algorithm["name"])
             Draft202012Validator.check_schema(algorithm["parameter_schema"])
         runtime = payload.get("runtime")
-        image = os.getenv("TRAINING_RAY_IMAGE")
+        image = os.getenv("TRAINING_RAY_IMAGE") if runtime_image is None else runtime_image
+        if image and payload["algorithms"] and not runtime:
+            raise ValueError("Runtime provenance missing")
         if runtime and image and runtime["image"] != image:
             raise ValueError("Runtime image mismatch")
     except (KeyError, TypeError, ValueError, ValidationError, SchemaError):

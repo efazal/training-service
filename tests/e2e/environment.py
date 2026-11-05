@@ -446,7 +446,7 @@ class RunEnvironment:
             timeout=120,
         )
         try:
-            payload = validate_catalog(json.loads(raw))
+            payload = validate_catalog(json.loads(raw), runtime_image=self.args.runtime_image)
         except (ValueError, ApiError) as error:
             raise RuntimeError(
                 "Runtime algorithm export did not produce a valid catalog"
