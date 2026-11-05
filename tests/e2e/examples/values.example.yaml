@@ -1,10 +1,11 @@
-# Copy outside the repo. Supply your tested image and authenticated Ray gateway.
+# Copy outside the repo. Supply your authenticated Ray gateway.
 # The runner discovers the cluster's public ingress CA and provisions the CA ConfigMap.
 # Use --ray-ca-bundle only when the gateway needs a different issuer.
 # Never put tokens, passwords or Secret values here.
 imagePullSecrets: [] # For private Quay images use --use-podman-auth; the runner sets the reference.
-trainingRuntime:
-  image: quay.io/YOUR_ORG/ray-traininghub@sha256:REPLACE_WITH_TESTED_DIGEST
+# Uses the chart's public Ray + Training Hub default. Optional runtime override:
+# trainingRuntime:
+#   image: quay.io/modh/ray@sha256:REPLACE_WITH_TESTED_DIGEST
 env:
   - name: TRAINING_SERVICE_RAY_GATEWAY_URL
     value: https://YOUR_AUTHENTICATED_RAY_GATEWAY

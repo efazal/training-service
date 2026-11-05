@@ -279,7 +279,6 @@ def run(args):
         evidence["image_reused"] = bool(args.reuse_image)
         print(f"Creating fresh Kueue-enrolled namespace {args.namespace} and fixtures", flush=True)
         environment.provision()
-        environment.provision_catalog()
         print(f"Deploying isolated release {release} in {args.namespace}", flush=True)
         existing = json.loads(
             command(
@@ -320,10 +319,6 @@ def run(args):
             "serviceAccount.name=" + release,
             "--set",
             "serviceAccount.create=true",
-            "--set-string",
-            "algorithmCatalog.name=e2e-algorithms",
-            "--set-string",
-            "algorithmCatalog.namespace=" + args.namespace,
             "--set-string",
             "image.repository=" + args.image_repository,
             "--set-string",
@@ -415,6 +410,7 @@ def run(args):
             TRAINING_SERVICE_PROJECT=args.namespace,
             TRAINING_SERVICE_EVIDENCE_DIR=str(results),
             TRAINING_SERVICE_CA_BUNDLE=str(args.ingress_ca_bundle),
+            TRAINING_SERVICE_RUNTIME_IMAGE=args.runtime_image,
         )
         test_args = [
             sys.executable,

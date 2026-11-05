@@ -1,14 +1,18 @@
 replicaCount: 1
 
 image:
-  repository: quay.io/opendatahub/training-service
+  # Intended public release repository; requires publication by a modh maintainer.
+  # Until published, override repository/tag with an available service image.
+  repository: quay.io/modh/training-service
   pullPolicy: IfNotPresent
-  tag: ""
+  tag: "0.1.0"
 
 # Ray workload image containing Training Hub, separate from the API service image.
-# Required for training submissions; use a tested image tag or digest for your cluster.
+# An init container discovers its Training Hub algorithms automatically, without a GPU.
+# Public default matches the API image's Ray 2.55.1 pin and includes Training Hub 0.8.1.
+# Override with a tested image digest for your cluster when needed.
 trainingRuntime:
-  image: ""
+  image: quay.io/modh/ray:2.55.1-py312-cu129-th081
 
 imagePullSecrets: []
 nameOverride: ""
@@ -42,12 +46,6 @@ writableTemp:
   enabled: true
   sizeLimit: 512Mi
 
-# Existing ConfigMap with catalog.json from the selected training runtime.
-# Reads use the caller's identity, not the service account. See docs/algorithm-discovery.md.
-algorithmCatalog:
-  name: ""
-  namespace: "" # defaults to the Helm release namespace
-
 # For example, mount a ConfigMap containing the trusted Ray gateway CA.
 volumes: []
 volumeMounts: []
@@ -69,7 +67,7 @@ service:
   port: 8080
 
 route:
-  enabled: false
+  enabled: true
   annotations: {}
   host: ""
   path: ""

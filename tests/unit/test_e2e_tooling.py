@@ -579,6 +579,14 @@ def test_cluster_preflight_validates_queued_environment_read_only(prepared_clust
     assert all(call.args[0][1] in {"get", "auth"} for call in command.call_args_list)
 
 
+def test_cluster_preflight_uses_chart_runtime_default(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    values.pop("trainingRuntime")
+    cluster_preflight(args, command, values)
+    defaults = yaml.safe_load((deploy.CHART / "values.yaml").read_text())
+    assert args.runtime_image == defaults["trainingRuntime"]["image"]
+
+
 def test_cluster_preflight_accepts_legacy_runtime_environment_value(prepared_cluster):
     args, values, _, _, command = prepared_cluster
     runtime = values.pop("trainingRuntime")["image"]
@@ -1296,6 +1304,36 @@ def test_invalid_runner_inputs_fail_before_commands(monkeypatch, tmp_path):
     command.assert_not_called()
 
 
+@pytest.mark.parametrize("route_enabled", [True, False])
+def test_chart_organization_image_and_route_defaults(route_enabled):
+    import shutil
+
+    if not shutil.which("helm"):
+        pytest.skip("helm is not installed")
+    command = ["helm", "template", "e2e", deploy.CHART]
+    if not route_enabled:
+        command.extend(["--set", "route.enabled=false"])
+    documents = list(yaml.safe_load_all(deploy.command(command)))
+    deployment = next(d for d in documents if d["kind"] == "Deployment")
+    pod = deployment["spec"]["template"]["spec"]
+    api = pod["containers"][0]
+    assert api["image"] == "quay.io/modh/training-service:0.1.0"
+    runtime = "quay.io/modh/ray:2.55.1-py312-cu129-th081"
+    assert pod["initContainers"][0]["image"] == runtime
+    assert [e for e in api["env"] if e["name"] == "TRAINING_RAY_IMAGE"] == [
+        {"name": "TRAINING_RAY_IMAGE", "value": runtime}
+    ]
+    assert not pod.get("imagePullSecrets")
+    routes = [d for d in documents if d["kind"] == "Route"]
+    assert len(routes) == int(route_enabled)
+    if route_enabled:
+        assert "host" not in routes[0]["spec"]
+        assert routes[0]["spec"]["tls"] == {
+            "termination": "edge",
+            "insecureEdgeTerminationPolicy": "Redirect",
+        }
+
+
 def test_chart_mounts_ca_only_when_configured():
     # Helm rendering, no cluster/credentials needed; current CI already installs Helm.
     import shutil
@@ -1318,6 +1356,14 @@ def test_chart_mounts_ca_only_when_configured():
     assert "value: /tmp/huggingface" in plain
     assert "name: ray-gateway-ca" not in plain
     assert "name: ray-gateway-ca" in configured and "readOnly: true" in configured
+    plain_pod = next(d for d in yaml.safe_load_all(plain) if d["kind"] == "Deployment")["spec"][
+        "template"
+    ]["spec"]
+    configured_pod = next(d for d in yaml.safe_load_all(configured) if d["kind"] == "Deployment")[
+        "spec"
+    ]["template"]["spec"]
+    assert "ray-gateway-ca" not in {v["name"] for v in plain_pod["volumes"]}
+    assert "ray-gateway-ca" in {v["name"] for v in configured_pod["volumes"]}
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -1327,7 +1373,10 @@ def test_chart_wires_training_runtime_image_once(tmp_path, legacy):
     if not shutil.which("helm"):
         pytest.skip("helm is not installed")
     image = "quay.io/test/ray@sha256:" + "a" * 64
-    values = {"env": [{"name": "UNRELATED_SETTING", "value": "preserved"}]}
+    values = {
+        "env": [{"name": "UNRELATED_SETTING", "value": "preserved"}],
+        "imagePullSecrets": [{"name": "private-runtime-pull"}],
+    }
     if legacy:
         values["env"].append({"name": "TRAINING_RAY_IMAGE", "value": image})
     else:
@@ -1341,6 +1390,25 @@ def test_chart_wires_training_runtime_image_once(tmp_path, legacy):
         {"name": "TRAINING_RAY_IMAGE", "value": image}
     ]
     assert {"name": "UNRELATED_SETTING", "value": "preserved"} in env
+    pod = deployment["spec"]["template"]["spec"]
+    init = pod["initContainers"][0]
+    assert init["name"] == "discover-algorithms"
+    assert init["image"] == image
+    assert init["imagePullPolicy"] == "Always"
+    assert init["command"][2] == image
+    assert init["command"][3] == "/var/run/training-service/catalog/catalog.json"
+    assert not any("gpu" in key for key in init["resources"]["limits"])
+    assert pod["imagePullSecrets"] == [{"name": "private-runtime-pull"}]
+    assert {"name": "TRAINING_SERVICE_CATALOG_PATH", "value": init["command"][3]} in env
+    assert not any(
+        e["name"] in {"TRAINING_SERVICE_CATALOG_NAME", "TRAINING_SERVICE_CATALOG_NAMESPACE"}
+        for e in env
+    )
+    mounted = pod["containers"][0]["volumeMounts"][0]
+    assert mounted["name"] == "training-algorithm-catalog" and mounted["readOnly"] is True
+    exporter = next(d for d in yaml.safe_load_all(rendered) if d["kind"] == "ConfigMap")
+    script = deploy.CHART / "files/export_algorithm_catalog.py"
+    assert exporter["data"]["export_algorithm_catalog.py"] == script.read_text()
 
 
 def test_chart_rejects_duplicate_training_runtime_image(tmp_path):

@@ -882,6 +882,74 @@ def test_unsupported_backend_and_unsafe_pvc_path_fail_before_sdk() -> None:
     assert raised.value.status_code == 422
 
 
+@pytest.mark.parametrize("name", ["sft", "osft", "lora_sft", "grpo", "lora_grpo"])
+def test_discovered_algorithm_is_forwarded_without_hardcoded_parameters(
+    monkeypatch, runtime_catalog, name
+):
+    _mock_sdk(monkeypatch)
+    metadata = json.loads(runtime_catalog.read_text())
+    algorithm = metadata["algorithms"][0]
+    algorithm["name"] = name
+    algorithm["parameter_schema"]["properties"]["warmup_steps"] = {"type": "integer"}
+    runtime_catalog.write_text(json.dumps(metadata))
+    body = _sample()
+    body.algorithm.name = name
+    body.algorithm.parameters = {"warmup_steps": 0}
+    entrypoint = {}
+
+    def record(configuration):
+        entrypoint.update(configuration)
+        return "python -c 'pass'"
+
+    monkeypatch.setattr(jobs, "_entrypoint", record)
+    jobs.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
+        "team-alpha", body, CallerIdentity("alice", None, ()), "token"
+    )
+    assert entrypoint["algorithm"] == name
+    assert entrypoint["parameters"] == {"warmup_steps": 0}
+
+
+@pytest.mark.parametrize("failure", ["algorithm", "parameter", "type", "catalog"])
+def test_api_rejects_runtime_incompatibility_before_kubernetes(
+    monkeypatch, runtime_catalog, failure
+):
+    from unittest.mock import Mock
+
+    body = _sample().model_dump(mode="json", exclude_unset=True)
+    if failure == "algorithm":
+        body["algorithm"]["name"] = "grpo"
+        context = "grpo"
+    elif failure == "parameter":
+        body["algorithm"]["parameters"]["unsupported_in_old_image"] = 1
+        context = "unsupported_in_old_image"
+    elif failure == "type":
+        body["algorithm"]["parameters"]["learning_rate"] = "bad-value"
+        context = "learning_rate"
+    else:
+        runtime_catalog.unlink()
+        context = "discover-algorithms"
+    factory = Mock(side_effect=AssertionError("Kubernetes must not be called"))
+    monkeypatch.setattr(jobs, "_caller_api_client", factory)
+    http = TestClient(
+        create_app(
+            FakeAuthenticator(),
+            FakeAuthorizer(),
+            backend=jobs.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
+        )
+    )
+    response = http.post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=body,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert response.status_code == (503 if failure == "catalog" else 422)
+    assert context in response.json()["message"]
+    assert response.json()["code"] == (
+        "backend_unavailable" if failure == "catalog" else "validation_error"
+    )
+    factory.assert_not_called()
+
+
 def test_metadata_is_added_to_sdk_built_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         RayJob,

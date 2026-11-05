@@ -21,6 +21,22 @@ Create a default fully qualified app name.
 {{- end }}
 {{- end }}
 
+{{/* Use the same runtime image for catalog export and training, including legacy values. */}}
+{{- define "training-service.runtimeImage" -}}
+{{- $runtime := (.Values.trainingRuntime | default dict).image | default "" -}}
+{{/* Keep in sync with values.yaml: legacy env settings may override this default. */}}
+{{- $defaultRuntime := "quay.io/modh/ray:2.55.1-py312-cu129-th081" -}}
+{{- range .Values.env -}}
+{{- if eq .name "TRAINING_RAY_IMAGE" -}}
+{{- if and $runtime (ne $runtime $defaultRuntime) -}}
+{{- fail "Configure trainingRuntime.image or env TRAINING_RAY_IMAGE, not both; prefer trainingRuntime.image." -}}
+{{- end -}}
+{{- $runtime = .value | default "" -}}
+{{- end -}}
+{{- end -}}
+{{- $runtime -}}
+{{- end -}}
+
 {{/*
 Common labels.
 */}}

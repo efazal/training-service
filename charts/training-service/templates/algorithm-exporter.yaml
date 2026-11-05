@@ -1,0 +1,11 @@
+{{- if include "training-service.runtimeImage" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "training-service.fullname" . }}-algorithm-exporter
+  labels:
+    {{- include "training-service.labels" . | nindent 4 }}
+data:
+  export_algorithm_catalog.py: |
+    {{- .Files.Get "files/export_algorithm_catalog.py" | nindent 4 }}
+{{- end }}

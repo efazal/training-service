@@ -33,8 +33,9 @@ Prepare once:
   repo, add `--use-podman-auth` as described below: local Podman login alone does
   not authorize Kubernetes image pulls. The runner never copies a pre-existing
   cluster Secret or changes cluster-wide pull credentials.
-- Copy [values.example.yaml](examples/values.example.yaml) outside the repo and supply a
-  compatible Ray + Training Hub runtime and authenticated Ray gateway.
+- Copy [values.example.yaml](examples/values.example.yaml) outside the repo and supply
+  the authenticated Ray gateway. The chart's public Ray + Training Hub image is
+  used by default; set `trainingRuntime.image` only to override it.
   The runner automatically reads the cluster's **public ingress certificate
   bundle** from `openshift-config-managed/default-ingress-cert` (`ca-bundle.crt`).
   It saves it only under the ignored per-run results directory, uses it for
@@ -287,8 +288,10 @@ The normal deployment command above **always includes Kueue**. To separately
 test an already-deployed service without Kueue, use `make test-e2e`, not the
 deployment runner. Supply a known-good [workload JSON](examples/job.example.json), existing
 PVC/model/dataset/output references and a prepared
-[read-only verifier pod](examples/artifact-verifier.example.yaml). The baseline
-checks `lora_sft`; `--algorithm-matrix` opts into all four supported algorithms.
+[read-only verifier pod](examples/artifact-verifier.example.yaml). Use discovery to
+check the algorithms and parameters available in the configured runtime. The default
+sanity workload uses `lora_sft`; `--algorithm-matrix` opts into the four supported
+execution profiles. Python-only Training Hub modes are not supported.
 
 ```bash
 # Set TRAINING_SERVICE_URL and TRAINING_SERVICE_PROJECT; the token defaults to oc.

@@ -13,6 +13,7 @@ import types
 import typing
 from contextlib import redirect_stdout
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any, get_args, get_origin
 
 # These values belong to the API's storage, security, or resource adapters, not
@@ -86,7 +87,14 @@ def describe(hub: Any, name: str) -> dict[str, Any]:
     if callable(entrypoint):
         # In particular, grpo() has full-parameter semantics which differ from
         # the shared LoRA algorithm class registered under that alias.
-        functions = [entrypoint] if name == "grpo" else [algorithm.train, entrypoint]
+        public_parameters = inspect.signature(entrypoint).parameters
+        delegates_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in public_parameters.values()
+        )
+        functions = (
+            [algorithm.train, entrypoint] if delegates_kwargs and name != "grpo" else [entrypoint]
+        )
     parameters: dict[str, inspect.Parameter] = {}
     for function in functions:
         hints = typing.get_type_hints(function)
@@ -102,8 +110,12 @@ def describe(hub: Any, name: str) -> dict[str, Any]:
     # Report only an explicit callable default, never infer one from registry order.
     if isinstance(default_backend, str) and default_backend in backends:
         backend_schema["default"] = default_backend
-    properties: dict[str, Any] = {"backend": backend_schema}
+    # Registry backend availability does not imply that the public callable
+    # accepts a backend keyword (grpo(), for example, fixes its engine internally).
+    properties: dict[str, Any] = {"backend": backend_schema} if backend_parameter else {}
     required, unavailable, unavailable_required = [], [], []
+    if backend_parameter is not None and backend_parameter.default is inspect.Parameter.empty:
+        required.append("backend")
     for key, parameter in parameters.items():
         if (
             key in MANAGED
@@ -134,6 +146,7 @@ def describe(hub: Any, name: str) -> dict[str, Any]:
         "required": required,
         "additionalProperties": False,
         "x-training-hub": {
+            "api_callable": callable(entrypoint),
             "unavailable_callable_parameters": unavailable,
             "unavailable_required_parameters": unavailable_required,
             "managed_parameters": sorted(MANAGED - {"self"}),
@@ -164,11 +177,20 @@ def build_catalog(hub: Any, image: str, hub_version: str) -> dict[str, Any]:
 
 def main() -> None:
     # Some registry imports print banners. Keep stdout machine-readable.
+    print("Inspecting Training Hub in the configured training runtime", file=sys.stderr)
     with redirect_stdout(sys.stderr):
         import training_hub
 
         catalog = build_catalog(training_hub, sys.argv[1], version("training-hub"))
-    print(json.dumps(catalog))
+    document = json.dumps(catalog, allow_nan=False)
+    if len(sys.argv) > 2:
+        target = Path(sys.argv[2])
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(document, encoding="utf-8")
+        temporary.replace(target)
+    else:
+        print(document)
+    print(f"Discovered {len(catalog['algorithms'])} algorithms", file=sys.stderr)
 
 
 if __name__ == "__main__":

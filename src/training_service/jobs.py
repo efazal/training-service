@@ -25,7 +25,7 @@ from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from pydantic import ValidationError as ModelValidationError
 
-from training_service.algorithm_parameters import validate_algorithm_parameters
+from training_service import catalog
 from training_service.auth import CallerIdentity
 from training_service.contract import component_validator
 from training_service.dataset_preflight import validate_dataset_columns, validate_dataset_location
@@ -158,10 +158,17 @@ def _parse_location(uri: str, *, output: bool = False) -> dict[str, str]:
     return {"scheme": scheme, "name": parsed.netloc, "path": path}
 
 
-def _validate_request(request: CreateJobRequest) -> tuple[ResourceSpec, dict[str, Any]]:
+def _validate_request(
+    request: CreateJobRequest, runtime_image: str | None = None
+) -> tuple[ResourceSpec, dict[str, Any]]:
     if request.backend not in (None, JobBackend.RAY):
         raise ApiError(501, "not_implemented", "Only the Ray backend is implemented.")
-    parameters = validate_algorithm_parameters(request.algorithm.name, request.algorithm.parameters)
+    parameters = dict(request.algorithm.parameters or {})
+    catalog.validate_parameters(request.algorithm.name, parameters, "ray", runtime_image)
+    try:
+        parameters = get_backend(request.algorithm.name).validate_parameters(parameters)
+    except ValueError as error:
+        raise _invalid(str(error)) from error
     if request.queue_name is not None and (
         len(request.queue_name) > 63 or not _NAME_PATTERN.fullmatch(request.queue_name)
     ):
@@ -372,9 +379,9 @@ class CodeFlareJobBackend:
     def _submit_sync(
         self, project: str, request: CreateJobRequest, caller: CallerIdentity, token: str
     ) -> str:
-        resources, parameters = _validate_request(request)
         if not self._image:
             raise ApiError(503, "submission_unavailable", "A Ray training image is not configured.")
+        resources, parameters = _validate_request(request, self._image)
         locations = {
             "model": _parse_location(request.model.uri.root),
             "dataset": _parse_location(request.dataset.uri.root),

@@ -4,16 +4,20 @@ Python/FastAPI service generated from the Training API contract in
 `docs/api/openapi.yaml`. OpenShift TokenReview authenticates callers,
 SubjectAccessReview authorizes project operations, and POST training-job
 submission uses CodeFlare. Job listing, details, driver logs, and terminal
-RayJob deletion are implemented. Algorithm/queue discovery and estimation
-remain fail-closed with `501`.
+RayJob deletion and algorithm discovery are implemented. Queue discovery and
+estimation remain fail-closed with `501`.
 
-## Ray submission
+## Ray submission and algorithm discovery
+
+The chart automatically discovers Training Hub algorithms and parameters from
+the configured runtime image, using a GPU-free init container. No manual catalog
+export or ConfigMap setup is needed. GET discovery and POST validation share
+`catalog.json`; unsupported algorithms or parameters return `422` before submission.
 
 POST dispatches through per-algorithm adapters to Training Hub algorithm/backend classes
 used by the [Ray fine-tuning examples](https://github.com/red-hat-data-services/red-hat-ai-examples/tree/main/examples/fine-tuning):
 `sft`, `osft`, `lora_sft`, and `lora_grpo`. Algorithm overrides are validated
-against the service-owned catalog in
-`src/training_service/algorithm_parameter_schemas.yaml`, not OpenAPI. Unsupported or
+against the generated runtime catalog, not a static service schema or OpenAPI. Unsupported or
 malformed overrides return `422` rather than being passed to Training Hub.
 Each adapter owns its additional validation, data preparation, and Ray
 entrypoint settings. Training Hub's `create_algorithm` selects the explicit backend
@@ -48,8 +52,7 @@ without serializing the token into the RayJob. The GRPO notebook's
 versions and is therefore rejected by this API; use `prompt_batch_size`
 instead. GRPO math rewards require a PVC JSONL dataset; Training Hub cannot
 open a Hugging Face repository ID as a local math-data file. The exposed
-parameters are the reviewed common subset of Training
-Hub 0.8.1 and 0.11.2, not every parameter of either version. Text LoRA's
+parameters come from the selected runtime's signatures. Text LoRA's
 `assistant_only_loss` default differs between those runtimes; test the chosen
 image with the intended dataset format.
 
@@ -61,19 +64,20 @@ algorithm.
 The `202` response returns the RayJob name as `id` and a project-scoped
 `Location` header; it does not mean training has completed.
 
-Set the chart's dedicated `trainingRuntime.image` value to the Ray workload
+The chart's dedicated `trainingRuntime.image` value selects the Ray workload
 image, separate from `image.repository`/`image.tag` for the API service. For
 non-Helm deployments, set the process environment variable `TRAINING_RAY_IMAGE`.
 The image must contain Ray and Training Hub with a Ray
 version compatible with the API's Ray 2.58.0. The API image pins the RHOAI 3.6
-CodeFlare SDK 0.40.1 and Ray 2.58.0 wheels. There is no default training
-image; submission returns `503` until one is configured. CodeFlare accepts
+CodeFlare SDK 0.40.1 and Ray 2.58.0 wheels. Discovery, readiness and submission
+return `503` without a valid startup catalog. CodeFlare accepts
 a caller-scoped Kubernetes client; no service-side job store or hand-authored
 RayJob manifest is used.
 
 The four Training Hub algorithms in the referenced Ray fine-tuning examples
-are `sft`, `osft`, `lora_sft`, and `lora_grpo`. Algorithm discovery and Kueue
-discovery are separate work and remain unimplemented here. Earlier dev-cluster
+are `sft`, `osft`, `lora_sft`, and `lora_grpo`. Discovery can list additional
+runtime algorithms, but submission still requires a supported execution profile.
+Kueue discovery remains unimplemented. Earlier dev-cluster
 smoke tests of the broader branch completed small SFT, OSFT, and LoRA SFT
 RayJobs with the Training Hub 0.11.2 image
 `quay.io/modh/ray@sha256:888ffb8008a095eff0e6f2f97335903f56867773b9493da4a46a92708d54cb55`.
@@ -85,14 +89,24 @@ in every target RHOAI release.
 
 ```yaml
 image:
-  repository: quay.io/YOUR_ORG/training-service
-  tag: YOUR_SERVICE_TAG
+  repository: quay.io/modh/training-service
+  tag: "0.1.0"
 trainingRuntime:
-  image: quay.io/YOUR_ORG/ray-traininghub@sha256:YOUR_TESTED_DIGEST
+  image: quay.io/modh/ray:2.55.1-py312-cu129-th081
+route:
+  enabled: true
 ```
 
+These are the chart defaults. The HTTPS OpenShift Route gets a cluster-assigned
+hostname. Set `route.enabled=false` for an internal-only deployment.
+The service repository above is the intended public release location, but a
+public image there has not been verified. A `modh` maintainer must create or
+configure the repository as public and publish the service image first. Until
+then, override `image.repository` and `image.tag` with an available image.
+
 Legacy values files using `env: [{name: TRAINING_RAY_IMAGE, value: ...}]`
-still work. Move that entry to `trainingRuntime.image`; setting both is rejected.
+still override the default. Move that entry to `trainingRuntime.image`; combining
+a non-default runtime with the legacy entry is rejected.
 
 `pvc://` URIs refer to project PVCs. `hf://` and `s3://` URIs refer to
 project Secrets; the selected training image also needs `datasets` and
@@ -116,7 +130,7 @@ configuration, response examples, and cascading cleanup behavior.
 ## Local development
 
 Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and a running
-Podman or Docker engine for OpenAPI Generator.
+Podman engine for OpenAPI Generator.
 
 ```bash
 make install       # generate server, then install dependencies

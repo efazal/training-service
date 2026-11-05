@@ -50,7 +50,7 @@ class BaseInfrastructureDiscoveryApi:
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> AlgorithmDetails:
-        """Get readable algorithm parameters and an optional submission example"""
+        """Get readable algorithm parameters and an optional native schema"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def list_queues(

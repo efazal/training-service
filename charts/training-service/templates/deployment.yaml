@@ -1,12 +1,4 @@
-{{- $trainingRuntime := .Values.trainingRuntime | default dict -}}
-{{- $runtimeImage := $trainingRuntime.image | default "" -}}
-{{- if $runtimeImage -}}
-{{- range .Values.env -}}
-{{- if eq .name "TRAINING_RAY_IMAGE" -}}
-{{- fail "Configure trainingRuntime.image or env TRAINING_RAY_IMAGE, not both; prefer trainingRuntime.image." -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
+{{- $runtimeImage := include "training-service.runtimeImage" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,10 +12,11 @@ spec:
       {{- include "training-service.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/algorithm-exporter: {{ .Files.Get "files/export_algorithm_catalog.py" | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "training-service.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
@@ -37,16 +30,51 @@ spec:
       serviceAccountName: {{ include "training-service.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if or .Values.writableTemp.enabled .Values.volumes }}
       volumes:
         {{- if .Values.writableTemp.enabled }}
         - name: training-service-tmp
           emptyDir:
             sizeLimit: {{ .Values.writableTemp.sizeLimit | quote }}
         {{- end }}
+        - name: training-algorithm-catalog
+          emptyDir: {}
+        {{- if $runtimeImage }}
+        - name: training-algorithm-exporter
+          configMap:
+            name: {{ include "training-service.fullname" . }}-algorithm-exporter
+        - name: training-runtime-tmp
+          emptyDir: {}
+        {{- end }}
         {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- if $runtimeImage }}
+      initContainers:
+        - name: discover-algorithms
+          image: {{ $runtimeImage | quote }}
+          imagePullPolicy: Always
+          command:
+            - python
+            - /opt/algorithm-exporter/export_algorithm_catalog.py
+            - {{ $runtimeImage | quote }}
+            - /var/run/training-service/catalog/catalog.json
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 4Gi
+          volumeMounts:
+            - name: training-algorithm-exporter
+              mountPath: /opt/algorithm-exporter
+              readOnly: true
+            - name: training-algorithm-catalog
+              mountPath: /var/run/training-service/catalog
+            - name: training-runtime-tmp
+              mountPath: /tmp
       {{- end }}
       containers:
         - name: training-service
@@ -66,39 +94,36 @@ spec:
             httpGet:
               path: /readyz
               port: http
-          {{- if or .Values.writableTemp.enabled .Values.env $runtimeImage .Values.algorithmCatalog.name }}
           env:
             {{- if .Values.writableTemp.enabled }}
             - name: HF_HOME
               value: /tmp/huggingface
             {{- end }}
+            - name: TRAINING_SERVICE_CATALOG_PATH
+              value: /var/run/training-service/catalog/catalog.json
             {{- if $runtimeImage }}
             - name: TRAINING_RAY_IMAGE
               value: {{ $runtimeImage | quote }}
             {{- end }}
-            {{- with .Values.env }}
-            {{- toYaml . | nindent 12 }}
+            {{- range .Values.env }}
+            {{- if ne .name "TRAINING_RAY_IMAGE" }}
+            {{- toYaml (list .) | nindent 12 }}
             {{- end }}
-            {{- if .Values.algorithmCatalog.name }}
-            - name: TRAINING_SERVICE_CATALOG_NAME
-              value: {{ .Values.algorithmCatalog.name | quote }}
-            - name: TRAINING_SERVICE_CATALOG_NAMESPACE
-              value: {{ .Values.algorithmCatalog.namespace | default .Release.Namespace | quote }}
             {{- end }}
-          {{- end }}
           {{- with .Values.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or .Values.writableTemp.enabled .Values.volumeMounts }}
           volumeMounts:
             {{- if .Values.writableTemp.enabled }}
             - name: training-service-tmp
               mountPath: /tmp
             {{- end }}
+            - name: training-algorithm-catalog
+              mountPath: /var/run/training-service/catalog
+              readOnly: true
             {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- end }}

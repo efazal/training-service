@@ -116,8 +116,7 @@ def test_verified_identity_is_propagated_without_the_bearer_token() -> None:
 
 
 def test_authenticated_generated_route_reaches_unconfigured_discovery(monkeypatch) -> None:
-    monkeypatch.delenv("TRAINING_SERVICE_CATALOG_NAME", raising=False)
-    monkeypatch.delenv("TRAINING_SERVICE_CATALOG_NAMESPACE", raising=False)
+    monkeypatch.setenv("TRAINING_SERVICE_CATALOG_PATH", "/missing/catalog.json")
     client, _ = protected_client(CallerIdentity("alice", "uid-1", ()))
 
     response = client.get("/api/v1/algorithms", headers={"Authorization": "Bearer accepted-token"})

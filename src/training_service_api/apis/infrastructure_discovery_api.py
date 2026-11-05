@@ -105,7 +105,7 @@ async def list_algorithms(
         },
     },
     tags=["Infrastructure &amp; Discovery"],
-    summary="Get readable algorithm parameters and an optional submission example",
+    summary="Get readable algorithm parameters and an optional native schema",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -122,7 +122,7 @@ async def get_algorithm(
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> AlgorithmDetails:
-    """Get readable algorithm parameters and an optional submission example"""
+    """Get readable algorithm parameters and an optional native schema"""
     implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.get_algorithm(
         name, include, token_OpenShiftBearer=token_OpenShiftBearer, request=request

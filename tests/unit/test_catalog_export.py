@@ -2,17 +2,19 @@
 
 import json
 import runpy
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
-from tests.e2e.environment import RunEnvironment
 
 from training_service.catalog import validate_catalog
 
-EXPORTER = Path(__file__).resolve().parents[2] / "scripts/export_algorithm_catalog.py"
+EXPORTER = (
+    Path(__file__).resolve().parents[2]
+    / "charts/training-service/files/export_algorithm_catalog.py"
+)
 
 
 class Algorithm:
@@ -67,7 +69,7 @@ def test_export_uses_registry_and_preserves_schemas(exported):
     assert schema["required"] == ["learning_rate"]
     assert schema["properties"]["enabled"]["default"] is False
     assert schema["properties"]["count"]["default"] == 0
-    assert schema["properties"]["backend"]["enum"] == ["engine"]
+    assert "backend" not in schema["properties"]  # Not declared by this callable.
     assert "reward_fn" in schema["x-training-hub"]["unavailable_callable_parameters"]
     assert not {"data_path", "model_path", "reward_fn"} & schema["properties"].keys()
 
@@ -77,6 +79,30 @@ def test_grpo_export_uses_only_the_full_parameter_entrypoint(exported):
     schema = algorithm["parameter_schema"]
     assert set(schema["properties"]) == {"backend", "num_iterations"}
     assert schema["properties"]["num_iterations"]["default"] == 15
+    assert schema["required"] == []
+
+
+def test_registry_backend_is_not_an_undeclared_public_parameter():
+    def grpo(
+        model_path: str, data_path: str, ckpt_output_dir: str, num_iterations: int = 15, **kwargs
+    ):
+        pass
+
+    hub = SimpleNamespace(AlgorithmRegistry=Registry, grpo=grpo)
+    exporter = runpy.run_path(str(EXPORTER))
+    schema = exporter["describe"](hub, "grpo")["parameter_schema"]
+    assert set(schema["properties"]) == {"num_iterations"}
+    assert "default_backend" not in schema["x-training-hub"]
+
+
+def test_closed_public_signature_does_not_advertise_class_only_parameters():
+    def future_algorithm(model_path: str, data_path: str, ckpt_output_dir: str, count: int = 0):
+        pass
+
+    hub = SimpleNamespace(AlgorithmRegistry=Registry, future_algorithm=future_algorithm)
+    exporter = runpy.run_path(str(EXPORTER))
+    schema = exporter["describe"](hub, "future_algorithm")["parameter_schema"]
+    assert set(schema["properties"]) == {"count"}
     assert schema["required"] == []
 
 
@@ -115,41 +141,38 @@ def test_export_does_not_guess_the_backend_default(default):
         assert schema["x-training-hub"]["default_backend"] == default
 
 
-def test_e2e_catalog_is_created_in_owned_namespace(tmp_path, exported, monkeypatch):
-    monkeypatch.setenv("TRAINING_RAY_IMAGE", "unrelated-shell-image")
-    args = SimpleNamespace(
-        namespace="test-project", runtime_image="unit-runtime", use_podman_auth=False
-    )
-    command = Mock(return_value=json.dumps(exported))
-    environment = RunEnvironment(args, "run-123", tmp_path, command)
-    environment.create = Mock()
-    environment.provision_catalog()
-    argv = command.call_args.args[0]
-    assert argv[:5] == ["oc", "exec", "-n", "test-project", "e2e-output-verifier"]
-    document = environment.create.call_args.args[1]
-    assert document["kind"] == "ConfigMap"
-    assert document["metadata"]["name"] == "e2e-algorithms"
-    assert document["metadata"]["labels"]["training.rhoai.io/e2e-run"] == "run-123"
-    assert json.loads(document["data"]["catalog.json"]) == exported
+@pytest.mark.parametrize("to_file", [False, True])
+def test_exporter_writes_startup_file_or_stdout(tmp_path, exported, monkeypatch, capsys, to_file):
+    exporter = runpy.run_path(str(EXPORTER))
+    main = exporter["main"]
+    monkeypatch.setitem(main.__globals__, "build_catalog", lambda *args: exported)
+    monkeypatch.setitem(main.__globals__, "version", lambda name: "unit-version")
+    monkeypatch.setitem(sys.modules, "training_hub", SimpleNamespace())
+    target = tmp_path / "catalog.json"
+    argv = [str(EXPORTER), "unit-runtime"] + ([str(target)] if to_file else [])
+    monkeypatch.setattr(sys, "argv", argv)
+    main()
+    output = capsys.readouterr()
+    assert "Discovered 2 algorithms" in output.err
+    assert json.loads(target.read_text() if to_file else output.out) == exported
+    if to_file:
+        assert output.out == ""
+        assert not target.with_suffix(".tmp").exists()
 
 
-def test_e2e_rejects_export_from_a_different_image(tmp_path, exported):
-    args = SimpleNamespace(
-        namespace="test-project", runtime_image="different-image", use_podman_auth=False
-    )
-    environment = RunEnvironment(args, "run-123", tmp_path, Mock(return_value=json.dumps(exported)))
-    environment.create = Mock()
-    with pytest.raises(RuntimeError, match="valid catalog"):
-        environment.provision_catalog()
-    environment.create.assert_not_called()
+def test_failed_export_does_not_replace_existing_catalog(tmp_path, monkeypatch):
+    exporter = runpy.run_path(str(EXPORTER))
+    main = exporter["main"]
 
+    def failed(*args):
+        raise RuntimeError("Training Hub introspection failed")
 
-def test_e2e_rejects_bad_runtime_export(tmp_path):
-    args = SimpleNamespace(
-        namespace="test-project", runtime_image="unit-runtime", use_podman_auth=False
-    )
-    environment = RunEnvironment(args, "run-123", tmp_path, Mock(return_value="not-json"))
-    environment.create = Mock()
-    with pytest.raises(RuntimeError, match="valid catalog"):
-        environment.provision_catalog()
-    environment.create.assert_not_called()
+    monkeypatch.setitem(main.__globals__, "build_catalog", failed)
+    monkeypatch.setitem(main.__globals__, "version", lambda name: "unit-version")
+    monkeypatch.setitem(sys.modules, "training_hub", SimpleNamespace())
+    target = tmp_path / "catalog.json"
+    target.write_text("previous catalog")
+    monkeypatch.setattr(sys, "argv", [str(EXPORTER), "unit-runtime", str(target)])
+    with pytest.raises(RuntimeError, match="introspection failed"):
+        main()
+    assert target.read_text() == "previous catalog"

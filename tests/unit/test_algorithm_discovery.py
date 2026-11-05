@@ -2,15 +2,11 @@
 
 import json
 from copy import deepcopy
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator, ValidationError
-from kubernetes.client.exceptions import ApiException
-from urllib3.exceptions import HTTPError
 
 from training_service import catalog
 from training_service.auth import AuthenticationUnavailable, CallerIdentity
@@ -99,21 +95,16 @@ def image_catalog() -> dict[str, Any]:
 
 
 @pytest.fixture
-def catalog_configmap(monkeypatch, image_catalog):
-    configmap = SimpleNamespace(data={"catalog.json": json.dumps(image_catalog)})
-    core = Mock()
-    core.read_namespaced_config_map.return_value = configmap
-    factory = Mock(return_value=core)
-    monkeypatch.setattr(catalog.client, "CoreV1Api", factory)
-    monkeypatch.setenv("TRAINING_SERVICE_CATALOG_NAMESPACE", "service-project")
-    monkeypatch.setenv("TRAINING_SERVICE_CATALOG_NAME", "runtime-algorithms")
+def catalog_file(monkeypatch, image_catalog, tmp_path):
+    path = tmp_path / "discovered-catalog.json"
+    path.write_text(json.dumps(image_catalog))
+    monkeypatch.setenv("TRAINING_SERVICE_CATALOG_PATH", str(path))
     monkeypatch.setenv("TRAINING_RAY_IMAGE", image_catalog["runtime"]["image"])
-    configmap.factory, configmap.core = factory, core
-    return configmap
+    return path
 
 
 @pytest.fixture
-def client(catalog_configmap) -> TestClient:
+def client(catalog_file) -> TestClient:
     return TestClient(create_app(Authenticator()))
 
 
@@ -172,7 +163,7 @@ def test_all_details_describe_runtime_without_environment_specific_examples(
     assert "example_request" not in data
     assert "Qwen/" not in response.text
     assert "pvc://" not in response.text
-    assert any("availability does not imply" in note for note in data["notes"])
+    assert any("validates algorithms and parameters" in note for note in data["notes"])
     if "grpo" in name:
         assert "reward_fn" not in data["parameters"]
         assert any("callbacks" in note for note in data["notes"])
@@ -188,11 +179,11 @@ def test_all_details_describe_runtime_without_environment_specific_examples(
     ],
 )
 def test_parameter_examples_come_only_from_runtime_schema(
-    client, catalog_configmap, image_catalog, name, value, valid
+    client, catalog_file, image_catalog, name, value, valid
 ):
     schema = image_catalog["algorithms"][2]["parameter_schema"]
     schema["properties"][name]["example"] = value
-    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    catalog_file.write_text(json.dumps(image_catalog))
     response = client.get(BASE + "/lora_sft", headers=HEADERS)
     assert response.status_code == 200
     parameter = response.json()["parameters"][name]
@@ -243,7 +234,7 @@ def test_all_discovery_views_require_authentication(client: TestClient, suffix: 
     assert response.json()["code"] == "unauthorized"
 
 
-def test_authentication_outage_preserves_error_envelope(catalog_configmap) -> None:
+def test_authentication_outage_preserves_error_envelope(catalog_file) -> None:
     class Unavailable:
         async def authenticate(self, token: str) -> CallerIdentity:
             raise AuthenticationUnavailable
@@ -271,21 +262,22 @@ def test_unknown_algorithm_and_invalid_include(client: TestClient) -> None:
     "failure", ["stale-image", "missing-runtime", "invalid-json", "invalid-schema", "missing"]
 )
 def test_catalog_failures_return_503_in_all_views(
-    client: TestClient, catalog_configmap, image_catalog: dict, failure: str
+    client: TestClient, catalog_file, image_catalog: dict, failure: str
 ) -> None:
     if failure == "stale-image":
         image_catalog["runtime"]["image"] = "different-image"
-        catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+        catalog_file.write_text(json.dumps(image_catalog))
     elif failure == "missing-runtime":
         image_catalog.pop("runtime")
-        catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+        catalog_file.write_text(json.dumps(image_catalog))
     elif failure == "invalid-json":
-        catalog_configmap.data["catalog.json"] = "not-json"
+        catalog_file.write_text("not-json")
     elif failure == "invalid-schema":
         image_catalog["algorithms"][0]["parameter_schema"] = {"type": "unknown-type"}
-        catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+        catalog_file.write_text(json.dumps(image_catalog))
     else:
-        catalog_configmap.data = {}
+        catalog_file.unlink()
+    assert client.get("/readyz").status_code == 503
     for suffix in ("", "/lora_sft", "/lora_sft?include=parameter_schema"):
         response = client.get(BASE + suffix, headers=HEADERS)
         assert response.status_code == 503
@@ -294,12 +286,12 @@ def test_catalog_failures_return_503_in_all_views(
 
 
 def test_new_algorithms_remain_discoverable_without_hardcoding(
-    client: TestClient, catalog_configmap, image_catalog: dict
+    client: TestClient, catalog_file, image_catalog: dict
 ) -> None:
     algorithm = image_catalog["algorithms"][0]
     algorithm["name"] = "future_algorithm"
     algorithm["description"] = "A runtime-discovered algorithm. " * 20 + "\n\nArgs:\n..."
-    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    catalog_file.write_text(json.dumps(image_catalog))
     data = client.get(BASE, headers=HEADERS).json()["algorithms"][0]
     assert data["name"] == "future_algorithm"
     assert len(data["description"]) <= 240
@@ -310,7 +302,7 @@ def test_new_algorithms_remain_discoverable_without_hardcoding(
 
 @pytest.mark.parametrize("python_only", [False, True])
 def test_required_and_python_only_arguments_do_not_produce_invented_requests(
-    client: TestClient, catalog_configmap, image_catalog: dict, python_only: bool
+    client: TestClient, catalog_file, image_catalog: dict, python_only: bool
 ) -> None:
     schema = image_catalog["algorithms"][2]["parameter_schema"]
     if python_only:
@@ -318,7 +310,7 @@ def test_required_and_python_only_arguments_do_not_produce_invented_requests(
     else:
         schema["properties"]["new_required_argument"] = {"type": "string"}
         schema["required"].append("new_required_argument")
-    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    catalog_file.write_text(json.dumps(image_catalog))
     data = client.get(BASE + "/lora_sft", headers=HEADERS).json()
     assert "example_request" not in data
     if python_only:
@@ -346,53 +338,18 @@ def test_nullable_conversion_preserves_parameter_descriptor_property_names() -> 
     assert json_schema({"type": "integer", "nullable": True}) == {"type": ["integer", "null"]}
 
 
-def test_catalog_reads_use_verified_caller_and_fixed_configmap(client, catalog_configmap):
+def test_catalog_reads_do_not_need_caller_configmap_permissions(client, monkeypatch):
+    from training_service import kubernetes_client
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Discovery must not contact Kubernetes to read the catalog")
+
+    monkeypatch.setattr(kubernetes_client.client, "CoreV1Api", unexpected)
     assert client.get(BASE, headers=HEADERS).status_code == 200
-    api = catalog_configmap.factory.call_args.args[0]
-    assert api.configuration.api_key["authorization"] == HEADERS["Authorization"]
-    assert api.configuration.verify_ssl is True
-    assert api.configuration.refresh_api_key_hook is None
-    catalog_configmap.core.read_namespaced_config_map.assert_called_once_with(
-        name="runtime-algorithms", namespace="service-project", _request_timeout=(5, 15)
-    )
 
 
-@pytest.mark.parametrize(
-    "status,expected,code",
-    [
-        (401, 401, "unauthorized"),
-        (403, 403, "forbidden"),
-        (404, 503, "backend_unavailable"),
-        (500, 503, "backend_unavailable"),
-    ],
-)
-@pytest.mark.parametrize("suffix", ["", "/lora_sft"])
-def test_kubernetes_errors_preserve_envelope(
-    client, catalog_configmap, status, expected, code, suffix
-):
-    catalog_configmap.core.read_namespaced_config_map.side_effect = ApiException(
-        status=status, reason="private raw upstream response"
-    )
-    response = client.get(BASE + suffix, headers=HEADERS)
-    assert response.status_code == expected
-    assert response.json()["code"] == code
-    assert "private raw" not in response.text
-    component_validator("ErrorResponse").validate(response.json())
-    if status == 401:
-        assert response.headers["www-authenticate"] == "Bearer"
-
-
-@pytest.mark.parametrize("error", [OSError("private host"), HTTPError("private TLS detail")])
-def test_kubernetes_network_failure(client, catalog_configmap, error):
-    catalog_configmap.core.read_namespaced_config_map.side_effect = error
-    response = client.get(BASE, headers=HEADERS)
-    assert response.status_code == 503
-    assert response.json()["code"] == "backend_unavailable"
-    assert "private" not in response.text
-
-
-def test_empty_catalog_is_successful(client, catalog_configmap):
-    catalog_configmap.data["catalog.json"] = '{"algorithms":[]}'
+def test_empty_catalog_is_successful(client, catalog_file):
+    catalog_file.write_text('{"algorithms":[]}')
     response = client.get(BASE, headers=HEADERS)
     assert response.status_code == 200
     assert response.json() == {"algorithms": []}
@@ -409,14 +366,11 @@ def test_catalog_validation_uses_explicit_image_over_process_environment(
     assert error.value.status_code == 503
 
 
-@pytest.mark.parametrize(
-    "variable", ["TRAINING_SERVICE_CATALOG_NAMESPACE", "TRAINING_SERVICE_CATALOG_NAME"]
-)
-def test_unconfigured_catalog_is_actionable(client, monkeypatch, variable):
-    monkeypatch.delenv(variable)
+def test_unconfigured_catalog_is_actionable(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRAINING_SERVICE_CATALOG_PATH", str(tmp_path / "missing.json"))
     response = client.get(BASE, headers=HEADERS)
     assert response.status_code == 503
-    assert "configure TRAINING_SERVICE_CATALOG_" in response.json()["message"]
+    assert "discover-algorithms" in response.json()["message"]
 
 
 @pytest.mark.parametrize(
@@ -444,13 +398,13 @@ def test_duplicate_algorithm_names_rejected(image_catalog):
         catalog.validate_catalog(image_catalog)
 
 
-def test_discovery_never_fetches_remote_schema_references(client, catalog_configmap, image_catalog):
+def test_discovery_never_fetches_remote_schema_references(client, catalog_file, image_catalog):
     schema = image_catalog["algorithms"][2]["parameter_schema"]
     schema["properties"]["learning_rate"] = {
         "$ref": "https://invalid.example/private-schema",
         "example": 0.001,
     }
-    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    catalog_file.write_text(json.dumps(image_catalog))
     response = client.get(BASE + "/lora_sft?include=parameter_schema", headers=HEADERS)
     assert response.status_code == 200
     assert "example_request" not in response.json()
@@ -458,28 +412,135 @@ def test_discovery_never_fetches_remote_schema_references(client, catalog_config
     assert response.json()["parameter_schema"] == schema
 
 
-def test_boolean_native_schemas_do_not_break_readable_details(
-    client, catalog_configmap, image_catalog
-):
+def test_boolean_native_schemas_do_not_break_readable_details(client, catalog_file, image_catalog):
     schema = image_catalog["algorithms"][2]["parameter_schema"]
     schema["properties"]["future_argument"] = True
     schema["properties"]["learning_rate"] = {"anyOf": [False, {"type": "number"}]}
-    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    catalog_file.write_text(json.dumps(image_catalog))
     response = client.get(BASE + "/lora_sft", headers=HEADERS)
     assert response.status_code == 200
     assert response.json()["parameters"]["future_argument"]["type"] == "any"
 
 
-def test_non_ray_algorithms_are_discoverable(client, catalog_configmap, image_catalog):
+def test_non_ray_algorithms_are_discoverable(client, catalog_file, image_catalog):
     image_catalog["algorithms"][0]["supported_backends"] = ["trainer"]
-    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    catalog_file.write_text(json.dumps(image_catalog))
     response = client.get(BASE, headers=HEADERS)
     assert response.status_code == 200
     assert response.json()["algorithms"][0]["supported_backends"] == ["trainer"]
 
 
-def test_parameter_zero_default_is_not_lost(client, catalog_configmap, image_catalog):
+def test_parameter_zero_default_is_not_lost(client, catalog_file, image_catalog):
     image_catalog["algorithms"][2]["parameter_schema"]["properties"]["warmup_steps"]["default"] = 0
-    catalog_configmap.data["catalog.json"] = json.dumps(image_catalog)
+    catalog_file.write_text(json.dumps(image_catalog))
     response = client.get(BASE + "/lora_sft", headers=HEADERS)
     assert response.json()["parameters"]["warmup_steps"]["default"] == 0
+
+
+@pytest.mark.parametrize("name", ["sft", "osft", "lora_sft", "grpo", "lora_grpo"])
+def test_submission_uses_the_same_schema_as_discovery(client, image_catalog, name):
+    details = client.get(BASE + "/" + name + "?include=parameter_schema", headers=HEADERS).json()
+    parameters = {"learning_rate": 0.0001, "warmup_steps": 0}
+    if name == "osft":
+        parameters.update(
+            unfreeze_rank_ratio=0.5,
+            effective_batch_size=2,
+            max_tokens_per_gpu=128,
+            max_seq_len=128,
+        )
+    Draft202012Validator(details["parameter_schema"]).validate(parameters)
+    catalog.validate_parameters(name, parameters, "ray")
+    # Defaults stay owned by Training Hub, not filled in by validation.
+    assert "backend" not in parameters
+    assert "num_epochs" not in parameters
+
+
+def test_submission_rejects_an_incompatible_execution_backend(client):
+    with pytest.raises(ApiError, match="execution backend 'trainer'"):
+        catalog.validate_parameters("lora_sft", {}, "trainer")
+
+
+@pytest.mark.parametrize(
+    "name,parameters,mentions",
+    [
+        ("missing_algo", {}, ["missing_algo", "Available algorithms"]),
+        ("lora_sft", {"not_in_old_image": 1}, ["lora_sft", "not_in_old_image"]),
+        ("lora_sft", {"learning_rate": "private-value"}, ["learning_rate", "lora_sft"]),
+        ("lora_sft", {"num_epochs": True}, ["num_epochs", "lora_sft"]),
+        ("lora_sft", {"backend": "verl"}, ["backend", "lora_sft"]),
+        ("lora_sft", {"trust_remote_code": True}, ["trust_remote_code", "lora_sft"]),
+        ("osft", {}, ["Missing required", "unfreeze_rank_ratio", "osft"]),
+        ("lora_sft", {"model_path": "/escape"}, ["model_path", "lora_sft"]),
+        ("grpo", {"reward_fn": "python"}, ["reward_fn", "grpo"]),
+    ],
+)
+def test_incompatible_submission_is_actionable(client, name, parameters, mentions):
+    with pytest.raises(ApiError) as raised:
+        catalog.validate_parameters(name, parameters, "ray")
+    assert raised.value.status_code == 422
+    assert raised.value.code == "validation_error"
+    for text in mentions:
+        assert text in raised.value.message
+    assert "private-value" not in raised.value.message
+
+
+def test_old_image_can_omit_an_algorithm_and_parameter(client, catalog_file, image_catalog):
+    image_catalog["algorithms"] = [a for a in image_catalog["algorithms"] if a["name"] != "grpo"]
+    schema = image_catalog["algorithms"][1]["parameter_schema"]
+    assert image_catalog["algorithms"][1]["name"] == "lora_sft"
+    schema["properties"].pop("warmup_steps")
+    catalog_file.write_text(json.dumps(image_catalog))
+    names = {a["name"] for a in client.get(BASE, headers=HEADERS).json()["algorithms"]}
+    assert "grpo" not in names
+    with pytest.raises(ApiError, match="grpo"):
+        catalog.validate_parameters("grpo", {}, "ray")
+    with pytest.raises(ApiError, match="warmup_steps"):
+        catalog.validate_parameters("lora_sft", {"warmup_steps": 0}, "ray")
+
+
+@pytest.mark.parametrize("python_only", ["unavailable_required_parameters", "api_callable"])
+def test_python_only_modes_cannot_be_submitted(client, catalog_file, image_catalog, python_only):
+    metadata = image_catalog["algorithms"][2]["parameter_schema"]["x-training-hub"]
+    metadata[python_only] = (
+        ["rollout_fn"] if python_only == "unavailable_required_parameters" else False
+    )
+    catalog_file.write_text(json.dumps(image_catalog))
+    with pytest.raises(ApiError, match="Python interface"):
+        catalog.validate_parameters("lora_sft", {}, "ray")
+
+
+def test_submission_never_retrieves_remote_schema(client, catalog_file, image_catalog, monkeypatch):
+
+    schema = image_catalog["algorithms"][2]["parameter_schema"]
+    schema["properties"]["learning_rate"] = {"$ref": "https://invalid.example/schema"}
+    catalog_file.write_text(json.dumps(image_catalog))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Schema validation must never make an outbound request")
+
+    monkeypatch.setattr("urllib.request.urlopen", unexpected)
+    with pytest.raises(ApiError) as raised:
+        catalog.validate_parameters("lora_sft", {"learning_rate": 0.001}, "ray")
+    assert raised.value.status_code == 503
+
+
+def test_readiness_and_discovery_share_cached_startup_catalog(catalog_file):
+    with TestClient(create_app(Authenticator())) as http:
+        assert http.get("/readyz").status_code == 200
+        before = http.get(BASE, headers=HEADERS).json()
+        catalog_file.unlink()
+        assert http.get("/readyz").status_code == 200
+        assert http.get(BASE, headers=HEADERS).json() == before
+        assert catalog._load_catalog.cache_info().misses == 1
+
+
+def test_startup_failure_keeps_health_but_not_readiness(catalog_file):
+    catalog_file.write_text("invalid-json")
+    with TestClient(create_app(Authenticator())) as http:
+        assert http.get("/healthz").status_code == 200
+        assert http.get("/docs").status_code == 200
+        response = http.get("/readyz")
+        assert response.status_code == 503
+        assert response.json()["code"] == "backend_unavailable"
+        assert "discover-algorithms" in response.json()["message"]
+        assert http.get(BASE, headers=HEADERS).status_code == 503
