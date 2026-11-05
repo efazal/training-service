@@ -11,6 +11,7 @@ from pydantic import ConfigDict
 
 from training_service.contract import ContractModel
 from training_service_api.models.algorithm_descriptor import AlgorithmDescriptor
+from training_service_api.models.algorithm_runtime import AlgorithmRuntime
 
 
 class ListAlgorithms200Response(ContractModel):
@@ -20,6 +21,7 @@ class ListAlgorithms200Response(ContractModel):
     """
 
     algorithms: list[AlgorithmDescriptor]
+    runtime: AlgorithmRuntime | None = None
 
     model_config = ConfigDict(
         populate_by_name=True,

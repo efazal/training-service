@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
-from pydantic import ConfigDict, Field, StrictStr, field_validator
+from pydantic import ConfigDict, Field, StrictStr
 
 from training_service.contract import ContractModel
 
@@ -19,23 +19,11 @@ class AlgorithmDescriptor(ContractModel):
     """
 
     name: StrictStr = Field(json_schema_extra={"examples": ["lora_sft"]})
-    description: StrictStr | None = Field(
-        default=None, json_schema_extra={"examples": ["Low-Rank Adaptation Supervised Fine-Tuning"]}
+    description: Annotated[str, Field(strict=True, max_length=240)] = Field(
+        json_schema_extra={"examples": ["Supervised fine-tuning using LoRA adapters."]}
     )
     supported_backends: list[StrictStr] = Field(json_schema_extra={"examples": [["ray"]]})
-    parameter_schema: dict[str, Any] = Field(
-        description=(
-            "JSON Schema for parameters accepted by this algorithm in the configured image."
-        )
-    )
-
-    @field_validator("supported_backends")
-    def supported_backends_validate_enum(cls, value):
-        """Validates the enum"""
-        for i in value:
-            if i not in ("ray",):
-                raise ValueError("each list item must be one of ('ray')")
-        return value
+    details_url: StrictStr = Field(json_schema_extra={"examples": ["/api/v1/algorithms/lora_sft"]})
 
     model_config = ConfigDict(
         populate_by_name=True,

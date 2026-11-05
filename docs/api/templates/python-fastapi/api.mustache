@@ -66,6 +66,11 @@ async def {{operationId}}(
     {{#vendorExtensions.x-project-authorization}}
     request: Request,
     {{/vendorExtensions.x-project-authorization}}
+    {{#vendorExtensions.x-request-context}}
+    {{^vendorExtensions.x-project-authorization}}
+    request: Request,
+    {{/vendorExtensions.x-project-authorization}}
+    {{/vendorExtensions.x-request-context}}
     {{#vendorExtensions.x-submission-context}}
     response: Response,
     {{/vendorExtensions.x-submission-context}}

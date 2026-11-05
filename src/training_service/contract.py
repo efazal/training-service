@@ -33,7 +33,6 @@ def contract_document() -> dict[str, Any]:
         for operation in path.values():
             if isinstance(operation, dict) and operation.get("operationId") in {
                 "estimateTrainingJob",
-                "listAlgorithms",
                 "listQueues",
             }:
                 operation["responses"]["501"] = {
@@ -53,8 +52,16 @@ def json_schema(value: Any) -> Any:
         return [json_schema(item) for item in value]
     if not isinstance(value, dict):
         return value
-    result = {key: json_schema(item) for key, item in value.items() if key != "nullable"}
-    if value.get("nullable") and "type" in result:
+    result = {
+        key: (
+            {name: json_schema(schema) for name, schema in item.items()}
+            if key == "properties"
+            else json_schema(item)
+        )
+        for key, item in value.items()
+        if key != "nullable"
+    }
+    if value.get("nullable") is True and isinstance(result.get("type"), str):
         result["type"] = [result["type"], "null"]
     return result
 

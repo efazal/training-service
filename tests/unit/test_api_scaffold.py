@@ -33,6 +33,7 @@ def test_all_generated_routes_fail_closed_without_backend_implementations() -> N
     }
     cases = (
         ("get", "/algorithms", None),
+        ("get", "/algorithms/example", None),
         ("get", "/projects/example/queues", None),
         ("post", "/training-jobs/estimate", estimate),
         ("get", "/projects/example/training-jobs", None),
@@ -42,12 +43,17 @@ def test_all_generated_routes_fail_closed_without_backend_implementations() -> N
         ("get", "/projects/example/training-jobs/example/logs", None),
     )
     expected = {
-        (method, path.replace("{project}", "example").replace("{job_id}", "example"))
+        (
+            method,
+            path.replace("{project}", "example")
+            .replace("{job_id}", "example")
+            .replace("{name}", "example"),
+        )
         for path, item in load_contract()["paths"].items()
         for method, operation in item.items()
         if isinstance(operation, dict) and operation.get("operationId")
     }
-    assert len(expected) == 8
+    assert len(expected) == 9
     assert {(method, path) for method, path, _ in cases} == expected
     for method, path, body in cases:
         response = client.request(method, "/api/v1" + path, json=body)

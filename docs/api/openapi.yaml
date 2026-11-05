@@ -67,18 +67,22 @@ paths:
 
   /algorithms:
     get:
-      summary: List available Ray training algorithms
+      summary: List algorithms in the configured runtime catalog
       description: >
         Read-only submission helper. Uses Kubernetes APIs directly under the
         caller's identity to discover the catalog and parameter schemas exposed
-        by the configured Ray Universal Image for this deployment. The catalog
+        by the configured runtime image for this deployment. The catalog
         is release- and image-specific; it is not a universal hardcoded list.
+        Returns compact summaries; follow details_url for parameters and a POST
+        example when supported. Runtime availability does not imply that every
+        algorithm is accepted by this version's training submission endpoint.
       operationId: listAlgorithms
+      x-request-context: true
       tags:
         - Infrastructure & Discovery
       responses:
         '200':
-          description: Configured-image catalog of available algorithms and hyperparameter schemas
+          description: Compact algorithm summaries; an empty catalog returns an empty algorithms array
           content:
             application/json:
               schema:
@@ -90,12 +94,57 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/AlgorithmDescriptor'
+                  runtime:
+                    $ref: '#/components/schemas/AlgorithmRuntime'
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
           $ref: '#/components/responses/503OpenShiftUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
+
+  /algorithms/{name}:
+    get:
+      summary: Get readable algorithm parameters and an optional submission example
+      description: >
+        Reads the same deployment-scoped Kubernetes ConfigMap using the caller's
+        identity. Returns parameter types, descriptions, defaults when known,
+        and required parameters. Native JSON Schema is returned only when
+        include=parameter_schema is requested. Examples are illustrative, not
+        defaults or a guarantee of model, dataset or GPU compatibility.
+      operationId: getAlgorithm
+      x-request-context: true
+      tags:
+        - Infrastructure & Discovery
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: include
+          in: query
+          description: Opt into the complete native parameter validation schema.
+          schema:
+            type: string
+            enum: [parameter_schema]
+      responses:
+        '200':
+          description: Readable algorithm details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlgorithmDetails'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+        '401':
+          $ref: '#/components/responses/401Unauthorized'
+        '403':
+          $ref: '#/components/responses/403Forbidden'
+        '404':
+          $ref: '#/components/responses/404NotFound'
+        '503':
+          $ref: '#/components/responses/503OpenShiftUnavailable'
 
   /projects/{project}/training-jobs:
     post:
@@ -1378,23 +1427,80 @@ components:
 
     AlgorithmDescriptor:
       type: object
-      required: [name, supported_backends, parameter_schema]
+      required: [name, description, supported_backends, details_url]
       properties:
         name:
           type: string
           example: lora_sft
         description:
           type: string
-          example: Low-Rank Adaptation Supervised Fine-Tuning
+          maxLength: 240
+          example: Supervised fine-tuning using LoRA adapters.
         supported_backends:
           type: array
           items:
             type: string
-            enum: [ray]
           example: ["ray"]
-        parameter_schema:
-          type: object
-          description: JSON Schema for parameters accepted by this algorithm in the configured image.
+        details_url:
+          type: string
+          example: /api/v1/algorithms/lora_sft
+
+    AlgorithmRuntime:
+      type: object
+      required: [image, training_hub_version, registry_sha256]
+      properties:
+        image:
+          type: string
+        training_hub_version:
+          type: string
+        registry_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+
+    AlgorithmParameter:
+      type: object
+      required: [type, description]
+      properties:
+        type:
+          type: string
+        description:
+          type: string
+        nullable:
+          type: boolean
+        default: {}
+        example: {}
+        choices:
+          type: array
+          items: {}
+
+    AlgorithmDetails:
+      allOf:
+        - $ref: '#/components/schemas/AlgorithmDescriptor'
+        - type: object
+          required: [required_parameters, parameters, parameter_schema_url, notes]
+          properties:
+            required_parameters:
+              type: array
+              items:
+                type: string
+            parameters:
+              type: object
+              additionalProperties:
+                $ref: '#/components/schemas/AlgorithmParameter'
+            example_request:
+              type: object
+              description: Complete illustrative POST request, present only when the current contract accepts it.
+            parameter_schema_url:
+              type: string
+            parameter_schema:
+              type: object
+              description: Exact native schema; present only with include=parameter_schema.
+            runtime:
+              $ref: '#/components/schemas/AlgorithmRuntime'
+            notes:
+              type: array
+              items:
+                type: string
 
     ErrorResponse:
       type: object

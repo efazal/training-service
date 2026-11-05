@@ -4,9 +4,11 @@
 
 from typing import Annotated, ClassVar
 
+from fastapi import Request
 from pydantic import Field, StrictStr
 
 from training_service.errors import ApiError
+from training_service_api.models.algorithm_details import AlgorithmDetails
 from training_service_api.models.extra_models import TokenModel
 from training_service_api.models.list_algorithms200_response import ListAlgorithms200Response
 from training_service_api.models.queue_info_response import QueueInfoResponse
@@ -33,8 +35,22 @@ class BaseInfrastructureDiscoveryApi:
     async def list_algorithms(
         self,
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> ListAlgorithms200Response:
-        """List available Ray training algorithms"""
+        """List algorithms in the configured runtime catalog"""
+        raise ApiError(501, "not_implemented", "This operation is not implemented.")
+
+    async def get_algorithm(
+        self,
+        name: StrictStr,
+        include: Annotated[
+            StrictStr | None,
+            Field(description="Opt into the complete native parameter validation schema."),
+        ],
+        token_OpenShiftBearer: TokenModel,
+        request: Request,
+    ) -> AlgorithmDetails:
+        """Get readable algorithm parameters and an optional submission example"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def list_queues(

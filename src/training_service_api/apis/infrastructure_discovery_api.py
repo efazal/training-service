@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import (
     APIRouter,
     Path,
+    Query,
     Request,
     Security,
 )
@@ -19,6 +20,7 @@ from training_service.authorization import authorize_project_request
 from training_service_api.apis.infrastructure_discovery_api_base import (
     BaseInfrastructureDiscoveryApi,
 )
+from training_service_api.models.algorithm_details import AlgorithmDetails
 from training_service_api.models.error_response import ErrorResponse
 from training_service_api.models.extra_models import TokenModel
 from training_service_api.models.list_algorithms200_response import ListAlgorithms200Response
@@ -38,7 +40,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
         200: {
             "model": ListAlgorithms200Response,
             "description": (
-                "Configured-image catalog of available algorithms and hyperparameter schemas"
+                "Compact algorithm summaries; an empty catalog returns an empty algorithms array"
             ),
         },
         401: {
@@ -57,17 +59,73 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
         },
     },
     tags=["Infrastructure &amp; Discovery"],
-    summary="List available Ray training algorithms",
+    summary="List algorithms in the configured runtime catalog",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
 async def list_algorithms(
+    request: Request,
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> ListAlgorithms200Response:
-    """List available Ray training algorithms"""
+    """List algorithms in the configured runtime catalog"""
     implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.list_algorithms(
-        token_OpenShiftBearer=token_OpenShiftBearer,
+        token_OpenShiftBearer=token_OpenShiftBearer, request=request
+    )
+
+
+@router.get(
+    "/algorithms/{name}",
+    responses={
+        200: {"model": AlgorithmDetails, "description": "Readable algorithm details"},
+        400: {
+            "model": ErrorResponse,
+            "description": "Malformed JSON or invalid query/path parameter syntax",
+        },
+        401: {
+            "model": ErrorResponse,
+            "description": "Missing, invalid, or expired OpenShift bearer token",
+        },
+        403: {
+            "model": ErrorResponse,
+            "description": (
+                "User lacks OpenShift RBAC permissions for the requested resource or project"
+            ),
+        },
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "Target project, RayJob, or referenced project resource does not exist "
+                "in the requested scope"
+            ),
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
+        },
+    },
+    tags=["Infrastructure &amp; Discovery"],
+    summary="Get readable algorithm parameters and an optional submission example",
+    response_model_by_alias=True,
+    response_model_exclude_unset=True,
+)
+async def get_algorithm(
+    request: Request,
+    name: StrictStr = Path(..., description=""),
+    include: Annotated[
+        StrictStr | None,
+        Field(description="Opt into the complete native parameter validation schema."),
+    ] = Query(
+        None,
+        description="Opt into the complete native parameter validation schema.",
+        alias="include",
+    ),
+    token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
+) -> AlgorithmDetails:
+    """Get readable algorithm parameters and an optional submission example"""
+    implementation = BaseInfrastructureDiscoveryApi.implementation()
+    return await implementation.get_algorithm(
+        name, include, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
 
 

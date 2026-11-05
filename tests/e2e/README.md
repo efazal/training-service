@@ -212,9 +212,11 @@ The [namespace manifest](fixtures/namespace.yaml) includes
 unique E2E ownership label. It creates LocalQueue `e2e` backed by the existing
 ClusterQueue `default` (override with `--cluster-queue`), a 5Gi RWX PVC and a
 fixture/verifier pod. The pod downloads a pinned public Qwen2.5-0.5B-Instruct
-revision and prepares eight chat examples plus twelve math examples; training
-uses PVC references and
-needs no HF token. The generated request and manifests are saved with results.
+revision and prepares eight chat examples plus twelve math examples; training uses PVC references and
+needs no HF token. The runner exports the runtime's Training Hub registry into
+a test-owned ConfigMap, configures algorithm discovery in Helm, and checks the
+compact list, details, schema opt-in, examples and error responses. The generated
+request and manifests (including the catalog) are saved with results.
 The fixture pod uses the new namespace's OpenShift-allocated `fsGroup` so the CSI
 driver can grant non-root access to its new PVC; no privileged/root setup pod or
 shared storage permission change is used. A write check runs before the download.

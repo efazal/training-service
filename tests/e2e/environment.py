@@ -1,5 +1,6 @@
 """Create only isolated E2E fixtures; never reconcile shared DSC/queue policy."""
 
+import base64
 import hashlib
 import json
 import os
@@ -418,6 +419,44 @@ class RunEnvironment:
         args.job_file = jobfile
         args.artifact_pod = "e2e-output-verifier"
         args.artifact_container = "verifier"
+
+    def provision_catalog(self):
+        """Export authentic registry metadata from our runtime verifier, without a GPU."""
+        from training_service.catalog import validate_catalog
+        from training_service.errors import ApiError
+
+        print("Discovering Training Hub algorithms from the configured runtime image", flush=True)
+        exporter = FIXTURES.parents[2] / "scripts" / "export_algorithm_catalog.py"
+        encoded = base64.b64encode(exporter.read_bytes()).decode("ascii")
+        raw = self.command(
+            [
+                "oc",
+                "exec",
+                "-n",
+                self.args.namespace,
+                "e2e-output-verifier",
+                "-c",
+                "verifier",
+                "--",
+                "python",
+                "-c",
+                "import base64; exec(base64.b64decode('" + encoded + "'))",
+                self.args.runtime_image,
+            ],
+            timeout=120,
+        )
+        try:
+            payload = validate_catalog(json.loads(raw))
+        except (ValueError, ApiError) as error:
+            raise RuntimeError(
+                "Runtime algorithm export did not produce a valid catalog"
+            ) from error
+        self.create(
+            "algorithm-catalog.yaml",
+            self.resource(
+                "ConfigMap", "e2e-algorithms", data={"catalog.json": json.dumps(payload)}
+            ),
+        )
 
     def cleanup(self, release, deployed, evidence):
         """Remove only our fresh namespace, after uninstalling cluster-scoped Helm resources."""

@@ -37,6 +37,12 @@ writableTemp:
   enabled: true
   sizeLimit: 512Mi
 
+# Existing ConfigMap with catalog.json from the selected training runtime.
+# Reads use the caller's identity, not the service account. See docs/algorithm-discovery.md.
+algorithmCatalog:
+  name: ""
+  namespace: "" # defaults to the Helm release namespace
+
 # For example, mount a ConfigMap containing the trusted Ray gateway CA.
 volumes: []
 volumeMounts: []
