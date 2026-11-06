@@ -12,7 +12,7 @@ Unknown names return `404 not_found`; invalid `include` returns `400 bad_request
 
 ## Configure a deployment
 
-The chart defaults to public `quay.io/modh/ray:2.58.0-py312-cu129-th081` for the
+The chart defaults to public `quay.io/modh/ray:2.58.0-py312-cu130-th0112` for the
 runtime and enables an HTTPS OpenShift Route. Catalog setup is automatic. The
 intended API default, `quay.io/modh/training-service:0.1.0`, still needs verified
 public publication by a `modh` maintainer. Until then, supply an available API

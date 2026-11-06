@@ -92,7 +92,7 @@ image:
   repository: quay.io/modh/training-service
   tag: "0.1.0"
 trainingRuntime:
-  image: quay.io/modh/ray:2.58.0-py312-cu129-th081
+  image: quay.io/modh/ray:2.58.0-py312-cu130-th0112
 route:
   enabled: true
 ```

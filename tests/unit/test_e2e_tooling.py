@@ -1331,7 +1331,7 @@ def test_chart_organization_image_and_route_defaults(route_enabled):
     pod = deployment["spec"]["template"]["spec"]
     api = pod["containers"][0]
     assert api["image"] == "quay.io/modh/training-service:0.1.0"
-    runtime = "quay.io/modh/ray:2.58.0-py312-cu129-th081"
+    runtime = "quay.io/modh/ray:2.58.0-py312-cu130-th0112"
     assert pod["initContainers"][0]["image"] == runtime
     assert [e for e in api["env"] if e["name"] == "TRAINING_RAY_IMAGE"] == [
         {"name": "TRAINING_RAY_IMAGE", "value": runtime}
