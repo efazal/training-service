@@ -4,13 +4,14 @@
 Generation does not modify its endpoints or schemas. The POST-only
 `x-submission-context` vendor extension controls generated dispatch and
 response handling without changing the public wire schema.
-Algorithm-specific parameter validation lives in
-`src/training_service/algorithm_parameter_schemas.yaml` instead of the public
+Algorithm-specific parameter validation reads the startup-generated `catalog.json`
+shared with algorithm discovery, rather than a static YAML schema or the public
 contract. The OpenAPI request keeps a generic `algorithm.parameters` object;
-future algorithm discovery can replace the service-owned catalog without
-regenerating API models for every backend parameter change.
+changing the training runtime does not require regenerating API models for
+every backend parameter change. Execution adapters retain resource and
+cross-parameter safety checks.
 
-Generate with a running Podman or Docker engine:
+Generate with a running Podman engine:
 
 ```bash
 make generate-server
@@ -37,7 +38,7 @@ and focused unit tests verify request examples round-trip unchanged.
 
 Authentication, project authorization, submission, job reads, driver logs,
 and terminal deletion are handwritten outside the generated tree. Algorithm
-and queue discovery and estimation remain fail-closed with `501`.
+discovery is implemented; queue discovery and estimation remain fail-closed with `501`.
 
 The POST-only `x-submission-context` preserves the 202 status and Location
 header. Operations marked `x-request-context` also receive the authenticated

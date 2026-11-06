@@ -1,6 +1,7 @@
 """One runtime catalog for discovery, readiness, and submission validation."""
 
 import json
+import math
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -119,6 +120,16 @@ def read_catalog(request: Request) -> dict[str, Any]:
     return load_catalog()
 
 
+def _finite(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_finite(item) for item in value.values())
+    if isinstance(value, list):
+        return all(_finite(item) for item in value)
+    return True
+
+
 def validate_parameters(
     name: str, parameters: dict[str, Any], backend: str, runtime_image: str | None = None
 ) -> None:
@@ -129,6 +140,8 @@ def validate_parameters(
     def invalid(reason: str) -> ApiError:
         return ApiError(422, "validation_error", reason)
 
+    if not _finite(parameters):
+        raise invalid("Algorithm parameters must be finite.")
     if algorithm is None:
         available = ", ".join(item["name"] for item in payload["algorithms"]) or "none"
         raise invalid(

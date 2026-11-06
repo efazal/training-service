@@ -320,8 +320,8 @@ def test_algorithm_parameters_rejected_before_submission(
     bad_values = {
         "sft": {"num_epochs": "one"},
         "osft": {"unfreeze_rank_ratio": "half"},
-        "lora_sft": {"logging_steps": 0},
-        "lora_grpo": {"group_size": 0},
+        "lora_sft": {"logging_steps": "one"},
+        "lora_grpo": {"group_size": "four"},
     }
     parameters = (
         {"not_a_training_hub_parameter": 1} if invalid == "unsupported" else bad_values[algorithm]

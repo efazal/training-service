@@ -12,7 +12,7 @@ Unknown names return `404 not_found`; invalid `include` returns `400 bad_request
 
 ## Configure a deployment
 
-The chart defaults to public `quay.io/modh/ray:2.55.1-py312-cu129-th081` for the
+The chart defaults to public `quay.io/modh/ray:2.58.0-py312-cu129-th081` for the
 runtime and enables an HTTPS OpenShift Route. Catalog setup is automatic. The
 intended API default, `quay.io/modh/training-service:0.1.0`, still needs verified
 public publication by a `modh` maintainer. Until then, supply an available API
@@ -51,6 +51,13 @@ invalid choices return `422 validation_error` before any workload resources are 
 Defaults remain owned by Training Hub. Python-only interfaces and callbacks are not
 JSON-submittable. Schema checks do not guarantee dataset compatibility, GPU fit or
 successful execution; model/data/storage and backend requirements still apply.
+The merged execution profiles remain `sft`, `osft`, `lora_sft`, and `lora_grpo`.
+An algorithm being present in Training Hub does not add an execution profile;
+runtime-only algorithms without one return `422` before Kubernetes access.
+Adapter checks for topology and incompatible parameter combinations still run,
+but no static parameter allowlist or fallback schema is used. Signature-derived
+schemas describe types/defaults, not numerical bounds absent from the runtime
+metadata. A newer runtime may add parameters without changing the API image.
 
 If export fails, Kubernetes will not start the API container. Inspect:
 

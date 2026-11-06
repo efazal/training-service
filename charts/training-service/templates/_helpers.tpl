@@ -25,7 +25,7 @@ Create a default fully qualified app name.
 {{- define "training-service.runtimeImage" -}}
 {{- $runtime := (.Values.trainingRuntime | default dict).image | default "" -}}
 {{/* Keep in sync with values.yaml: legacy env settings may override this default. */}}
-{{- $defaultRuntime := "quay.io/modh/ray:2.55.1-py312-cu129-th081" -}}
+{{- $defaultRuntime := "quay.io/modh/ray:2.58.0-py312-cu129-th081" -}}
 {{- range .Values.env -}}
 {{- if eq .name "TRAINING_RAY_IMAGE" -}}
 {{- if and $runtime (ne $runtime $defaultRuntime) -}}

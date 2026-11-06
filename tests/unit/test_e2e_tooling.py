@@ -54,8 +54,12 @@ def test_profiles_require_omitted_queue_and_explicit_selection(jobfile):
 
 
 @pytest.mark.parametrize("algorithm", ALGORITHMS)
-def test_algorithm_matrix_workloads_match_submission_validation(jobfile, algorithm):
-    from training_service.algorithm_parameters import validate_algorithm_parameters
+def test_algorithm_matrix_workloads_match_submission_validation(
+    jobfile, algorithm, runtime_catalog
+):
+    from training_service import catalog
+    from training_service.errors import ApiError
+    from training_service.jobs import validate_algorithm_parameters
     from training_service.ray_entrypoint import get_backend
 
     original = json.loads(jobfile.read_text())
@@ -64,6 +68,15 @@ def test_algorithm_matrix_workloads_match_submission_validation(jobfile, algorit
     assert original["algorithm"]["name"] == "lora_sft"
     assert payload["algorithm"]["name"] == algorithm
     assert payload["dataset"]["uri"].startswith("pvc://e2e-storage/datasets/")
+    if algorithm == "lora_grpo":
+        # The math profile needs a runtime that explicitly advertises reward_type.
+        with pytest.raises(ApiError, match="reward_type"):
+            validate_algorithm_parameters(algorithm, payload["algorithm"]["parameters"])
+        metadata = json.loads(runtime_catalog.read_text())
+        descriptor = next(a for a in metadata["algorithms"] if a["name"] == algorithm)
+        descriptor["parameter_schema"]["properties"]["reward_type"] = {"enum": ["math"]}
+        runtime_catalog.write_text(json.dumps(metadata))
+        catalog._load_catalog.cache_clear()
     parameters = validate_algorithm_parameters(algorithm, payload["algorithm"]["parameters"])
     resources = payload["resources"]
     get_backend(algorithm).validate_resources(
@@ -1318,7 +1331,7 @@ def test_chart_organization_image_and_route_defaults(route_enabled):
     pod = deployment["spec"]["template"]["spec"]
     api = pod["containers"][0]
     assert api["image"] == "quay.io/modh/training-service:0.1.0"
-    runtime = "quay.io/modh/ray:2.55.1-py312-cu129-th081"
+    runtime = "quay.io/modh/ray:2.58.0-py312-cu129-th081"
     assert pod["initContainers"][0]["image"] == runtime
     assert [e for e in api["env"] if e["name"] == "TRAINING_RAY_IMAGE"] == [
         {"name": "TRAINING_RAY_IMAGE", "value": runtime}
@@ -1404,7 +1417,9 @@ def test_chart_wires_training_runtime_image_once(tmp_path, legacy):
         e["name"] in {"TRAINING_SERVICE_CATALOG_NAME", "TRAINING_SERVICE_CATALOG_NAMESPACE"}
         for e in env
     )
-    mounted = pod["containers"][0]["volumeMounts"][0]
+    mounted = next(
+        m for m in pod["containers"][0]["volumeMounts"] if m["name"] == "training-algorithm-catalog"
+    )
     assert mounted["name"] == "training-algorithm-catalog" and mounted["readOnly"] is True
     exporter = next(d for d in yaml.safe_load_all(rendered) if d["kind"] == "ConfigMap")
     script = deploy.CHART / "files/export_algorithm_catalog.py"

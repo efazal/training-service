@@ -67,7 +67,7 @@ helm upgrade --install training-service ./charts/training-service \
 ```
 
 The service image and training image are separate settings. The chart defaults
-to public `quay.io/modh/ray:2.55.1-py312-cu129-th081`, matching the API's Ray pin
+to public `quay.io/modh/ray:2.58.0-py312-cu129-th081`, matching the API's Ray pin
 and including Training Hub 0.8.1. Override `trainingRuntime.image` when needed;
 the chart automatically discovers its algorithms and passes the image to the
 service internally. No `TRAINING_RAY_IMAGE` entry under `env` is needed. Legacy

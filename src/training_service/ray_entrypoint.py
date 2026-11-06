@@ -108,7 +108,7 @@ class SFTBackend(SingleNodeTrainingBackend):
 
     def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
         if parameters.get("is_pretraining"):
-            return {parameters.get("document_column_name", "document")}
+            return {parameters.get("document_column_name") or "document"}
         return {"messages"}
 
     def validate_parameters(self, values: dict[str, Any]) -> dict[str, Any]:
@@ -156,7 +156,7 @@ class OSFTBackend(SFTBackend):
             "eps",
             "weight_decay",
         ):
-            if key in values:
+            if values.get(key) is not None:
                 try:
                     converted = float(values[key])
                 except OverflowError:
@@ -220,8 +220,8 @@ class LoRAGRPOBackend(TrainingBackend):
         if gpu_type != "nvidia.com/gpu":
             raise ValueError("lora_grpo with verl requires NVIDIA GPUs.")
         parallelism = parameters.get("tensor_parallel_size", 1)
-        if parallelism > gpu_count or gpu_count % parallelism:
-            raise ValueError("tensor_parallel_size must divide gpus_per_node.")
+        if parallelism < 1 or parallelism > gpu_count or gpu_count % parallelism:
+            raise ValueError("tensor_parallel_size must be positive and divide gpus_per_node.")
         group_size = parameters.get("group_size", 8)
         prompt_batch_size = parameters.get("prompt_batch_size", 100)
         total_gpus = gpu_count * (num_nodes - 1)
@@ -311,7 +311,9 @@ def get_backend(name: str) -> TrainingBackend:
     try:
         return _BACKENDS[name]
     except KeyError as error:
-        raise ValueError("Unsupported Training Hub algorithm.") from error
+        raise ValueError(
+            f"Unsupported Training Hub algorithm '{name}': no execution profile."
+        ) from error
 
 
 def _secret(directory: str, key: str) -> str:

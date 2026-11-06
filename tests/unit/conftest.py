@@ -1,6 +1,11 @@
-"""A tiny exported runtime catalog for isolated API/backend tests."""
+"""A real exported catalog for isolated API/backend tests, never a production fallback.
+
+The snapshot comes from the retained Training Hub 0.8.1 discovery deployment;
+docstrings are omitted for size. Only the fake SDK's image identity is replaced.
+"""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -9,29 +14,9 @@ from training_service import catalog
 
 @pytest.fixture(autouse=True)
 def runtime_catalog(tmp_path_factory, monkeypatch):
-    payload = {
-        "runtime": {
-            "image": "quay.io/example/ray:2.55.1",
-            "training_hub_version": "0.8.1",
-            "registry_sha256": "a" * 64,
-        },
-        "algorithms": [
-            {
-                "name": "lora_sft",
-                "supported_backends": ["ray"],
-                "parameter_schema": {
-                    "type": "object",
-                    "properties": {
-                        "learning_rate": {"type": "number"},
-                        "num_epochs": {"type": "integer"},
-                        "effective_batch_size": {"type": "integer"},
-                        "max_seq_len": {"type": "integer"},
-                    },
-                    "additionalProperties": False,
-                },
-            }
-        ],
-    }
+    source = Path(__file__).parent / "fixtures/training-hub-0.8.1-catalog.json"
+    payload = json.loads(source.read_text())
+    payload["runtime"]["image"] = "quay.io/example/ray:2.58.0"
     # Keep unrelated tests' tmp_path empty (TLS/credential tests verify that).
     path = tmp_path_factory.mktemp("runtime-catalog") / "catalog.json"
     path.write_text(json.dumps(payload))

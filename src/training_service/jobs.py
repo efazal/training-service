@@ -158,17 +158,33 @@ def _parse_location(uri: str, *, output: bool = False) -> dict[str, str]:
     return {"scheme": scheme, "name": parsed.netloc, "path": path}
 
 
+def validate_algorithm_parameters(
+    name: str, parameters: dict[str, Any] | None, runtime_image: str | None = None
+) -> dict[str, Any]:
+    """Use the startup catalog for schema validation and retain execution-profile checks."""
+    values = dict(parameters or {})
+    catalog.validate_parameters(name, values, "ray", runtime_image)
+    try:
+        backend = get_backend(name)
+        selected = values.pop("backend", backend.backend_name)
+        if selected != backend.backend_name:
+            raise ValueError(
+                f"Algorithm '{name}' currently requires Training Hub backend "
+                f"'{backend.backend_name}' for its execution profile."
+            )
+        return backend.validate_parameters(values)
+    except ValueError as error:
+        raise _invalid(str(error)) from error
+
+
 def _validate_request(
     request: CreateJobRequest, runtime_image: str | None = None
 ) -> tuple[ResourceSpec, dict[str, Any]]:
     if request.backend not in (None, JobBackend.RAY):
         raise ApiError(501, "not_implemented", "Only the Ray backend is implemented.")
-    parameters = dict(request.algorithm.parameters or {})
-    catalog.validate_parameters(request.algorithm.name, parameters, "ray", runtime_image)
-    try:
-        parameters = get_backend(request.algorithm.name).validate_parameters(parameters)
-    except ValueError as error:
-        raise _invalid(str(error)) from error
+    parameters = validate_algorithm_parameters(
+        request.algorithm.name, request.algorithm.parameters, runtime_image
+    )
     if request.queue_name is not None and (
         len(request.queue_name) > 63 or not _NAME_PATTERN.fullmatch(request.queue_name)
     ):

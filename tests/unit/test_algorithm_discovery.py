@@ -461,6 +461,33 @@ def test_submission_rejects_an_incompatible_execution_backend(client):
 
 
 @pytest.mark.parametrize(
+    "definition, value",
+    [
+        ({"type": "number", "exclusiveMinimum": 0}, 0),
+        ({"type": "number", "maximum": 1}, 2),
+        ({"type": "string", "enum": ["supported"]}, "unsupported"),
+    ],
+)
+def test_submission_honors_constraints_supplied_by_the_runtime(
+    client, catalog_file, image_catalog, definition, value
+):
+    schema = image_catalog["algorithms"][2]["parameter_schema"]
+    schema["properties"]["runtime_option"] = definition
+    catalog_file.write_text(json.dumps(image_catalog))
+    with pytest.raises(ApiError, match="runtime_option") as raised:
+        catalog.validate_parameters("lora_sft", {"runtime_option": value}, "ray")
+    assert raised.value.status_code == 422
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nested_nonfinite_parameters_are_rejected(client, catalog_file, image_catalog, value):
+    image_catalog["algorithms"][2]["parameter_schema"]["properties"]["options"] = {"type": "object"}
+    catalog_file.write_text(json.dumps(image_catalog))
+    with pytest.raises(ApiError, match="finite"):
+        catalog.validate_parameters("lora_sft", {"options": {"threshold": [value]}}, "ray")
+
+
+@pytest.mark.parametrize(
     "name,parameters,mentions",
     [
         ("missing_algo", {}, ["missing_algo", "Available algorithms"]),

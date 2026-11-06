@@ -142,7 +142,8 @@ def get_algorithm(request: Request, name: str, include: str | None = None) -> di
         "Omitted parameters use runtime/backend defaults. Parameter examples, when supplied "
         "by the runtime schema, are illustrative and are not defaults.",
         "Submission validates algorithms and parameters against this runtime catalog. "
-        "Python-only interfaces and non-JSON parameters are not supported.",
+        "A supported execution profile is also required; runtime availability alone does "
+        "not enable submission. Python-only interfaces and non-JSON parameters are not supported.",
     ]
     metadata = schema.get("x-training-hub", {})
     if metadata.get("unavailable_required_parameters") or metadata.get("api_callable") is False:

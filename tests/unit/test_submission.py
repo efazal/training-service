@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -26,17 +27,14 @@ from huggingface_hub.errors import RepositoryNotFoundError
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-from training_service import hf_dataset, jobs, kubernetes_client, ray_entrypoint
+from training_service import catalog, hf_dataset, jobs, kubernetes_client, ray_entrypoint
 from training_service import jobs as submission
-from training_service.algorithm_parameters import (
-    load_algorithm_parameter_schemas,
-    validate_algorithm_parameters,
-)
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
 from training_service.dataset_preflight import validate_dataset_columns, validate_dataset_location
 from training_service.errors import ApiError
+from training_service.jobs import validate_algorithm_parameters
 from training_service.main import create_app
 from training_service.ray_entrypoint import _dataset_format, get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
@@ -143,7 +141,11 @@ def test_omitted_queue_is_not_invented_in_receipt() -> None:
         ("missing_name", "Missing required field: name."),
         ("extra_model_field", "Unsupported field: model.secret_ref."),
         ("wrong_resource_type", "resources.num_nodes must be an integer."),
-        ("unknown_parameter", "Unsupported lora_sft parameter: lora_rank."),
+        (
+            "unknown_parameter",
+            "Unsupported parameter(s) lora_rank for algorithm 'lora_sft' in the configured "
+            "training runtime. See GET /api/v1/algorithms/lora_sft.",
+        ),
     ],
 )
 def test_submission_errors_identify_safe_field_and_reason(change: str, expected: str) -> None:
@@ -174,9 +176,9 @@ def test_submission_errors_identify_safe_field_and_reason(change: str, expected:
 @pytest.mark.parametrize(
     "algorithm,parameters,expected",
     [
-        ("osft", {}, "Missing required osft parameter: unfreeze_rank_ratio."),
-        ("lora_sft", {"num_epochs": "three"}, "lora_sft.num_epochs must be an integer."),
-        ("lora_sft", {"learning_rate": 0}, "lora_sft.learning_rate must be greater than 0."),
+        ("osft", {}, "Missing required parameter(s):"),
+        ("lora_sft", {"num_epochs": "three"}, "Parameter 'num_epochs' must be integer or null."),
+        ("lora_sft", {"trust_remote_code": True}, "must match the runtime's allowed value(s)"),
     ],
 )
 def test_algorithm_parameter_errors_explain_the_constraint(
@@ -185,7 +187,8 @@ def test_algorithm_parameter_errors_explain_the_constraint(
     with pytest.raises(ApiError) as raised:
         validate_algorithm_parameters(algorithm, parameters)
     assert raised.value.status_code == 422
-    assert raised.value.message == expected
+    assert expected in raised.value.message
+    assert f"GET /api/v1/algorithms/{algorithm}" in raised.value.message
 
 
 def test_post_denied_or_unauthenticated_never_calls_submitter() -> None:
@@ -882,19 +885,23 @@ def test_unsupported_backend_and_unsafe_pvc_path_fail_before_sdk() -> None:
     assert raised.value.status_code == 422
 
 
-@pytest.mark.parametrize("name", ["sft", "osft", "lora_sft", "grpo", "lora_grpo"])
+@pytest.mark.parametrize("name", ["sft", "osft", "lora_sft", "lora_grpo"])
 def test_discovered_algorithm_is_forwarded_without_hardcoded_parameters(
     monkeypatch, runtime_catalog, name
 ):
     _mock_sdk(monkeypatch)
     metadata = json.loads(runtime_catalog.read_text())
-    algorithm = metadata["algorithms"][0]
-    algorithm["name"] = name
-    algorithm["parameter_schema"]["properties"]["warmup_steps"] = {"type": "integer"}
+    algorithm = next(item for item in metadata["algorithms"] if item["name"] == name)
+    algorithm["parameter_schema"]["properties"]["runtime_added_parameter"] = {"type": "integer"}
     runtime_catalog.write_text(json.dumps(metadata))
     body = _sample()
     body.algorithm.name = name
-    body.algorithm.parameters = {"warmup_steps": 0}
+    body.algorithm.parameters = {
+        **(_OSFT_EXAMPLE_PARAMETERS if name == "osft" else {}),
+        "runtime_added_parameter": 0,
+    }
+    if name == "lora_grpo":
+        body.resources.num_nodes = 2
     entrypoint = {}
 
     def record(configuration):
@@ -902,14 +909,14 @@ def test_discovered_algorithm_is_forwarded_without_hardcoded_parameters(
         return "python -c 'pass'"
 
     monkeypatch.setattr(jobs, "_entrypoint", record)
-    jobs.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
+    jobs.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "token"
     )
     assert entrypoint["algorithm"] == name
-    assert entrypoint["parameters"] == {"warmup_steps": 0}
+    assert entrypoint["parameters"] == body.algorithm.parameters
 
 
-@pytest.mark.parametrize("failure", ["algorithm", "parameter", "type", "catalog"])
+@pytest.mark.parametrize("failure", ["algorithm", "profile", "parameter", "type", "catalog"])
 def test_api_rejects_runtime_incompatibility_before_kubernetes(
     monkeypatch, runtime_catalog, failure
 ):
@@ -917,8 +924,15 @@ def test_api_rejects_runtime_incompatibility_before_kubernetes(
 
     body = _sample().model_dump(mode="json", exclude_unset=True)
     if failure == "algorithm":
+        metadata = json.loads(runtime_catalog.read_text())
+        metadata["algorithms"] = [a for a in metadata["algorithms"] if a["name"] != "sft"]
+        runtime_catalog.write_text(json.dumps(metadata))
+        body["algorithm"]["name"] = "sft"
+        context = "not available"
+    elif failure == "profile":
         body["algorithm"]["name"] = "grpo"
-        context = "grpo"
+        body["algorithm"]["parameters"] = {}
+        context = "no execution profile"
     elif failure == "parameter":
         body["algorithm"]["parameters"]["unsupported_in_old_image"] = 1
         context = "unsupported_in_old_image"
@@ -934,7 +948,7 @@ def test_api_rejects_runtime_incompatibility_before_kubernetes(
         create_app(
             FakeAuthenticator(),
             FakeAuthorizer(),
-            backend=jobs.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
+            backend=jobs.CodeFlareJobBackend("quay.io/example/ray:2.58.0"),
         )
     )
     response = http.post(
@@ -999,13 +1013,13 @@ def test_all_post_contract_examples_match_algorithm_validation() -> None:
         submission._validate_request(CreateJobRequest.model_validate(example["value"]))
 
 
-def test_parameter_schemas_match_registered_training_backends() -> None:
-    schemas = load_algorithm_parameter_schemas()
-    assert set(schemas) == set(ray_entrypoint._BACKENDS)
+def test_runtime_catalog_covers_registered_execution_profiles() -> None:
+    names = {item["name"] for item in catalog.load_catalog()["algorithms"]}
+    assert set(ray_entrypoint._BACKENDS) <= names
     algorithm_spec = load_contract()["components"]["schemas"]["AlgorithmSpec"]
     assert "x-parameter-schemas" not in algorithm_spec
     assert "properties" not in algorithm_spec["properties"]["parameters"]
-    for name in schemas:
+    for name in ray_entrypoint._BACKENDS:
         assert get_backend(name).name == name
     with pytest.raises(ValueError, match="Unsupported Training Hub algorithm"):
         get_backend("unreviewed_algorithm")
@@ -1021,7 +1035,7 @@ def test_head_local_algorithms_reject_unused_ray_workers_before_sdk(
     body.algorithm.parameters = _OSFT_EXAMPLE_PARAMETERS if algorithm == "osft" else {}
     body.resources.num_nodes = 2
     with pytest.raises(ApiError, match="num_nodes=1") as raised:
-        submission.CodeFlareJobBackend("image")._submit_sync(
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
             "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
         )
     assert raised.value.status_code == 422
@@ -1064,6 +1078,7 @@ def test_algorithm_parameters_cannot_override_platform_or_python_configuration(
 
 def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_catalog,
 ) -> None:
     # CodeFlare's vendored wrappers load a default kubeconfig in __init__ even
     # though RayJob immediately replaces their clients with the caller's client.
@@ -1091,6 +1106,9 @@ def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
 
     monkeypatch.setattr(client.CustomObjectsApi, "create_namespaced_custom_object", record_create)
     image = "quay.io/modh/ray:2.58.0-py312-cu129-th081"
+    metadata = json.loads(runtime_catalog.read_text())
+    metadata["runtime"]["image"] = image
+    runtime_catalog.write_text(json.dumps(metadata))
     identifier = submission.CodeFlareJobBackend(image)._submit_sync(
         "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
     )
@@ -1107,7 +1125,7 @@ def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
     assert spec["workerGroupSpecs"][0]["template"].spec.containers[0].image == image
     assert codeflare_auth.api_client is previous_client
 
-    with pytest.raises(ValueError, match="Cluster config image") as raised:
+    with pytest.raises(ApiError, match="does not match the runtime image") as raised:
         submission.CodeFlareJobBackend("quay.io/modh/ray:2.55.1-py312-cu129-th081")._submit_sync(
             "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
         )
@@ -1149,10 +1167,6 @@ def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
                 "lora_alpha": 8,
                 "learning_rate": 1e-5,
                 "gpu_memory_utilization": 0.2,
-                "param_offload": True,
-                "optimizer_offload": False,
-                "layered_summon": True,
-                "language_model_only": False,
             },
         ),
     ],
@@ -1173,7 +1187,6 @@ def test_example_algorithm_parameters_are_preserved(
         ("sft", {"beta1": 0.9}),
         ("sft", {"block_size": 512}),
         ("osft", {"unfreeze_rank_ratio": 0.1}),
-        ("osft", {**_OSFT_EXAMPLE_PARAMETERS, "unfreeze_rank_ratio": 1.2}),
         ("osft", {**_OSFT_EXAMPLE_PARAMETERS, "lr_scheduler_kwargs": {"num_cycles": 1}}),
         (
             "osft",
@@ -1187,24 +1200,13 @@ def test_example_algorithm_parameters_are_preserved(
         ("lora_sft", {"lora_r": "16"}),
         ("lora_sft", {"lora_r": 16, "lora_rank": 16}),
         ("lora_sft", {"load_in_4bit": True, "load_in_8bit": True}),
-        ("lora_sft", {"max_grad_norm": 0}),
-        ("lora_sft", {"flash_attention": True}),
         ("lora_sft", {"assistant_only_loss": False}),
-        ("lora_sft", {"eval_steps": 5}),
         ("lora_sft", {"fp16": True}),
-        ("lora_sft", {"weight_decay": -0.1}),
         ("lora_sft", {"seed": "1"}),
         ("lora_sft", {"use_rslora": "true"}),
-        ("lora_sft", {"tf32": True}),
         ("lora_grpo", {"tasks_per_iteration": 10}),
-        ("lora_grpo", {"gpu_memory_utilization": 1.0}),
         ("lora_grpo", {"n_gpus": 4}),
-        ("lora_grpo", {"max_lora_rank": 8}),
-        ("lora_grpo", {"temperature": 0.7}),
-        ("lora_grpo", {"concurrency": 4}),
         ("lora_grpo", {"param_offload": "true"}),
-        ("lora_grpo", {"target_modules": ["q_proj"]}),
-        ("lora_grpo", {"max_grad_norm": 0.1}),
         ("osft", {**_OSFT_EXAMPLE_PARAMETERS, "eps": 10**400}),
     ],
 )
@@ -1223,14 +1225,77 @@ def test_osft_integral_json_numbers_are_normalized_for_training_hub_float_checks
     assert parameters["unfreeze_rank_ratio"] == 1
 
 
+@pytest.mark.parametrize(
+    "algorithm, parameters",
+    [
+        ("lora_sft", {"flash_attention": True, "eval_steps": 5, "tf32": True}),
+        ("lora_grpo", {"max_lora_rank": 8, "temperature": 0.7, "concurrency": 4}),
+        ("lora_grpo", {"target_modules": ["q_proj"], "max_grad_norm": 0.1}),
+    ],
+)
+def test_runtime_parameters_are_not_restricted_to_the_old_common_subset(algorithm, parameters):
+    assert validate_algorithm_parameters(algorithm, parameters) == parameters
+
+
+def test_advertised_backend_must_match_the_execution_profile():
+    assert validate_algorithm_parameters("lora_grpo", {"backend": "verl"}) == {}
+    with pytest.raises(ApiError, match="requires Training Hub backend 'verl'"):
+        validate_algorithm_parameters("lora_grpo", {"backend": "art"})
+
+
+def test_discovery_and_http_submission_share_runtime_parameter_changes(
+    monkeypatch, runtime_catalog
+):
+    _mock_sdk(monkeypatch)
+    metadata = json.loads(runtime_catalog.read_text())
+    descriptor = next(a for a in metadata["algorithms"] if a["name"] == "lora_sft")
+    descriptor["parameter_schema"]["properties"]["future_runtime_option"] = {"type": "integer"}
+    runtime_catalog.write_text(json.dumps(metadata))
+    http = TestClient(
+        create_app(
+            FakeAuthenticator(),
+            FakeAuthorizer(),
+            backend=jobs.CodeFlareJobBackend("quay.io/example/ray:2.58.0"),
+        )
+    )
+    headers = {"Authorization": "Bearer caller-token"}
+    details = "/api/v1/algorithms/lora_sft"
+    assert "future_runtime_option" in http.get(details, headers=headers).json()["parameters"]
+    body = _sample().model_dump(mode="json", exclude_unset=True)
+    body["algorithm"]["parameters"]["future_runtime_option"] = 1
+    assert (
+        http.post(
+            "/api/v1/projects/team-alpha/training-jobs", json=body, headers=headers
+        ).status_code
+        == 202
+    )
+    descriptor["parameter_schema"]["properties"].pop("future_runtime_option")
+    runtime_catalog.write_text(json.dumps(metadata))
+    catalog._load_catalog.cache_clear()  # Simulate a rollout onto the older runtime.
+    assert "future_runtime_option" not in http.get(details, headers=headers).json()["parameters"]
+    lookup = Mock(side_effect=AssertionError("Kubernetes must not be called"))
+    monkeypatch.setattr(jobs, "_caller_api_client", lookup)
+    response = http.post("/api/v1/projects/team-alpha/training-jobs", json=body, headers=headers)
+    assert response.status_code == 422
+    assert "future_runtime_option" in response.json()["message"]
+    lookup.assert_not_called()
+
+
 @pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft", "lora_grpo"])
 def test_every_exposed_algorithm_override_reaches_training_hub(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, algorithm: str
 ) -> None:
-    schemas = load_algorithm_parameter_schemas()
-    properties = schemas[algorithm]["properties"]
+    descriptor = next(a for a in catalog.load_catalog()["algorithms"] if a["name"] == algorithm)
+    properties = descriptor["parameter_schema"]["properties"]
     values: dict[str, Any] = {}
     for key, spec in properties.items():
+        if key == "backend":
+            continue
+        if "const" in spec:
+            values[key] = spec["const"]
+            continue
+        if "anyOf" in spec:
+            spec = next(option for option in spec["anyOf"] if option.get("type") != "null")
         if "enum" in spec:
             values[key] = spec["enum"][0]
         elif spec["type"] == "boolean":
@@ -1242,7 +1307,8 @@ def test_every_exposed_algorithm_override_reaches_training_hub(
         elif spec["type"] == "array":
             values[key] = ["q_proj"]
         elif spec["type"] == "object":
-            values[key] = {"num_cycles": "1"}
+            item = 1 if spec.get("additionalProperties", {}).get("type") == "integer" else "1"
+            values[key] = {"num_cycles": item}
         else:
             values[key] = "value"
 
@@ -1413,6 +1479,8 @@ def test_http_post_rejects_invalid_algorithm_overrides(
             "algorithm": {"parameters": {"prompt_batch_size": 1, "group_size": 32}},
         },
         {"algorithm": {"parameters": {"group_size": 4, "tensor_parallel_size": 3}}},
+        {"algorithm": {"parameters": {"tensor_parallel_size": 0}}},
+        {"algorithm": {"parameters": {"tensor_parallel_size": -1}}},
         {"output": {"destination_uri": "s3://checkpoint-storage/bucket/checkpoints/"}},
         {"model": {"uri": "s3://model-storage/bucket/model/"}},
         {"dataset": {"uri": "hf://other-secret/Agent-Ark/Toucan-1.5M"}},
@@ -1605,6 +1673,8 @@ def test_hf_preflight_returns_known_columns_without_loading_rows(
         ("osft", {}, {"text"}, "messages"),
         ("sft", {"is_pretraining": True}, {"text"}, "document"),
         ("osft", {"is_pretraining": True}, {"text"}, "document"),
+        ("sft", {"is_pretraining": True, "document_column_name": None}, {"text"}, "document"),
+        ("osft", {"is_pretraining": True, "document_column_name": None}, {"text"}, "document"),
         ("sft", {"is_pretraining": True, "document_column_name": "document"}, {"text"}, "document"),
         ("lora_sft", {"dataset_type": "alpaca"}, {"question", "answer"}, None),
         ("lora_sft", {}, {"instruction", "output"}, None),
