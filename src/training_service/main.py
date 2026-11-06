@@ -21,6 +21,7 @@ from training_service.authorization import KubernetesProjectAuthorizer, OpenShif
 from training_service.contract import component_validator, contract_document, load_contract
 from training_service.errors import ApiError
 from training_service.jobs import CodeFlareJobBackend, JobsBackend, JobSubmitter
+from training_service.logs import log_stream_timeout_seconds
 from training_service_api.apis.estimations_api import router as estimations_router
 from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
 from training_service_api.apis.observability_api import router as observability_router
@@ -102,6 +103,7 @@ def create_app(
         lifespan=lifespan,
     )
 
+    application.state.log_stream_timeout_seconds = log_stream_timeout_seconds()
     application.state.token_authenticator = authenticator or KubernetesTokenAuthenticator()
     application.state.project_authorizer = authorizer or KubernetesProjectAuthorizer()
     application.state.job_backend = backend or CodeFlareJobBackend()

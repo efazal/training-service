@@ -686,7 +686,12 @@ paths:
         SDK to retrieve driver stdout/stderr as a snapshot or transient
         Server-Sent Events stream. Worker/rank log aggregation and durable log
         storage are out of scope. Logs are available only while the managed
-        RayCluster is reachable.
+        RayCluster is reachable. Each follow connection has a total lifetime
+        of 300 seconds by default, configurable at service startup through
+        TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS. At expiry, an SSE error
+        event with code stream_expired asks the caller to reconnect, then the
+        connection closes. Reconnecting reauthenticates the caller; training
+        continues unaffected.
       operationId: streamJobLogs
       x-request-context: true
       x-project-authorization:

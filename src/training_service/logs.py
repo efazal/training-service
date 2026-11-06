@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
@@ -21,6 +22,18 @@ from training_service.errors import ApiError
 
 if TYPE_CHECKING:
     from training_service.jobs import JobsBackend
+
+
+def log_stream_timeout_seconds() -> int:
+    """Read the deployment's positive stream lifetime once at application creation."""
+    setting = "TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS"
+    try:
+        seconds = int(os.getenv(setting, "300"))
+        if seconds > 0:
+            return seconds
+    except ValueError:
+        pass
+    raise ValueError(f"{setting} must be a positive integer number of seconds.")
 
 
 class LogClient(Protocol):
@@ -173,7 +186,10 @@ async def driver_logs(
         try:
             # Bound credential lifetime on a stream; reconnect reauthenticates.
             stream = cast(AsyncGenerator[str, None], sdk.tail_job_logs(submission_id))
-            async with asyncio.timeout(300), aclosing(stream) as chunks:
+            async with (
+                asyncio.timeout(request.app.state.log_stream_timeout_seconds),
+                aclosing(stream) as chunks,
+            ):
                 async for chunk in chunks:
                     yield "event: log\ndata: " + json.dumps({"message": chunk}) + "\n\n"
         except TimeoutError:

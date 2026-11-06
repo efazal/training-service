@@ -164,6 +164,31 @@ authentication stub. This confirms the generated route is registered, but it
 does not prove the operation is ready for customer use; authentication and
 backend integrations are tracked by RHOAIENG-96350 through RHOAIENG-96352.
 
+## Log-stream lifetime
+
+Each `GET .../logs?follow=true` connection has a total lifetime of 300 seconds
+(five minutes) by default, not an idle timeout. For a two-hour job, allow extra
+time by setting a three-hour limit in your Helm values:
+
+```yaml
+env:
+  - name: TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS
+    value: "10800"
+```
+
+Merge this entry into any existing `env` list and upgrade the release to roll
+out the change. The setting is read at application startup and must be a
+positive integer number of seconds; invalid values prevent startup. Zero does
+not disable the limit. No per-request timeout parameter is required.
+
+At expiry, the API emits an SSE `error` event with code `stream_expired` and
+message `Reconnect to continue.`, then closes the connection. Reconnecting
+reauthenticates the caller; a longer connection retains its initial
+authorization for longer. Training continues unaffected. Snapshot requests
+(`follow=false`) are unchanged. Ingress/network timeouts can close a stream
+earlier, and this setting does not extend token validity or retain logs after
+the Ray cluster is removed.
+
 ## OpenShift Route and TLS
 
 An HTTPS Route is enabled by default, with a cluster-assigned hostname and HTTP

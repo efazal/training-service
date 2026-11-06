@@ -1,5 +1,6 @@
 """Project-scoped job reads/deletion with mocked Kubernetes and Ray SDKs."""
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -372,8 +373,19 @@ def test_log_snapshot_uses_scoped_gateway_and_caller_token(backend):
     sdk.get_job_logs.assert_called_once_with("raysubmit_123")
 
 
-def test_follow_uses_sse_and_closes_sdk_iterator(backend):
+@pytest.mark.parametrize("configured, expected", [(None, 300), ("1", 1), ("7200", 7200)])
+def test_follow_uses_sse_and_closes_sdk_iterator(backend, monkeypatch, configured, expected):
     http, _, _, sdk, *_ = backend
+    setting = "TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS"
+    if configured is None:
+        monkeypatch.delenv(setting, raising=False)
+    else:
+        monkeypatch.setenv(setting, configured)
+    http = TestClient(create_app(Authenticator(), Authorizer()))
+    # Settings are captured when the application is created, not during streaming.
+    monkeypatch.setenv(setting, "invalid-after-startup")
+    timeout = Mock(wraps=asyncio.timeout)
+    monkeypatch.setattr(logs.asyncio, "timeout", timeout)
     closed = []
 
     async def chunks(submission_id):
@@ -388,8 +400,44 @@ def test_follow_uses_sse_and_closes_sdk_iterator(backend):
     assert response.headers["content-type"].startswith("text/event-stream")
     assert 'event: log\ndata: {"message": "one\\ntwo\\n"}\n\n' == response.text
     assert closed == [True]
+    timeout.assert_called_once_with(expected)
     sdk.get_job_status.assert_called_once_with("raysubmit_123")
     sdk.get_job_logs.assert_not_called()
+
+
+def test_follow_expiry_closes_sdk_iterator_and_requests_reconnection(backend, monkeypatch):
+    http, _, _, sdk, *_ = backend
+    monkeypatch.setenv("TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS", "7200")
+    http = TestClient(create_app(Authenticator(), Authorizer()))
+    real_timeout = asyncio.timeout
+    timeout = Mock(side_effect=lambda seconds: real_timeout(0.01))
+    monkeypatch.setattr(logs.asyncio, "timeout", timeout)
+    closed = []
+
+    async def chunks(submission_id):
+        try:
+            yield "ready"
+            await asyncio.Event().wait()
+        finally:
+            closed.append(True)
+
+    sdk.tail_job_logs = chunks
+    response = http.get(BASE + "/example/logs?follow=true", headers=HEADERS)
+    assert response.status_code == 200
+    assert 'event: log\ndata: {"message": "ready"}\n\n' in response.text
+    assert response.text.endswith(
+        'event: error\ndata: {"code":"stream_expired","message":"Reconnect to continue."}\n\n'
+    )
+    assert closed == [True]
+    timeout.assert_called_once_with(7200)
+    sdk.stop_job.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "", "invalid", "1.5", "nan", "inf"])
+def test_invalid_log_stream_timeout_is_rejected_at_startup(monkeypatch, value):
+    monkeypatch.setenv("TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValueError, match="TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS"):
+        create_app(Authenticator(), Authorizer())
 
 
 def test_follow_failure_is_sanitized_after_headers(backend):
