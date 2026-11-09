@@ -100,6 +100,51 @@ def backend(monkeypatch):
     return http, custom, core, sdk, record, cluster, authorizer, factory
 
 
+@pytest.mark.parametrize(
+    "deployment", ["Retrying", "Initializing", "Waiting", "Suspending", "Suspended"]
+)
+def test_deletion_cancels_all_deployment_states(backend, deployment):
+    http, custom, _, _, record, *_ = backend
+    record["status"] = {"jobDeploymentStatus": deployment}
+    assert http.delete(BASE + "/example", headers=HEADERS).status_code == 204
+    custom.delete_namespaced_custom_object.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 409, 500])
+def test_sdk_delete_does_not_swallow_kubernetes_errors(backend, status):
+    http, custom, *_ = backend
+    custom.delete_namespaced_custom_object.side_effect = ApiException(
+        status=status, reason="sensitive-delete-response"
+    )
+    response = http.delete(BASE + "/example", headers=HEADERS)
+    assert response.status_code == (503 if status == 500 else status)
+    assert "sensitive-delete-response" not in response.text
+    custom.delete_namespaced_custom_object.assert_called_once()
+
+
+def test_delete_calls_real_sdk_without_loading_default_credentials(backend, monkeypatch):
+    from codeflare_sdk import RayJob
+    from kubernetes import config
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Delete must not load default credentials")
+
+    monkeypatch.setattr(config, "load_kube_config", forbidden)
+    monkeypatch.setattr(config, "load_incluster_config", forbidden)
+    original = RayJob.delete
+    calls = []
+
+    def tracked(sdk):
+        calls.append(
+            (sdk.name, sdk.namespace, sdk._api_client.configuration.api_key["authorization"])
+        )
+        return original(sdk)
+
+    monkeypatch.setattr(RayJob, "delete", tracked)
+    assert backend[0].delete(BASE + "/example", headers=HEADERS).status_code == 204
+    assert calls == [("example", "team-a", "Bearer unit-test-token")]
+
+
 def test_list_is_compact_and_counts_all_kubernetes_pages(backend):
     http, custom, _, _, record, *_ = backend
     queued = job("queued", "PENDING")
@@ -695,48 +740,3 @@ def test_handlers_use_injected_backend_without_ray_resource_assumptions():
         permission.group == "trainer.kubeflow.org" and permission.resource == "trainjobs"
         for _, permission in authorizer.calls
     )
-
-
-@pytest.mark.parametrize(
-    "deployment", ["Retrying", "Initializing", "Waiting", "Suspending", "Suspended"]
-)
-def test_deletion_cancels_all_deployment_states(backend, deployment):
-    http, custom, _, _, record, *_ = backend
-    record["status"] = {"jobDeploymentStatus": deployment}
-    assert http.delete(BASE + "/example", headers=HEADERS).status_code == 204
-    custom.delete_namespaced_custom_object.assert_called_once()
-
-
-@pytest.mark.parametrize("status", [401, 403, 404, 409, 500])
-def test_sdk_delete_does_not_swallow_kubernetes_errors(backend, status):
-    http, custom, *_ = backend
-    custom.delete_namespaced_custom_object.side_effect = ApiException(
-        status=status, reason="sensitive-delete-response"
-    )
-    response = http.delete(BASE + "/example", headers=HEADERS)
-    assert response.status_code == (503 if status == 500 else status)
-    assert "sensitive-delete-response" not in response.text
-    custom.delete_namespaced_custom_object.assert_called_once()
-
-
-def test_delete_calls_real_sdk_without_loading_default_credentials(backend, monkeypatch):
-    from codeflare_sdk import RayJob
-    from kubernetes import config
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Delete must not load default credentials")
-
-    monkeypatch.setattr(config, "load_kube_config", forbidden)
-    monkeypatch.setattr(config, "load_incluster_config", forbidden)
-    original = RayJob.delete
-    calls = []
-
-    def tracked(sdk):
-        calls.append(
-            (sdk.name, sdk.namespace, sdk._api_client.configuration.api_key["authorization"])
-        )
-        return original(sdk)
-
-    monkeypatch.setattr(RayJob, "delete", tracked)
-    assert backend[0].delete(BASE + "/example", headers=HEADERS).status_code == 204
-    assert calls == [("example", "team-a", "Bearer unit-test-token")]
