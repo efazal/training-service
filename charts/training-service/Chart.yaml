@@ -3,4 +3,4 @@ name: training-service
 description: OpenDataHub Training Service
 type: application
 version: 0.1.1
-appVersion: "preview-93228d235ee8"
+appVersion: "preview-83a2a358fa0c"

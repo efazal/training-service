@@ -4,7 +4,7 @@ image:
   # Public amd64 developer preview. Use a tested commit-specific tag for handoff.
   repository: quay.io/modh/training-service
   pullPolicy: IfNotPresent
-  tag: "preview-93228d235ee8"
+  tag: "preview-83a2a358fa0c"
 
 # Ray workload image containing Training Hub, separate from the API service image.
 # An init container discovers its Training Hub algorithms automatically, without a GPU.
