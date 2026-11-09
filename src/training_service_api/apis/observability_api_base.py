@@ -68,13 +68,14 @@ class BaseObservabilityApi:
             ),
         ],
         timeout_seconds: Annotated[
-            Annotated[int, Field(strict=True, ge=1)] | None,
+            Annotated[int, Field(le=2147483647, strict=True, ge=1)] | None,
             Field(
                 description=(
-                    "Total lifetime of this follow connection in seconds. When omitted, "
-                    "uses the service configuration (300 seconds by default). Ignored when "
-                    "follow=false. Expiry closes the stream with a stream_expired event; "
-                    "reconnect to continue reading logs. "
+                    "Total lifetime of this follow connection in seconds (1 to "
+                    "2147483647). The upper bound keeps deadline arithmetic representable. "
+                    "When omitted, uses the service configuration (300 seconds by "
+                    "default). Ignored when follow=false. Expiry closes the stream with a "
+                    "stream_expired event; reconnect to continue reading logs. "
                 )
             ),
         ],

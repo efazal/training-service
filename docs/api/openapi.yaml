@@ -723,13 +723,16 @@ paths:
         - name: timeout_seconds
           in: query
           description: >
-            Total lifetime of this follow connection in seconds. When omitted,
+            Total lifetime of this follow connection in seconds (1 to 2147483647).
+            The upper bound keeps deadline arithmetic representable. When omitted,
             uses the service configuration (300 seconds by default). Ignored
             when follow=false. Expiry closes the stream with a stream_expired
             event; reconnect to continue reading logs.
           schema:
             type: integer
+            format: int32
             minimum: 1
+            maximum: 2147483647
       responses:
         '200':
           description: Driver log snapshot or SSE stream, selected by follow

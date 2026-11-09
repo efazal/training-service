@@ -136,13 +136,15 @@ async def stream_job_logs(
     timeout_seconds: int | None = Query(
         None,
         description=(
-            "Total lifetime of this follow connection in seconds. When omitted, "
-            "uses the service configuration (300 seconds by default). Ignored when "
-            "follow&#x3D;false. Expiry closes the stream with a stream_expired "
-            "event; reconnect to continue reading logs. "
+            "Total lifetime of this follow connection in seconds (1 to "
+            "2147483647). The upper bound keeps deadline arithmetic representable. "
+            "When omitted, uses the service configuration (300 seconds by "
+            "default). Ignored when follow&#x3D;false. Expiry closes the stream "
+            "with a stream_expired event; reconnect to continue reading logs. "
         ),
         alias="timeout_seconds",
         ge=1,
+        le=2147483647,
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> str:

@@ -420,7 +420,14 @@ def test_log_snapshot_uses_scoped_gateway_and_caller_token(backend):
 
 @pytest.mark.parametrize(
     "configured, requested, expected",
-    [(None, None, 300), ("1", None, 1), ("7200", None, 7200), (None, 2, 2), ("7200", 1, 1)],
+    [
+        (None, None, 300),
+        ("1", None, 1),
+        ("7200", None, 7200),
+        (None, 2, 2),
+        ("7200", 1, 1),
+        (None, 2147483647, 2147483647),
+    ],
 )
 def test_follow_uses_sse_and_closes_sdk_iterator(
     backend, monkeypatch, configured, requested, expected
@@ -680,7 +687,10 @@ def test_sdk_environment_override_is_rejected_before_credentials_are_sent(backen
 @pytest.mark.parametrize(
     "query",
     ["tail_lines=0", "follow=invalid"]
-    + [f"timeout_seconds={value}" for value in ("0", "-1", "invalid", "1.5", "")],
+    + [
+        f"timeout_seconds={value}"
+        for value in ("0", "-1", "invalid", "1.5", "", "2147483648", "9" * 400)
+    ],
 )
 def test_invalid_log_queries_return_contract_400(backend, query):
     assert backend[0].get(BASE + "/example/logs?" + query, headers=HEADERS).status_code == 400

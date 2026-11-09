@@ -67,12 +67,23 @@ def follow_logs(api, path, timeout):
 
 
 def verify_stream_timeout(api, path):
-    """A short request expires, then a new request can still read the job logs."""
-    started = time.monotonic()
-    response = api.request("GET", path + "/logs", params={"follow": "true", "timeout_seconds": 1})
-    assert response.headers.get("content-type", "").startswith("text/event-stream")
-    assert '"code":"stream_expired"' in response.text
-    assert time.monotonic() - started < 10, "Per-request log timeout was not honored"
+    """Bound quiet reads and a chatty server that ignores the requested lifetime."""
+    deadline = time.monotonic() + 10
+    body = []
+    try:
+        with api.client.stream(
+            "GET", path + "/logs", params={"follow": "true", "timeout_seconds": 1}, timeout=2
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers.get("content-type", "").startswith("text/event-stream")
+            for chunk in response.iter_text():
+                if time.monotonic() >= deadline:
+                    pytest.fail("Timeout verification exceeded its client deadline", pytrace=False)
+                body.append(chunk)
+    except httpx.TimeoutException:
+        pytest.fail("Timeout verification exceeded its client deadline", pytrace=False)
+    assert time.monotonic() < deadline, "Per-request log timeout was not honored"
+    assert '"code":"stream_expired"' in "".join(body)
     assert api.request("GET", path + "/logs").status_code == 200
 
 

@@ -1555,6 +1555,39 @@ def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes
                 follow_logs(api, "/jobs/e2e-owned", 1)
 
 
+@pytest.mark.parametrize("quiet", [False, True])
+def test_expiry_verification_is_bounded_when_server_ignores_timeout(monkeypatch, quiet):
+    now = stream_clock(monkeypatch)
+    closed = []
+
+    class NeverExpiring(httpx.SyncByteStream):
+        def __iter__(self):
+            if quiet:
+                raise httpx.ReadTimeout("Quiet server ignored timeout")
+            while True:
+                now[0] += 1
+                yield b'event: log\ndata: {"message":"still running"}\n\n'
+
+        def close(self):
+            closed.append(True)
+
+    def transport(request):
+        assert request.extensions["timeout"]["read"] == 2
+        return httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"}, stream=NeverExpiring()
+        )
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        with pytest.raises(
+            pytest.fail.Exception, match="Timeout verification exceeded its client deadline"
+        ):
+            training_jobs.verify_stream_timeout(LiveAPI(http, "test-project"), "/jobs/e2e-owned")
+    assert closed == [True]
+    assert now[0] <= 10
+
+
 def stream_clock(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(
