@@ -23,6 +23,10 @@ helm upgrade --install training-service ./charts/training-service \
 export TRAINING_SERVICE_URL="https://$(oc -n training-service get route training-service -o jsonpath='{.spec.host}')"
 ```
 
+For a shared chart archive, use `./training-service-0.1.1.tgz` in place of the
+chart directory and the values supplied by your administrator; skip the `uv`
+commands above.
+
 The helper reads the platform gateway and **public** ingress CA and generates
 values; it makes no cluster changes. Helm mounts the CA and discovers algorithms
 from the training image automatically. Share `TRAINING_SERVICE_URL` and the
@@ -75,6 +79,7 @@ Maintainers with Quay Write access can publish a commit-specific image:
 
 ```bash
 podman login quay.io
+export IMAGE_REPOSITORY=quay.io/modh/training-service
 export IMAGE_TAG=dev-$(git rev-parse --short HEAD)
 make generate-server CONTAINER_RUNTIME=podman
 make check helm-lint helm-template
