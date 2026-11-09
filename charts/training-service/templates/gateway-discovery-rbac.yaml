@@ -1,0 +1,28 @@
+{{- if include "training-service.discoverGateway" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "training-service.fullname" . }}-gateway-discovery
+  labels:
+    {{- include "training-service.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["services.platform.opendatahub.io"]
+    resources: ["gatewayconfigs"]
+    resourceNames: ["default-gateway"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "training-service.fullname" . }}-gateway-discovery
+  labels:
+    {{- include "training-service.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "training-service.fullname" . }}-gateway-discovery
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "training-service.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

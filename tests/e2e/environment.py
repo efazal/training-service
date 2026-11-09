@@ -61,9 +61,8 @@ def cluster_preflight(args, command, values):
         )
     gateway = structured_gateway or configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL")
     parsed = urlsplit(gateway or "")
-    if (
-        not gateway
-        or "YOUR_" in gateway
+    if gateway and (
+        "YOUR_" in gateway
         or "replace-me" in gateway
         or parsed.scheme != "https"
         or not parsed.hostname
@@ -73,7 +72,8 @@ def cluster_preflight(args, command, values):
         or parsed.fragment
     ):
         raise ValueError(
-            "Values must specify the authenticated HTTPS TRAINING_SERVICE_RAY_GATEWAY_URL"
+            "A gateway override must specify the authenticated HTTPS "
+            "TRAINING_SERVICE_RAY_GATEWAY_URL"
         )
     if values.get("imagePullSecrets"):
         raise ValueError(

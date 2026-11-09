@@ -12,6 +12,20 @@ Kueue.
 - `kubectl` or `oc` access to the target cluster.
 - Push access to a registry that the target cluster can pull from.
 
+## Gateway configuration
+
+Leave `logBackend.gatewayURL` empty on RHOAI/ODH. At startup, the service reads
+`GatewayConfig/default-gateway.status.domain`; Helm installs narrowly scoped
+read access for its service account. Discovery failures keep `/readyz` at 503
+with a diagnostic message and are retried on later checks. The first valid
+address is fixed until restart; restart the deployment after a gateway change.
+
+For a custom platform, set `logBackend.gatewayURL` to its authenticated HTTPS
+gateway origin. The optional CA settings remain independent: use normal
+container trust or configure `logBackend.trustedCA` for a private issuer.
+`scripts/platform_values.py` remains an optional helper for exporting explicit
+gateway/public CA values. See [log configuration](job-operations.md#driver-logs).
+
 ## Build and publish a development image
 
 Run the repository checks before building an image:

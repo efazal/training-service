@@ -99,8 +99,8 @@ Create the name of the service account to use.
 {{- end -}}
 {{- if or (eq .name "RAY_ADDRESS") (eq .name "RAY_API_SERVER_ADDRESS") -}}{{- fail "Unset RAY_ADDRESS and RAY_API_SERVER_ADDRESS in the API pod." -}}{{- end -}}
 {{- end -}}
-{{- if not $gateway -}}{{- fail "logBackend.gatewayURL is required. Run scripts/platform_values.py or provide the platform HTTPS gateway origin." -}}{{- end -}}
-{{- if not (regexMatch "^https://([a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?|\\[[0-9a-fA-F:]+\\])(:[0-9]{1,5})?/?$" $gateway) -}}{{- fail "logBackend.gatewayURL must be an HTTPS origin without credentials, a path, query parameters, or a fragment." -}}{{- end -}}
+{{- if and (not $gateway) (not .Values.serviceAccount.automount) -}}{{- fail "serviceAccount.automount must be true for automatic gateway discovery; alternatively provide logBackend.gatewayURL and a configured service identity." -}}{{- end -}}
+{{- if and $gateway (not (regexMatch "^https://([a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?|\\[[0-9a-fA-F:]+\\])(:[0-9]{1,5})?/?$" $gateway)) -}}{{- fail "logBackend.gatewayURL must be an HTTPS origin without credentials, a path, query parameters, or a fragment." -}}{{- end -}}
 {{- $port := regexFind ":[0-9]+/?$" $gateway | trimPrefix ":" | trimSuffix "/" -}}
 {{- if and $port (or (lt (int $port) 1) (gt (int $port) 65535)) -}}{{- fail "logBackend.gatewayURL port must be between 1 and 65535." -}}{{- end -}}
 {{- if and $ca.configMapName $ca.bundle -}}{{- fail "Configure logBackend.trustedCA.configMapName or bundle, not both." -}}{{- end -}}
@@ -114,4 +114,15 @@ Create the name of the service account to use.
 {{- else -}}
 {{- .Values.logBackend.trustedCA.configMapName -}}
 {{- end -}}
+{{- end -}}
+
+{{/* An explicit structured or legacy gateway bypasses platform discovery. */}}
+{{- define "training-service.discoverGateway" -}}
+{{- $gateway := .Values.logBackend.gatewayURL -}}
+{{- range .Values.env -}}
+{{- if eq .name "TRAINING_SERVICE_RAY_GATEWAY_URL" -}}
+{{- $gateway = .value | default "" -}}
+{{- end -}}
+{{- end -}}
+{{- if not $gateway -}}true{{- end -}}
 {{- end -}}

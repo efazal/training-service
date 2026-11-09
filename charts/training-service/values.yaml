@@ -33,13 +33,14 @@ podLabels: {}
 
 # Authenticate callers and authorize project-scoped operations through Kubernetes
 # TokenReview and SubjectAccessReview APIs. The service account can create only
-# these review requests; it does not receive workload permissions.
+# these review requests and read the named platform gateway configuration;
+# it does not receive workload permissions.
 authentication:
   tokenReview:
     enabled: true
 
-# Required platform configuration. Generate these settings with
-# scripts/platform_values.py, or supply the HTTPS gateway origin explicitly.
+# By default the service discovers GatewayConfig/default-gateway status.domain
+# at startup. Set gatewayURL only to override discovery for a custom platform.
 logBackend:
   gatewayURL: ""
   streamTimeoutSeconds: 300

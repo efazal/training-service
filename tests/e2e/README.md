@@ -26,15 +26,17 @@ Prepare once:
   StorageClass/node reads, Route/service/pod reads, `get` access to ConfigMap
   `openshift-config-managed/default-ingress-cert` for public TLS trust discovery,
   pod exec for evidence, and permission to install the chart's
-  TokenReview/SAR ClusterRole and ClusterRoleBinding (list/delete for cleanup verification).
+  TokenReview/SAR and named GatewayConfig-read ClusterRoles and ClusterRoleBindings
+  (list/delete for cleanup verification).
   This is separate from the
   HTTP caller token below; admin credentials cannot prove restricted-user isolation.
 - Use your own Quay repo. Public images need no credential transfer. For a private
   repo, add `--use-podman-auth` as described below: local Podman login alone does
   not authorize Kubernetes image pulls. The runner never copies a pre-existing
   cluster Secret or changes cluster-wide pull credentials.
-- Copy [values.example.yaml](examples/values.example.yaml) outside the repo and supply
-  the authenticated Ray gateway. The chart's public Ray + Training Hub image is
+- Copy [values.example.yaml](examples/values.example.yaml) outside the repo. The service
+  discovers the ready platform GatewayConfig automatically; set `logBackend.gatewayURL`
+  only for a custom platform. The chart's public Ray + Training Hub image is
   used by default; set `trainingRuntime.image` only to override it.
   The runner automatically reads the cluster's **public ingress certificate
   bundle** from `openshift-config-managed/default-ingress-cert` (`ca-bundle.crt`).

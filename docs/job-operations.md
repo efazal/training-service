@@ -56,15 +56,29 @@ A removed RayCluster returns `410 ray_cluster_gone`. Gateway/version endpoint
 failures remain `503 logs_unavailable`. These errors are returned as JSON before
 opening an SSE stream.
 
-The administrator must configure a trusted RHOAI HTTPS gateway serving
-authenticated Ray endpoints at `/ray/{project}/{rayClusterName}`. Use the
-chart's existing `env` values, for example:
+The service automatically reads the ready platform
+`GatewayConfig/default-gateway` and uses its published `status.domain` for
+backend log access at `/ray/{project}/{rayClusterName}`. The chart grants the
+service account only `get` access to this named configuration; job operations
+still use the caller's identity. No backend URL is needed from dashboard users.
+
+The first valid gateway is fixed until service restart and its address/source
+are logged. If discovery is unavailable or the platform generation is not ready,
+`/readyz` returns an actionable 503 and retries on subsequent checks; `/healthz`
+stays available. Readiness validates configuration, not backend connectivity.
+Gateway changes take effect after a rolling restart. Offline Helm rendering
+requires no cluster lookup.
+
+For custom platforms, set an explicit HTTPS origin to bypass discovery:
 
 ```yaml
-env:
-  - name: TRAINING_SERVICE_RAY_GATEWAY_URL
-    value: https://ray-gateway.example.com
+logBackend:
+  gatewayURL: https://ray-gateway.example.com
 ```
+
+The legacy `TRAINING_SERVICE_RAY_GATEWAY_URL` environment override remains
+supported; configure it or the structured value once. Invalid overrides fail
+validation without falling back to a discovered endpoint.
 
 TLS verification is always enabled. The gateway certificate must be trusted
 by the container. `TRAINING_SERVICE_RAY_CA_FILE` can select a CA bundle that

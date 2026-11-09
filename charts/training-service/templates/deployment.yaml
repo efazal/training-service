@@ -102,6 +102,7 @@ spec:
               path: /healthz
               port: http
           readinessProbe:
+            timeoutSeconds: 10
             httpGet:
               path: /readyz
               port: http

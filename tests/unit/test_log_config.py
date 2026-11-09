@@ -15,7 +15,6 @@ from training_service.main import create_app
 @pytest.mark.parametrize(
     "gateway",
     [
-        "",
         "http://gateway.example",
         "https://user:pass@gateway.example",
         "https://gateway.example/path",
@@ -36,11 +35,6 @@ def test_invalid_gateway_fails_readiness_but_not_liveness(monkeypatch, gateway):
         assert response.json()["code"] == "logs_unavailable"
         assert "TRAINING_SERVICE_RAY_GATEWAY_URL" in response.json()["message"]
         assert "user:pass" not in response.text
-
-
-def test_missing_gateway_fails_readiness(monkeypatch):
-    monkeypatch.delenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
-    assert TestClient(create_app()).get("/readyz").status_code == 503
 
 
 def test_custom_ca_rotation_is_read_without_restart(monkeypatch, tmp_path):

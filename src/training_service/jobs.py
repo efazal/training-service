@@ -38,7 +38,7 @@ from training_service.kubernetes_client import (
     describe_not_found,
     validate_names,
 )
-from training_service.log_config import log_backend_config
+from training_service.log_config import LogBackendConfig, LogBackendResolver
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
 from training_service.ray_entrypoint import get_backend
 from training_service.sdk_deletion import delete_ray_job
@@ -387,6 +387,10 @@ class CodeFlareJobBackend:
     def __init__(self, image: str | None = None) -> None:
         self._image = image if image is not None else os.getenv("TRAINING_RAY_IMAGE", "")
         self._limiter = anyio.CapacityLimiter(10)
+        self._log_config = LogBackendResolver()
+
+    def log_configuration(self) -> LogBackendConfig:
+        return self._log_config.configuration()
 
     async def submit(
         self, project: str, request: CreateJobRequest, caller: CallerIdentity, token: str
@@ -614,7 +618,7 @@ class CodeFlareJobBackend:
             or re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", submission_id) is None
         ):
             raise logs_unavailable()
-        configuration = log_backend_config()
+        configuration = self.log_configuration()
         try:
             sdk = CodeFlareLogClient(
                 f"{configuration.gateway_url}/ray/{project}/{cluster}",

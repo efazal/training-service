@@ -526,7 +526,6 @@ def test_logs_fail_before_streaming_when_backend_unavailable(backend, case, expe
         "http://untrusted.example",
         "https://user:password@ray.example.com",
         "https://ray.example.com/other",
-        "",
     ],
 )
 def test_invalid_gateway_never_receives_credentials(backend, monkeypatch, value):
@@ -740,3 +739,24 @@ def test_handlers_use_injected_backend_without_ray_resource_assumptions():
         permission.group == "trainer.kubeflow.org" and permission.resource == "trainjobs"
         for _, permission in authorizer.calls
     )
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_logs_use_discovered_gateway_and_caller_token(backend, monkeypatch, follow):
+    from training_service import log_config
+
+    http, _, _, _, _, _, _, factory = backend
+    monkeypatch.delenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
+    discover = Mock(return_value="https://published.example.com")
+    monkeypatch.setattr(log_config, "_discover_gateway", discover)
+
+    async def chunks(_):
+        yield "discovered backend log\n"
+
+    backend[3].tail_job_logs = chunks
+    response = http.get(BASE + "/example/logs?follow=" + str(follow).lower(), headers=HEADERS)
+    assert response.status_code == 200
+    assert factory.call_args.args == ("https://published.example.com/ray/team-a/example-cluster",)
+    assert factory.call_args.kwargs["headers"] == HEADERS
+    assert http.get(BASE + "/example/logs", headers=HEADERS).status_code == 200
+    discover.assert_called_once()

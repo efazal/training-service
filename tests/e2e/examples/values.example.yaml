@@ -1,4 +1,5 @@
-# Copy outside the repo. Supply your authenticated Ray gateway.
+# Copy outside the repo. The service discovers the platform gateway automatically.
+# For custom platforms, override logBackend.gatewayURL with the HTTPS gateway origin.
 # The runner discovers the cluster's public ingress CA and provisions the CA ConfigMap.
 # Use --ray-ca-bundle only when the gateway needs a different issuer.
 # Never put tokens, passwords or Secret values here.
@@ -7,8 +8,6 @@ imagePullSecrets: [] # For private Quay images use --use-podman-auth; the runner
 # trainingRuntime:
 #   image: quay.io/modh/ray@sha256:REPLACE_WITH_TESTED_DIGEST
 env:
-  - name: TRAINING_SERVICE_RAY_GATEWAY_URL
-    value: https://replace-me.apps.example.com
   - name: TRAINING_SERVICE_RAY_CA_FILE
     value: /var/run/training-service/ray-ca/ca.crt
 volumes:

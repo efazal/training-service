@@ -1796,3 +1796,10 @@ def test_runner_rejects_duplicate_gateway(prepared_cluster):
     values["logBackend"] = {"gatewayURL": "https://gateway.example.test"}
     with pytest.raises(ValueError, match="not both"):
         cluster_preflight(args, command, values)
+
+
+def test_runner_allows_service_gateway_discovery(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    values["env"] = []
+    cluster_preflight(args, command, values)
+    assert all(call.args[0][1] in {"get", "auth"} for call in command.call_args_list)

@@ -26,7 +26,7 @@ def render(tmp_path, values):
 @pytest.mark.parametrize(
     "values, message",
     [
-        ({}, "logBackend.gatewayURL is required"),
+        ({"serviceAccount": {"automount": False}}, "serviceAccount.automount"),
         ({"logBackend": {"gatewayURL": "http://gateway.example"}}, "HTTPS origin"),
         ({"logBackend": {"gatewayURL": "https://user:pass@gateway.example"}}, "HTTPS origin"),
         ({"logBackend": {"gatewayURL": "https://gateway.example/path"}}, "HTTPS origin"),
@@ -148,3 +148,63 @@ def test_chart_mounts_optional_ca_without_subpath_and_sets_timeout(tmp_path, tru
     else:
         assert "TRAINING_SERVICE_RAY_CA_FILE" not in env
         assert not any(v["name"] == "training-service-log-ca" for v in pod["volumes"])
+
+
+@pytest.mark.parametrize("token_reviews", [True, False])
+def test_default_chart_discovers_gateway_with_only_named_read_access(tmp_path, token_reviews):
+    result = render(tmp_path, {"authentication": {"tokenReview": {"enabled": token_reviews}}})
+    assert result.returncode == 0, result.stderr
+    documents = list(yaml.safe_load_all(result.stdout))
+    role = next(
+        d
+        for d in documents
+        if d["kind"] == "ClusterRole" and d["metadata"]["name"].endswith("-gateway-discovery")
+    )
+    assert role["rules"] == [
+        {
+            "apiGroups": ["services.platform.opendatahub.io"],
+            "resources": ["gatewayconfigs"],
+            "resourceNames": ["default-gateway"],
+            "verbs": ["get"],
+        }
+    ]
+    binding = next(
+        d
+        for d in documents
+        if d["kind"] == "ClusterRoleBinding" and d["metadata"]["name"] == role["metadata"]["name"]
+    )
+    assert binding["roleRef"]["name"] == role["metadata"]["name"]
+    assert binding["subjects"] == [
+        {"kind": "ServiceAccount", "name": "validation-training-service", "namespace": "default"}
+    ]
+    pod = next(d for d in documents if d["kind"] == "Deployment")["spec"]["template"]["spec"]
+    assert "TRAINING_SERVICE_RAY_GATEWAY_URL" not in {
+        e["name"] for e in pod["containers"][0]["env"]
+    }
+    assert pod["containers"][0]["readinessProbe"]["timeoutSeconds"] > 5
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_explicit_gateway_needs_no_platform_discovery_rbac(tmp_path, legacy):
+    values = (
+        {"env": [{"name": "TRAINING_SERVICE_RAY_GATEWAY_URL", "value": "https://gateway.example"}]}
+        if legacy
+        else {"logBackend": {"gatewayURL": "https://gateway.example"}}
+    )
+    result = render(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    documents = list(yaml.safe_load_all(result.stdout))
+    assert not any(d["metadata"]["name"].endswith("-gateway-discovery") for d in documents)
+
+
+def test_gateway_discovery_binds_custom_service_account(tmp_path):
+    result = render(tmp_path, {"serviceAccount": {"create": False, "name": "platform-service"}})
+    assert result.returncode == 0, result.stderr
+    documents = list(yaml.safe_load_all(result.stdout))
+    binding = next(
+        d
+        for d in documents
+        if d["kind"] == "ClusterRoleBinding"
+        and d["metadata"]["name"].endswith("-gateway-discovery")
+    )
+    assert binding["subjects"][0]["name"] == "platform-service"
