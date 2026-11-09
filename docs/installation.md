@@ -69,7 +69,7 @@ Helm rejects missing or conflicting settings before installation. `/readyz`
 checks the catalog and resolved gateway/CA configuration without needing a job;
 `/healthz` checks only the process. Readiness does not probe backend reachability.
 Legacy gateway/CA environment settings still work; remove them when adopting
-structured settings. Keep shared values free of credentials and cluster-specific
+structured settings. Keep checked-in defaults free of credentials and cluster-specific
 URLs. Set `route.enabled=false` when exposing the internal Service through your
 platform's own proxy.
 
