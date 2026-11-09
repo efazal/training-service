@@ -67,6 +67,17 @@ class BaseObservabilityApi:
                 )
             ),
         ],
+        timeout_seconds: Annotated[
+            Annotated[int, Field(strict=True, ge=1)] | None,
+            Field(
+                description=(
+                    "Total lifetime of this follow connection in seconds. When omitted, "
+                    "uses the service configuration (300 seconds by default). Ignored when "
+                    "follow=false. Expiry closes the stream with a stream_expired event; "
+                    "reconnect to continue reading logs. "
+                )
+            ),
+        ],
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> str:

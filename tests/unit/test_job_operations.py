@@ -418,8 +418,13 @@ def test_log_snapshot_uses_scoped_gateway_and_caller_token(backend):
     sdk.get_job_logs.assert_called_once_with("raysubmit_123")
 
 
-@pytest.mark.parametrize("configured, expected", [(None, 300), ("1", 1), ("7200", 7200)])
-def test_follow_uses_sse_and_closes_sdk_iterator(backend, monkeypatch, configured, expected):
+@pytest.mark.parametrize(
+    "configured, requested, expected",
+    [(None, None, 300), ("1", None, 1), ("7200", None, 7200), (None, 2, 2), ("7200", 1, 1)],
+)
+def test_follow_uses_sse_and_closes_sdk_iterator(
+    backend, monkeypatch, configured, requested, expected
+):
     http, _, _, sdk, *_ = backend
     setting = "TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS"
     if configured is None:
@@ -440,7 +445,10 @@ def test_follow_uses_sse_and_closes_sdk_iterator(backend, monkeypatch, configure
             closed.append(True)
 
     sdk.tail_job_logs = chunks
-    response = http.get(BASE + "/example/logs?follow=true", headers=HEADERS)
+    query = {"follow": "true"}
+    if requested is not None:
+        query["timeout_seconds"] = requested
+    response = http.get(BASE + "/example/logs", params=query, headers=HEADERS)
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     assert 'event: log\ndata: {"message": "one\\ntwo\\n"}\n\n' == response.text
@@ -669,7 +677,11 @@ def test_sdk_environment_override_is_rejected_before_credentials_are_sent(backen
     factory.assert_not_called()
 
 
-@pytest.mark.parametrize("query", ["tail_lines=0", "follow=invalid"])
+@pytest.mark.parametrize(
+    "query",
+    ["tail_lines=0", "follow=invalid"]
+    + [f"timeout_seconds={value}" for value in ("0", "-1", "invalid", "1.5", "")],
+)
 def test_invalid_log_queries_return_contract_400(backend, query):
     assert backend[0].get(BASE + "/example/logs?" + query, headers=HEADERS).status_code == 400
 
@@ -740,3 +752,28 @@ def test_handlers_use_injected_backend_without_ray_resource_assumptions():
         permission.group == "trainer.kubeflow.org" and permission.resource == "trainjobs"
         for _, permission in authorizer.calls
     )
+
+
+def test_request_timeout_expires_real_stream_without_stopping_job(backend):
+    http, _, _, sdk, *_ = backend
+    closed = []
+
+    async def chunks(submission_id):
+        try:
+            yield "ready"
+            await asyncio.Event().wait()
+        finally:
+            closed.append(True)
+
+    sdk.tail_job_logs = chunks
+    response = http.get(
+        BASE + "/example/logs", params={"follow": "true", "timeout_seconds": 1}, headers=HEADERS
+    )
+    assert response.status_code == 200
+    assert '"code":"stream_expired"' in response.text
+    assert closed == [True]
+    sdk.stop_job.assert_not_called()
+    snapshot = http.get(BASE + "/example/logs", params={"timeout_seconds": 1}, headers=HEADERS)
+    assert snapshot.status_code == 200
+    assert snapshot.text == "first\nsecond\nthird\n"
+    assert http.app.state.log_stream_timeout_seconds == 300

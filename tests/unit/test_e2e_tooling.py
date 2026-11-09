@@ -1533,7 +1533,14 @@ def test_cleanup_never_deletes_foreign_workloads(state):
 )
 def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes):
     def transport(request):
-        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=body)
+        response_body = (
+            'event: error\ndata: {"code":"stream_expired","message":"Reconnect to continue."}\n\n'
+            if request.url.params.get("timeout_seconds") == "1"
+            else body
+        )
+        return httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"}, content=response_body
+        )
 
     with httpx.Client(
         base_url="https://unit.invalid",
@@ -1573,6 +1580,12 @@ def test_stream_reconnects_after_quiet_read_and_preserves_incremental_events(mon
 
     def transport(request):
         calls.append(request)
+        if request.url.params.get("timeout_seconds") == "1":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content='event: error\ndata: {"code":"stream_expired"}\n\n',
+            )
         if len(calls) == 1:
             return httpx.Response(
                 200, headers={"Content-Type": "text/event-stream"}, stream=QuietStream()
@@ -1589,7 +1602,9 @@ def test_stream_reconnects_after_quiet_read_and_preserves_incremental_events(mon
         transport=httpx.MockTransport(transport),
     ) as http:
         assert follow_logs(LiveAPI(http, "test-project"), "/jobs/e2e-owned", 60) == 2
-    assert len(calls) == 2
+    assert len(calls) == 4
+    assert calls[2].url.params["timeout_seconds"] == "1"
+    assert not calls[3].url.params
 
 
 def test_stream_quiet_reads_exhaust_only_the_overall_deadline(monkeypatch):

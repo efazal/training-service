@@ -685,7 +685,9 @@ paths:
         storage are out of scope. Logs are available only while the managed
         RayCluster is reachable. Each follow connection has a total lifetime
         of 300 seconds by default, configurable at service startup through
-        TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS. At expiry, an SSE error
+        TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS. The optional timeout_seconds
+        query parameter overrides this lifetime for one follow connection.
+        At expiry, an SSE error
         event with code stream_expired asks the caller to reconnect, then the
         connection closes. Reconnecting reauthenticates the caller; training
         continues unaffected.
@@ -718,6 +720,16 @@ paths:
             type: integer
             minimum: 1
             default: 100
+        - name: timeout_seconds
+          in: query
+          description: >
+            Total lifetime of this follow connection in seconds. When omitted,
+            uses the service configuration (300 seconds by default). Ignored
+            when follow=false. Expiry closes the stream with a stream_expired
+            event; reconnect to continue reading logs.
+          schema:
+            type: integer
+            minimum: 1
       responses:
         '200':
           description: Driver log snapshot or SSE stream, selected by follow

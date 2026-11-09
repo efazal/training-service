@@ -162,7 +162,12 @@ def _check_status(sdk: LogClient, submission_id: str) -> None:
 
 
 async def driver_logs(
-    request: Request, project: str, name: str, follow: bool | None, tail_lines: int | None
+    request: Request,
+    project: str,
+    name: str,
+    follow: bool | None,
+    tail_lines: int | None,
+    timeout_seconds: int | None = None,
 ) -> PlainTextResponse | StreamingResponse:
     backend: JobsBackend = request.app.state.job_backend
     sdk, submission_id = await anyio.to_thread.run_sync(backend.log_client, request, project, name)
@@ -187,7 +192,11 @@ async def driver_logs(
             # Bound credential lifetime on a stream; reconnect reauthenticates.
             stream = cast(AsyncGenerator[str, None], sdk.tail_job_logs(submission_id))
             async with (
-                asyncio.timeout(request.app.state.log_stream_timeout_seconds),
+                asyncio.timeout(
+                    timeout_seconds
+                    if timeout_seconds is not None
+                    else request.app.state.log_stream_timeout_seconds
+                ),
                 aclosing(stream) as chunks,
             ):
                 async for chunk in chunks:

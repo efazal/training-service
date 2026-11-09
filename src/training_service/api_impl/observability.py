@@ -15,7 +15,8 @@ class ObservabilityApi(BaseObservabilityApi):
         job_id: str,
         follow: bool | None,
         tail_lines: int | None,
+        timeout_seconds: int | None,
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> PlainTextResponse | StreamingResponse:
-        return await driver_logs(request, project, job_id, follow, tail_lines)
+        return await driver_logs(request, project, job_id, follow, tail_lines, timeout_seconds)

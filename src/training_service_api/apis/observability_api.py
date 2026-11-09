@@ -133,6 +133,17 @@ async def stream_job_logs(
         alias="tail_lines",
         ge=1,
     ),
+    timeout_seconds: int | None = Query(
+        None,
+        description=(
+            "Total lifetime of this follow connection in seconds. When omitted, "
+            "uses the service configuration (300 seconds by default). Ignored when "
+            "follow&#x3D;false. Expiry closes the stream with a stream_expired "
+            "event; reconnect to continue reading logs. "
+        ),
+        alias="timeout_seconds",
+        ge=1,
+    ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> str:
     """Read or follow training job driver logs"""
@@ -150,6 +161,7 @@ async def stream_job_logs(
         job_id,
         follow,
         tail_lines,
+        timeout_seconds,
         token_OpenShiftBearer=token_OpenShiftBearer,
         request=request,
     )

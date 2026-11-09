@@ -50,6 +50,7 @@ def follow_logs(api, path, timeout):
                             if body["message"].strip():
                                 chunks.add(hashlib.sha256(body["message"].encode()).hexdigest())
                             if len(chunks) >= 2:
+                                verify_stream_timeout(api, path)
                                 return len(chunks)
                             event, data = None, []
                     pytest.fail(
@@ -63,6 +64,16 @@ def follow_logs(api, path, timeout):
             )
         time.sleep(min(2, max(0, deadline - time.monotonic())))
     pytest.fail("SSE deadline exceeded before incremental log events arrived", pytrace=False)
+
+
+def verify_stream_timeout(api, path):
+    """A short request expires, then a new request can still read the job logs."""
+    started = time.monotonic()
+    response = api.request("GET", path + "/logs", params={"follow": "true", "timeout_seconds": 1})
+    assert response.headers.get("content-type", "").startswith("text/event-stream")
+    assert '"code":"stream_expired"' in response.text
+    assert time.monotonic() - started < 10, "Per-request log timeout was not honored"
+    assert api.request("GET", path + "/logs").status_code == 200
 
 
 def observe(observer, job_id):
