@@ -30,7 +30,7 @@ from the training image automatically. Share `TRAINING_SERVICE_URL` and the
 Swagger UI is at `$TRAINING_SERVICE_URL/docs`.
 
 The default API image is the public amd64 developer preview
-`quay.io/modh/training-service:preview-93228d235ee8`. It contains the log-timeout and active-job
+`quay.io/modh/training-service:preview-83a2a358fa0c`. It contains the log-timeout and active-job
 deletion changes. This is a preview build, not a stable release. Keep the API
 image and chart from the same handoff. The separate `trainingRuntime.image`
 selects the training image; see [compatibility](training-runtime.md).
