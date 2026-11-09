@@ -38,8 +38,10 @@ from training_service.kubernetes_client import (
     describe_not_found,
     validate_names,
 )
+from training_service.log_config import log_backend_config
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
 from training_service.ray_entrypoint import get_backend
+from training_service.sdk_deletion import delete_ray_job
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_backend import JobBackend
 from training_service_api.models.resource_spec import ResourceSpec
@@ -558,17 +560,6 @@ class CodeFlareJobBackend:
         validate_names(project, name)
         with caller_client(request) as api:
             job = read_job(api, project, name)
-            state = job.get("status", {})
-            # Use the execution status, not a derived infrastructure-failure label.
-            # A retrying deployment can still launch work after an earlier attempt ended.
-            if state.get("jobStatus") not in TERMINAL or state.get("jobDeploymentStatus") in {
-                "Retrying",
-                "Initializing",
-                "Waiting",
-                "Suspending",
-                "Suspended",
-            }:
-                raise ApiError(409, "job_not_terminal", "Only terminal RayJobs can be deleted.")
             if job.get("spec", {}).get("clusterSelector"):
                 raise ApiError(
                     409, "shared_cluster", "Shared RayClusters cannot be deleted by this API."
@@ -579,23 +570,8 @@ class CodeFlareJobBackend:
                 if error.status != 404:
                     raise
                 # Normal when shutdown-after-finish already removed the owned cluster.
-            metadata = job["metadata"]
             with describe_not_found("Training job", name, project=project):
-                client.CustomObjectsApi(api).delete_namespaced_custom_object(
-                    "ray.io",
-                    "v1",
-                    project,
-                    "rayjobs",
-                    name,
-                    body=client.V1DeleteOptions(
-                        propagation_policy="Foreground",
-                        preconditions=client.V1Preconditions(
-                            uid=metadata["uid"],
-                            resource_version=metadata["resourceVersion"],
-                        ),
-                    ),
-                    _request_timeout=TIMEOUT,
-                )
+                delete_ray_job(api, project, job)
 
     def log_client(self, request: Request, project: str, name: str) -> tuple[LogClient, str]:
         validate_names(project, name)
@@ -638,28 +614,12 @@ class CodeFlareJobBackend:
             or re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", submission_id) is None
         ):
             raise logs_unavailable()
-        gateway = os.getenv("TRAINING_SERVICE_RAY_GATEWAY_URL", "").rstrip("/")
-        try:
-            parsed = urlsplit(gateway)
-        except ValueError:
-            raise logs_unavailable() from None
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in {"", "/"}
-            or os.getenv("RAY_ADDRESS")
-            or os.getenv("RAY_API_SERVER_ADDRESS")
-        ):
-            raise logs_unavailable()
+        configuration = log_backend_config()
         try:
             sdk = CodeFlareLogClient(
-                f"{gateway}/ray/{project}/{cluster}",
+                f"{configuration.gateway_url}/ray/{project}/{cluster}",
                 headers={"Authorization": request.headers["authorization"]},
-                verify=os.getenv("TRAINING_SERVICE_RAY_CA_FILE") or True,
+                verify=configuration.ca_file,
             )
         except ApiError:
             raise

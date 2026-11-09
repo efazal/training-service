@@ -13,6 +13,7 @@ CURL ?= curl
 HELM_RELEASE ?= training-service
 HELM_NAMESPACE ?= training-service
 HELM_CHART ?= charts/training-service
+HELM_TEST_GATEWAY ?= https://gateway.example.test
 HELM_OUTPUT_DIR ?= dist
 CHART_VERSION ?= 0.1.0
 APP_VERSION ?= $(CHART_VERSION)
@@ -106,13 +107,14 @@ helm-check:
 	@command -v helm >/dev/null || (echo "helm is required" >&2; exit 1)
 
 helm-lint: helm-check
-	helm lint $(HELM_CHART)
+	helm lint $(HELM_CHART) --set-string logBackend.gatewayURL=$(HELM_TEST_GATEWAY)
 
 helm-template: helm-check
 	helm template $(HELM_RELEASE) $(HELM_CHART) \
-		--namespace $(HELM_NAMESPACE) >/dev/null
+		--namespace $(HELM_NAMESPACE) --set-string logBackend.gatewayURL=$(HELM_TEST_GATEWAY) >/dev/null
 	helm template $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace $(HELM_NAMESPACE) \
+		--set-string logBackend.gatewayURL=$(HELM_TEST_GATEWAY) \
 		--set route.enabled=true \
 		--set route.host=training-service.example.com \
 		--set route.tls.enabled=true >/dev/null

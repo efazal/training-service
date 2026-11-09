@@ -8,7 +8,7 @@ imagePullSecrets: [] # For private Quay images use --use-podman-auth; the runner
 #   image: quay.io/modh/ray@sha256:REPLACE_WITH_TESTED_DIGEST
 env:
   - name: TRAINING_SERVICE_RAY_GATEWAY_URL
-    value: https://YOUR_AUTHENTICATED_RAY_GATEWAY
+    value: https://replace-me.apps.example.com
   - name: TRAINING_SERVICE_RAY_CA_FILE
     value: /var/run/training-service/ray-ca/ca.crt
 volumes:

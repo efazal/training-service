@@ -634,17 +634,14 @@ paths:
           $ref: '#/components/responses/404NotFound'
 
     delete:
-      summary: Delete a terminal Ray training job record
+      summary: Delete a training job
       description: >
-        Deletes any caller-authorized terminal RayJob in the target namespace,
-        including a RayJob not submitted through this API. Uses the caller's
-        existing Kubernetes permission. Foreground cascading deletion removes
-        the RayJob and its owned RayCluster and pods asynchronously. GPU resources
-        become available after those pods terminate; the response does not
-        promise instantaneous resource release. Shared or unowned clusters are
-        not deleted and return 409. The shared RayJob CRD is never removed.
-        A non-terminal job returns 409; this endpoint does not stop or cancel it. It does not delete
-        checkpoints or model outputs.
+        Deletes a pending, running, or terminal job through the caller's identity.
+        Active execution stops as its exclusively owned cluster and pods are
+        removed by foreground cascading cleanup. Deletion is asynchronous: 204
+        means accepted, and GET returns 404 after cleanup completes. Shared or
+        unverified cluster ownership is rejected. Concurrent changes return 409;
+        refresh and retry. Saved output on external storage is preserved.
       operationId: deleteTrainingJob
       x-request-context: true
       x-project-authorization:
@@ -657,7 +654,7 @@ paths:
         - Training Jobs
       responses:
         '204':
-          description: Terminal RayJob deletion initiated with foreground cascading cleanup of its owned RayCluster and pods
+          description: RayJob deletion initiated with foreground cascading cleanup of its owned RayCluster and pods
         '400':
           $ref: '#/components/responses/400BadRequest'
         '401':
@@ -669,14 +666,14 @@ paths:
         '404':
           $ref: '#/components/responses/404NotFound'
         '409':
-          description: RayJob is not terminal, changed concurrently, or does not have an exclusively owned RayCluster
+          description: RayJob changed concurrently or does not have an exclusively owned RayCluster
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
-                code: job_not_terminal
-                message: Only terminal RayJobs can be deleted.
+                code: conflict
+                message: The operation conflicts with the current resource state. Refresh and retry.
 
   /projects/{project}/training-jobs/{job_id}/logs:
     get:

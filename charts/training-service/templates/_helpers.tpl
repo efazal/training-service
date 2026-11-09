@@ -34,7 +34,7 @@ Create a default fully qualified app name.
 {{- $runtime = .value | default "" -}}
 {{- end -}}
 {{- end -}}
-{{- $runtime -}}
+{{- required "trainingRuntime.image is required (or legacy env TRAINING_RAY_IMAGE)." $runtime -}}
 {{- end -}}
 
 {{/*
@@ -74,3 +74,44 @@ Create the name of the service account to use.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/* Validate the resolved gateway and legacy migration settings once per render. */}}
+{{- define "training-service.validateLogBackend" -}}
+{{- $gateway := .Values.logBackend.gatewayURL -}}
+{{- $ca := .Values.logBackend.trustedCA -}}
+{{- $legacyGateway := false -}}
+{{- $legacyCA := false -}}
+{{- $legacyTimeout := false -}}
+{{- range .Values.env -}}
+{{- if eq .name "TRAINING_SERVICE_RAY_GATEWAY_URL" -}}
+{{- if or $gateway $legacyGateway -}}{{- fail "Configure logBackend.gatewayURL or env TRAINING_SERVICE_RAY_GATEWAY_URL once, not both." -}}{{- end -}}
+{{- $legacyGateway = true -}}
+{{- $gateway = .value | default "" -}}
+{{- end -}}
+{{- if eq .name "TRAINING_SERVICE_RAY_CA_FILE" -}}
+{{- if or $ca.configMapName $ca.bundle $legacyCA -}}{{- fail "Configure logBackend.trustedCA or env TRAINING_SERVICE_RAY_CA_FILE once, not both." -}}{{- end -}}
+{{- $legacyCA = true -}}
+{{- end -}}
+{{- if eq .name "TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS" -}}
+{{- if or (ne (int $.Values.logBackend.streamTimeoutSeconds) 300) $legacyTimeout -}}{{- fail "Configure logBackend.streamTimeoutSeconds or env TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS once, not both." -}}{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*$" (.value | default "" | toString)) -}}{{- fail "env TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS must be a positive integer." -}}{{- end -}}
+{{- $legacyTimeout = true -}}
+{{- end -}}
+{{- if or (eq .name "RAY_ADDRESS") (eq .name "RAY_API_SERVER_ADDRESS") -}}{{- fail "Unset RAY_ADDRESS and RAY_API_SERVER_ADDRESS in the API pod." -}}{{- end -}}
+{{- end -}}
+{{- if not $gateway -}}{{- fail "logBackend.gatewayURL is required. Run scripts/platform_values.py or provide the platform HTTPS gateway origin." -}}{{- end -}}
+{{- if not (regexMatch "^https://([a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?|\\[[0-9a-fA-F:]+\\])(:[0-9]{1,5})?/?$" $gateway) -}}{{- fail "logBackend.gatewayURL must be an HTTPS origin without credentials, a path, query parameters, or a fragment." -}}{{- end -}}
+{{- $port := regexFind ":[0-9]+/?$" $gateway | trimPrefix ":" | trimSuffix "/" -}}
+{{- if and $port (or (lt (int $port) 1) (gt (int $port) 65535)) -}}{{- fail "logBackend.gatewayURL port must be between 1 and 65535." -}}{{- end -}}
+{{- if and $ca.configMapName $ca.bundle -}}{{- fail "Configure logBackend.trustedCA.configMapName or bundle, not both." -}}{{- end -}}
+{{- if and (or $ca.configMapName $ca.bundle) (not $ca.key) -}}{{- fail "logBackend.trustedCA.key is required when a CA is configured." -}}{{- end -}}
+{{- if and $ca.bundle (or (not (contains "-----BEGIN CERTIFICATE-----" $ca.bundle)) (contains "PRIVATE KEY" $ca.bundle)) -}}{{- fail "logBackend.trustedCA.bundle must contain public PEM certificates only." -}}{{- end -}}
+{{- end -}}
+
+{{- define "training-service.logCAName" -}}
+{{- if .Values.logBackend.trustedCA.bundle -}}
+{{- printf "%s-log-ca" (include "training-service.fullname" . | trunc 56 | trimSuffix "-") -}}
+{{- else -}}
+{{- .Values.logBackend.trustedCA.configMapName -}}
+{{- end -}}
+{{- end -}}

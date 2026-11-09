@@ -1332,7 +1332,14 @@ def test_chart_organization_image_and_route_defaults(route_enabled):
 
     if not shutil.which("helm"):
         pytest.skip("helm is not installed")
-    command = ["helm", "template", "e2e", deploy.CHART]
+    command = [
+        "helm",
+        "template",
+        "e2e",
+        deploy.CHART,
+        "--set-string",
+        "logBackend.gatewayURL=https://gateway.example.test",
+    ]
     if not route_enabled:
         command.extend(["--set", "route.enabled=false"])
     documents = list(yaml.safe_load_all(deploy.command(command)))
@@ -1362,7 +1369,16 @@ def test_chart_mounts_ca_only_when_configured():
 
     if not shutil.which("helm"):
         pytest.skip("helm is not installed")
-    plain = deploy.command(["helm", "template", "e2e", deploy.CHART])
+    plain = deploy.command(
+        [
+            "helm",
+            "template",
+            "e2e",
+            deploy.CHART,
+            "--set-string",
+            "logBackend.gatewayURL=https://gateway.example.test",
+        ]
+    )
     configured = deploy.command(
         [
             "helm",
@@ -1405,7 +1421,18 @@ def test_chart_wires_training_runtime_image_once(tmp_path, legacy):
         values["trainingRuntime"] = {"image": image}
     path = tmp_path / "values.yaml"
     path.write_text(yaml.safe_dump(values))
-    rendered = deploy.command(["helm", "template", "e2e", deploy.CHART, "-f", path])
+    rendered = deploy.command(
+        [
+            "helm",
+            "template",
+            "e2e",
+            deploy.CHART,
+            "--set-string",
+            "logBackend.gatewayURL=https://gateway.example.test",
+            "-f",
+            path,
+        ]
+    )
     deployment = next(doc for doc in yaml.safe_load_all(rendered) if doc["kind"] == "Deployment")
     env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
     assert [entry for entry in env if entry["name"] == "TRAINING_RAY_IMAGE"] == [
@@ -1450,7 +1477,16 @@ def test_chart_rejects_duplicate_training_runtime_image(tmp_path):
         )
     )
     rendered = subprocess.run(
-        ["helm", "template", "e2e", str(deploy.CHART), "-f", str(path)],
+        [
+            "helm",
+            "template",
+            "e2e",
+            str(deploy.CHART),
+            "--set-string",
+            "logBackend.gatewayURL=https://gateway.example.test",
+            "-f",
+            str(path),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -1460,8 +1496,8 @@ def test_chart_rejects_duplicate_training_runtime_image(tmp_path):
     assert "env" in rendered.stderr
 
 
-@pytest.mark.parametrize("kind", ["foreign", "active"])
-def test_cleanup_never_deletes_foreign_or_active_workloads(kind):
+@pytest.mark.parametrize("state", ["SUCCEEDED", "RUNNING"])
+def test_cleanup_never_deletes_foreign_workloads(state):
     calls = []
     payload = {"name": "e2e-owned"}
 
@@ -1470,8 +1506,8 @@ def test_cleanup_never_deletes_foreign_or_active_workloads(kind):
         return httpx.Response(
             200,
             json={
-                "status": "RUNNING" if kind == "active" else "SUCCEEDED",
-                "submission": payload if kind == "active" else {"name": "foreign"},
+                "status": state,
+                "submission": {"name": "foreign"},
             },
         )
 
@@ -1711,3 +1747,36 @@ def test_all_skipped_live_selection_is_not_a_passing_gate():
     )
     assert result.returncode == 1
     assert "3 skipped" in result.stdout
+
+
+def test_cleanup_can_cancel_this_runs_active_job(monkeypatch):
+    monkeypatch.setattr(deploy.time, "sleep", lambda seconds: None)
+    calls = []
+    payload = {"name": "e2e-owned"}
+
+    def transport(request):
+        calls.append(request.method)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"status": "RUNNING", "submission": payload})
+        return httpx.Response(204 if request.method == "DELETE" else 404)
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        LiveAPI(http, "test-project").cleanup("e2e-owned", 10, payload)
+    assert calls == ["GET", "DELETE", "GET"]
+
+
+def test_runner_supports_structured_gateway(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    legacy = next(e for e in values["env"] if e["name"] == "TRAINING_SERVICE_RAY_GATEWAY_URL")
+    values["env"].remove(legacy)
+    values["logBackend"] = {"gatewayURL": legacy["value"]}
+    cluster_preflight(args, command, values)
+
+
+def test_runner_rejects_duplicate_gateway(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    values["logBackend"] = {"gatewayURL": "https://gateway.example.test"}
+    with pytest.raises(ValueError, match="not both"):
+        cluster_preflight(args, command, values)

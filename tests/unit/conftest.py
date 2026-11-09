@@ -21,6 +21,7 @@ def runtime_catalog(tmp_path_factory, monkeypatch):
     path = tmp_path_factory.mktemp("runtime-catalog") / "catalog.json"
     path.write_text(json.dumps(payload))
     monkeypatch.setenv("TRAINING_SERVICE_CATALOG_PATH", str(path))
+    monkeypatch.setenv("TRAINING_SERVICE_RAY_GATEWAY_URL", "https://gateway.example.test")
     monkeypatch.delenv("TRAINING_RAY_IMAGE", raising=False)
     catalog._load_catalog.cache_clear()
     yield path

@@ -38,8 +38,21 @@ authentication:
   tokenReview:
     enabled: true
 
-# Additional settings, such as the Ray gateway URL and trusted CA path.
-# Use trainingRuntime.image instead of setting TRAINING_RAY_IMAGE here.
+# Required platform configuration. Generate these settings with
+# scripts/platform_values.py, or supply the HTTPS gateway origin explicitly.
+logBackend:
+  gatewayURL: ""
+  streamTimeoutSeconds: 300
+  # Optional: leave empty when the gateway uses the container's normal trust.
+  # Reference a namespace-local ConfigMap for platform-managed CA rotation,
+  # or supply a public PEM bundle for the chart to create a ConfigMap.
+  trustedCA:
+    configMapName: ""
+    key: ca-bundle.crt
+    bundle: ""
+
+# Additional settings. Prefer the structured settings above and trainingRuntime.image.
+# Legacy gateway/CA environment variables remain supported; do not configure both.
 env: []
 envFrom: []
 

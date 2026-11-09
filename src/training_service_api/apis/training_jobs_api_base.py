@@ -162,5 +162,5 @@ class BaseTrainingJobsApi:
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> None:
-        """Delete a terminal Ray training job record"""
+        """Delete a training job"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")

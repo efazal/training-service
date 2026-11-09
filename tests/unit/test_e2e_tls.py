@@ -147,3 +147,18 @@ def test_ca_mount_must_remain_readonly(tmp_path, certificates, ca_values):
     with pytest.raises(ValueError, match="read-only"):
         prepare_tls(Namespace(ray_ca_bundle=None), command, tmp_path, ca_values)
     command.assert_not_called()
+
+
+def test_structured_helm_bundle_needs_no_duplicate_ray_configmap(tmp_path, certificates):
+    args = Namespace(ray_ca_bundle=None)
+    values = {"logBackend": {"trustedCA": {"bundle": certificates[-1]}}}
+    evidence = prepare_tls(args, discovery(certificates[0]), tmp_path, values)
+    assert args.ray_ca_bundle is None
+    assert evidence["ray_ca_source"] == "Helm public CA bundle"
+    assert args.ingress_ca_bundle.read_text() == certificates[0]
+
+
+def test_structured_helm_bundle_rejects_legacy_override(tmp_path, certificates, ca_values):
+    ca_values["logBackend"] = {"trustedCA": {"bundle": certificates[0]}}
+    with pytest.raises(ValueError, match="not both"):
+        prepare_tls(Namespace(ray_ca_bundle=None), Mock(), tmp_path, ca_values)

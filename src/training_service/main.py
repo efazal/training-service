@@ -21,6 +21,7 @@ from training_service.authorization import KubernetesProjectAuthorizer, OpenShif
 from training_service.contract import component_validator, contract_document, load_contract
 from training_service.errors import ApiError
 from training_service.jobs import CodeFlareJobBackend, JobsBackend, JobSubmitter
+from training_service.log_config import log_backend_config
 from training_service.logs import log_stream_timeout_seconds
 from training_service_api.apis.estimations_api import router as estimations_router
 from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
@@ -90,6 +91,8 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         try:
             await anyio.to_thread.run_sync(catalog.load_catalog)
+            if isinstance(application.state.job_backend, CodeFlareJobBackend):
+                await anyio.to_thread.run_sync(log_backend_config)
         except ApiError as error:
             # Keep diagnostics alive, but never report readiness with a bad catalog.
             _LOG.error("%s", error.message)
@@ -171,6 +174,8 @@ def create_app(
     @application.get("/readyz", include_in_schema=False)
     def ready() -> dict[str, str]:
         catalog.load_catalog()
+        if isinstance(application.state.job_backend, CodeFlareJobBackend):
+            log_backend_config()
         return {"status": "ok"}
 
     return application

@@ -406,8 +406,8 @@ async def get_training_job(
     responses={
         204: {
             "description": (
-                "Terminal RayJob deletion initiated with foreground cascading cleanup "
-                "of its owned RayCluster and pods"
+                "RayJob deletion initiated with foreground cascading cleanup of its "
+                "owned RayCluster and pods"
             )
         },
         400: {
@@ -438,13 +438,12 @@ async def get_training_job(
         409: {
             "model": ErrorResponse,
             "description": (
-                "RayJob is not terminal, changed concurrently, or does not have an "
-                "exclusively owned RayCluster"
+                "RayJob changed concurrently or does not have an exclusively owned RayCluster"
             ),
         },
     },
     tags=["Training Jobs"],
-    summary="Delete a terminal Ray training job record",
+    summary="Delete a training job",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -496,7 +495,7 @@ async def delete_training_job(
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> None:
-    """Delete a terminal Ray training job record"""
+    """Delete a training job"""
     await authorize_project_request(
         request,
         project,

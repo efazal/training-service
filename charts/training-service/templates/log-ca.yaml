@@ -1,0 +1,11 @@
+{{- if .Values.logBackend.trustedCA.bundle }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "training-service.logCAName" . }}
+  labels:
+    {{- include "training-service.labels" . | nindent 4 }}
+data:
+  {{ .Values.logBackend.trustedCA.key | quote }}: |
+    {{- .Values.logBackend.trustedCA.bundle | nindent 4 }}
+{{- end }}

@@ -54,11 +54,17 @@ def cluster_preflight(args, command, values):
             "Values must specify a tested trainingRuntime.image for the fixture init container"
         )
     args.runtime_image = runtime
-    gateway = configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL")
+    structured_gateway = (values.get("logBackend") or {}).get("gatewayURL")
+    if structured_gateway and configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL"):
+        raise ValueError(
+            "Configure logBackend.gatewayURL or env TRAINING_SERVICE_RAY_GATEWAY_URL, not both"
+        )
+    gateway = structured_gateway or configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL")
     parsed = urlsplit(gateway or "")
     if (
         not gateway
         or "YOUR_" in gateway
+        or "replace-me" in gateway
         or parsed.scheme != "https"
         or not parsed.hostname
         or parsed.username
@@ -107,6 +113,16 @@ def prepare_tls(args, command, results, values):
     """Use authenticated ConfigMap reads, never Secrets or unverified peer certificates."""
     configured = {e["name"]: e.get("value") for e in values.get("env", [])}
     ca_file_configured = configured.get("TRAINING_SERVICE_RAY_CA_FILE")
+    trust = (values.get("logBackend") or {}).get("trustedCA") or {}
+    if trust.get("configMapName"):
+        raise ValueError(
+            "A fresh E2E namespace cannot use an existing CA ConfigMap; use trustedCA.bundle "
+            "from scripts/platform_values.py, or the runner-managed legacy example."
+        )
+    if trust.get("bundle"):
+        if ca_file_configured or args.ray_ca_bundle:
+            raise ValueError("Configure the Helm public CA bundle or legacy CA override, not both")
+        public_certificates(trust["bundle"], "logBackend.trustedCA.bundle")
     if ca_file_configured or args.ray_ca_bundle:
         volumes = {
             v["name"]
@@ -167,7 +183,7 @@ def prepare_tls(args, command, results, values):
     if ca_file_configured and not args.ray_ca_bundle:
         args.ray_ca_bundle = discovered_file
         ray_pem = discovered
-    ray_source = "system trust"
+    ray_source = "Helm public CA bundle" if trust.get("bundle") else "system trust"
     if ray_override:
         ray_source = "--ray-ca-bundle"
     elif ray_pem:
