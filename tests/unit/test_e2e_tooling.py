@@ -162,6 +162,22 @@ def test_observer_does_not_claim_gpu_cleanup_without_observation():
         observer.verify_cleanup("test-job", 1)
 
 
+def test_pending_deletion_proves_resource_cleanup_without_claiming_gpu_use():
+    observer = object.__new__(Observer)
+    observer.project = "test-project"
+    observer.queue = "test-queue"
+    observer.job_uid = "test-uid"
+    observer.saw_gpu = False
+    observer.admitted = False
+    observer.preserved = []
+    observer.uids = {"test-uid"}
+    observer.custom = Mock()
+    observer.custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    observer.observe = Mock(return_value=[])
+    observer.listing = Mock(return_value=[])
+    observer.verify_cleanup("test-job", 1, require_running=False)
+
+
 @pytest.mark.parametrize(
     "cmd", [["helm", "install", "test"], [sys.executable, "-m", "pytest", "tests/e2e"]]
 )

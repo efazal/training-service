@@ -306,5 +306,9 @@ def test_delete_active_job(api, training_job, pytestconfig, observer, delete_at)
         time.sleep(1)
     api.cleanup(job_id, pytestconfig.getoption("cleanup_timeout"), payload)
     if observer:
-        observer.verify_cleanup(job_id, pytestconfig.getoption("cleanup_timeout"))
+        observer.verify_cleanup(
+            job_id,
+            pytestconfig.getoption("cleanup_timeout"),
+            require_running=delete_at == "RUNNING",
+        )
     api.request("GET", path, expected=404)
