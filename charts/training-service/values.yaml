@@ -1,11 +1,10 @@
 replicaCount: 1
 
 image:
-  # Intended public release repository; requires publication by a modh maintainer.
-  # Until published, override repository/tag with an available service image.
+  # Public amd64 developer preview. Use a tested commit-specific tag for handoff.
   repository: quay.io/modh/training-service
   pullPolicy: IfNotPresent
-  tag: "0.1.0"
+  tag: "preview-93228d235ee8"
 
 # Ray workload image containing Training Hub, separate from the API service image.
 # An init container discovers its Training Hub algorithms automatically, without a GPU.
