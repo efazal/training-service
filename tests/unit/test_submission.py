@@ -191,6 +191,49 @@ def test_algorithm_parameter_errors_explain_the_constraint(
     assert f"GET /api/v1/algorithms/{algorithm}" in raised.value.message
 
 
+@pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft"])
+@pytest.mark.parametrize("parameter", ["num_epochs", "effective_batch_size"])
+@pytest.mark.parametrize("value", [-1, 0])
+def test_nonpositive_epoch_and_batch_counts_rejected_before_storage_lookup(
+    monkeypatch: pytest.MonkeyPatch, algorithm: str, parameter: str, value: int
+) -> None:
+    caller_client = Mock(side_effect=AssertionError("Invalid parameters reached Kubernetes"))
+    monkeypatch.setattr(submission, "_caller_api_client", caller_client)
+    parameters = dict(_OSFT_EXAMPLE_PARAMETERS) if algorithm == "osft" else {}
+    parameters[parameter] = value
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {"name": algorithm, "parameters": parameters}
+    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+
+    response = TestClient(create_app(FakeAuthenticator(), FakeAuthorizer(), submitter)).post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=payload,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "validation_error",
+        "message": f"Algorithm '{algorithm}': parameter '{parameter}' must be at least 1.",
+    }
+    caller_client.assert_not_called()
+
+
+@pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft"])
+@pytest.mark.parametrize("value", [None, 1])
+def test_epoch_and_batch_bounds_preserve_nullable_defaults_and_valid_values(
+    algorithm: str, value: int | None
+) -> None:
+    parameters = dict(_OSFT_EXAMPLE_PARAMETERS) if algorithm == "osft" else {}
+    assert validate_algorithm_parameters(algorithm, parameters) == parameters
+    # OSFT requires a non-null batch size, as specified by its runtime schema.
+    parameters.update(
+        num_epochs=value,
+        effective_batch_size=1 if algorithm == "osft" else value,
+    )
+    assert validate_algorithm_parameters(algorithm, parameters) == parameters
+
+
 def test_post_denied_or_unauthenticated_never_calls_submitter() -> None:
     payload = _sample().model_dump(mode="json", exclude_unset=True)
     submitter = RecordingSubmitter()

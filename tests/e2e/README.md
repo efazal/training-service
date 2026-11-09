@@ -61,6 +61,10 @@ the ClusterQueue must admit the larger request. The selected Ray/Training Hub
 runtime must actually support all four backends; the test does not install or
 repair runtime dependencies. A known verl/TRL import failure is reported as a
 failed GRPO test, never counted as a pass.
+The math GRPO fixture also requires a runtime exposing `reward_type`. The stock
+Training Hub 0.11.2 catalog does not expose it, so that fixture currently returns
+`422` on the default runtime. A passing HTTP sanity run does not certify this
+opt-in training matrix; the fixture/runtime compatibility needs separate work.
 The baseline run still verifies incremental SSE. The matrix omits that timing-
 sensitive check so a short training run cannot fail solely because it finished
 before a stream could be observed.
@@ -216,10 +220,10 @@ fixture/verifier pod. The pod downloads a pinned public Qwen2.5-0.5B-Instruct
 revision and prepares eight chat examples plus twelve math examples; training uses PVC references and
 needs no HF token. Set `trainingRuntime.image` in the E2E values file to the
 tested Ray/Training Hub image; it is separate from the API service image the runner
-builds or reuses. The runner exports that runtime's Training Hub registry into
-a test-owned ConfigMap, configures algorithm discovery in Helm, and checks the
-compact list, details, schema opt-in, native parameter examples and error responses. The generated
-request and manifests (including the catalog) are saved with results.
+builds or reuses. The chart's init container exports that runtime's Training Hub
+registry into a shared catalog volume. The runner checks the compact list, details,
+schema opt-in, native parameter examples and error responses. The generated
+request and deployment manifests are saved with results.
 The fixture pod uses the new namespace's OpenShift-allocated `fsGroup` so the CSI
 driver can grant non-root access to its new PVC; no privileged/root setup pod or
 shared storage permission change is used. A write check runs before the download.
@@ -360,6 +364,18 @@ POST is **never automatically retried**. For complete training checks:
 ```bash
 make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile with-kueue --observe-cluster --artifact-pod e2e-output-verifier --check-logs --check-stream -s"
 ```
+
+The default HTTP suite pairs invalid parameters with valid representative/default
+requests for all four execution profiles. Valid requests must reach a deliberately
+missing PVC and return a contextual `404`; invalid requests must return a targeted
+`422` first. Tests validate fixtures independently against the advertised JSON
+Schema and check required fields, JSON types, nullability, enum/constant values,
+managed/Python-only arguments, execution-profile compatibility, and zero/negative
+epoch and batch counts. OSFT negative fixtures include its other required fields,
+so an unrelated missing-field error cannot satisfy the test. These checks create
+no training jobs and do not prove GPU execution, Kueue admission, logs or artifacts.
+The GRPO HTTP fixture uses supported JSON parameters independently of the math
+training fixture described above. Constraints absent from a runtime skip visibly.
 
 | Option | Purpose |
 | --- | --- |

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.e2e.algorithms import ALGORITHMS
+from tests.e2e.algorithms import ALGORITHMS, PARAMETERS
 
 
 @pytest.mark.parametrize("path", ["/healthz", "/readyz"])
@@ -306,6 +306,14 @@ def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, v
             "POST", api.jobs, expected=501 if variation == "kft" else 422, json=payload
         )
         api.error(response, "not_implemented" if variation == "kft" else "validation_error")
+        parameter = {
+            "negative_epochs": "num_epochs",
+            "zero_batch": "effective_batch_size",
+        }.get(variation)
+        if parameter:
+            message = api.object(response)["message"]
+            assert parameter in message
+            assert "at least 1" in message
         api.error(api.request("GET", f"{api.jobs}/{payload['name']}", expected=404), "not_found")
     finally:
         api.cleanup(payload["name"], pytestconfig.getoption("cleanup_timeout"), payload)
@@ -323,9 +331,15 @@ def test_algorithm_parameters_rejected_before_submission(
         "lora_sft": {"logging_steps": "one"},
         "lora_grpo": {"group_size": "four"},
     }
-    parameters = (
-        {"not_a_training_hub_parameter": 1} if invalid == "unsupported" else bad_values[algorithm]
-    )
+    # Keep required fields valid so OSFT cannot pass for an unrelated missing field.
+    parameters = {
+        **(PARAMETERS[algorithm] if algorithm == "osft" else {}),
+        **(
+            {"not_a_training_hub_parameter": 1}
+            if invalid == "unsupported"
+            else bad_values[algorithm]
+        ),
+    }
     payload = {
         "name": "e2e-" + missing_job_id[-16:],
         "model": {"uri": "pvc://e2e-missing-input/model/"},
@@ -334,8 +348,15 @@ def test_algorithm_parameters_rejected_before_submission(
     }
     try:
         response = api.request("POST", api.jobs, expected=422, json=payload)
-        api.error(response, "validation_error")
-        assert algorithm in api.object(response)["message"]
+        api.error(response, "validation_error", mentions=(algorithm,))
+        parameter = (
+            "not_a_training_hub_parameter"
+            if invalid == "unsupported"
+            else next(iter(bad_values[algorithm]))
+        )
+        message = api.object(response)["message"]
+        assert parameter in message
+        assert ("Unsupported parameter(s)" if invalid == "unsupported" else "must be") in message
         api.error(api.request("GET", f"{api.jobs}/{payload['name']}", expected=404), "not_found")
     finally:
         api.cleanup(payload["name"], pytestconfig.getoption("cleanup_timeout"), payload)

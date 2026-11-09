@@ -57,7 +57,9 @@ runtime-only algorithms without one return `422` before Kubernetes access.
 Adapter checks for topology and incompatible parameter combinations still run,
 but no static parameter allowlist or fallback schema is used. Signature-derived
 schemas describe types/defaults, not numerical bounds absent from the runtime
-metadata. A newer runtime may add parameters without changing the API image.
+metadata. The API additionally requires non-null `num_epochs` and
+`effective_batch_size` values to be at least 1, before any storage lookups.
+A newer runtime may add parameters without changing the API image.
 
 If export fails, Kubernetes will not start the API container. Inspect:
 

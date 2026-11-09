@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
+from xml.etree import ElementTree
 
 import httpx
 import pytest
@@ -875,7 +876,15 @@ def test_b_independent():
         check=False,
     )
     assert result.returncode == 1
-    assert "1 passed, 1 error" in result.stdout
+    # Warnings may appear between pass/error counts in pytest's terminal summary.
+    junit = ElementTree.parse(tmp_path / "results/junit.xml").getroot().find("testsuite")
+    assert junit is not None
+    assert {key: junit.get(key) for key in ("tests", "errors", "failures", "skipped")} == {
+        "tests": "2",
+        "errors": "1",
+        "failures": "0",
+        "skipped": "0",
+    }
     report = json.loads((tmp_path / "results/tests.json").read_text())
     assert report["passed"] == report["failed"] == 1
     assert "LocalQueue 'unit-project/e2e': not found" in report["failures"][0]["reason"]

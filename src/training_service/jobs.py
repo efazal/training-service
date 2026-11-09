@@ -164,6 +164,11 @@ def validate_algorithm_parameters(
     """Use the startup catalog for schema validation and retain execution-profile checks."""
     values = dict(parameters or {})
     catalog.validate_parameters(name, values, "ray", runtime_image)
+    # Runtime signatures describe types, not semantic bounds for these counts.
+    for parameter in ("num_epochs", "effective_batch_size"):
+        value = values.get(parameter)
+        if value is not None and value < 1:
+            raise _invalid(f"Algorithm '{name}': parameter '{parameter}' must be at least 1.")
     try:
         backend = get_backend(name)
         selected = values.pop("backend", backend.backend_name)
