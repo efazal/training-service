@@ -6,6 +6,8 @@ import re
 import ssl
 import threading
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import monotonic
 from urllib.parse import urlsplit
 
@@ -23,6 +25,8 @@ _GATEWAY_GROUP = "services.platform.opendatahub.io"
 _GATEWAY_NAME = "default-gateway"
 _DISCOVERY_TIMEOUT = (2, 3)
 _GATEWAY_CACHE_SECONDS = 60
+_INGRESS_CA_NAMESPACE = "openshift-config-managed"
+_INGRESS_CA_NAME = "default-ingress-cert"
 _DOMAIN = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
 )
@@ -94,20 +98,86 @@ def _discover_gateway() -> str:
     return "https://" + domain
 
 
+def _discover_ingress_ca() -> str:
+    """Read only the platform's published public ingress certificates, never Secrets."""
+    try:
+        configuration = client.Configuration()
+        config.load_incluster_config(client_configuration=configuration)
+        configuration.verify_ssl = True
+        configuration.retries = 0
+        with client.ApiClient(configuration) as api:
+            configmap = client.CoreV1Api(api).read_namespaced_config_map(
+                _INGRESS_CA_NAME, _INGRESS_CA_NAMESPACE, _request_timeout=_DISCOVERY_TIMEOUT
+            )
+    except (ApiException, ConfigException, HTTPError, OSError):
+        raise ApiError(
+            503,
+            "logs_unavailable",
+            "Cannot read the platform public ingress CA from "
+            "openshift-config-managed/default-ingress-cert. Check platform setup and the "
+            "chart's log-trust RoleBinding, or configure logBackend.trustedCA for a custom issuer.",
+        ) from None
+    bundle = (configmap.data or {}).get("ca-bundle.crt")
+    try:
+        if not isinstance(bundle, str) or not bundle or "PRIVATE KEY" in bundle:
+            raise ValueError
+        ssl.create_default_context(cadata=bundle)
+    except (OSError, ValueError):
+        raise ApiError(
+            503,
+            "logs_unavailable",
+            "The platform public ingress CA bundle in "
+            "openshift-config-managed/default-ingress-cert is missing or invalid.",
+        ) from None
+    return bundle
+
+
 class LogBackendResolver:
-    """Cache discovered gateways briefly; retry failed refreshes on the next request."""
+    """Cache platform endpoint/trust briefly; retry failed refreshes on the next request."""
 
     def __init__(self) -> None:
         self._gateway: str | None = None
         self._refresh_at = 0.0
+        self._ca_directory: TemporaryDirectory[str] | None = None
+        self._ca_file: str | None = None
+        self._ca_refresh_at = 0.0
         self._lock = threading.Lock()
+
+    def _platform_ca_file(self) -> str | None:
+        if os.getenv("TRAINING_SERVICE_RAY_CA_DISCOVERY") != "true" or any(
+            os.getenv(name)
+            for name in ("TRAINING_SERVICE_RAY_CA_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+        ):
+            return None
+        if self._ca_file is None or monotonic() >= self._ca_refresh_at:
+            bundle = _discover_ingress_ca()
+            try:
+                if self._ca_directory is None:
+                    self._ca_directory = TemporaryDirectory(prefix="training-service-log-ca-")
+                directory = Path(self._ca_directory.name)
+                pending = directory / "ca.next"
+                # Keep ordinary public roots as well as the platform's private ingress issuer.
+                pending.write_text(Path(where()).read_text().rstrip() + "\n" + bundle)
+                ssl.create_default_context(cafile=str(pending))
+                target = directory / "ca.crt"
+                pending.replace(target)
+            except (OSError, ValueError):
+                raise ApiError(
+                    503,
+                    "logs_unavailable",
+                    "Cannot prepare the platform public CA bundle. Ensure the service's "
+                    "temporary directory is writable (writableTemp.enabled in the chart).",
+                ) from None
+            self._ca_file = str(target)
+            self._ca_refresh_at = monotonic() + _GATEWAY_CACHE_SECONDS
+        return self._ca_file
 
     def configuration(self) -> "LogBackendConfig":
         with self._lock:
             if self._gateway is None or monotonic() >= self._refresh_at:
                 override = os.getenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
                 gateway = override or _discover_gateway()
-                resolved = log_backend_config(gateway)
+                resolved = log_backend_config(gateway, ca_file=self._platform_ca_file())
                 changed = self._gateway != resolved.gateway_url
                 self._gateway = resolved.gateway_url
                 self._refresh_at = (
@@ -121,9 +191,8 @@ class LogBackendResolver:
                 if changed:
                     _LOG.info("Resolved log gateway %s from %s", self._gateway, source)
                 return resolved
-            gateway = self._gateway
-        # Trust files can rotate independently of the cached gateway address.
-        return log_backend_config(gateway)
+            # Trust files and platform certificates can rotate independently of the address.
+            return log_backend_config(self._gateway, ca_file=self._platform_ca_file())
 
 
 @dataclass(frozen=True)
@@ -132,7 +201,9 @@ class LogBackendConfig:
     ca_file: str
 
 
-def log_backend_config(gateway_url: str | None = None) -> LogBackendConfig:
+def log_backend_config(
+    gateway_url: str | None = None, *, ca_file: str | None = None
+) -> LogBackendConfig:
     """Resolve trust on each new connection so mounted CA updates take effect."""
     gateway = (
         gateway_url
@@ -171,6 +242,7 @@ def log_backend_config(gateway_url: str | None = None) -> LogBackendConfig:
         os.getenv("TRAINING_SERVICE_RAY_CA_FILE")
         or os.getenv("REQUESTS_CA_BUNDLE")
         or os.getenv("CURL_CA_BUNDLE")
+        or ca_file
         or where()
     )
     try:

@@ -85,6 +85,21 @@ def cluster_preflight(args, command, values):
             "Do not reference existing imagePullSecrets in a fresh namespace; "
             "use --use-podman-auth to create a test-only Quay pull secret."
         )
+    if platform_ca_discovery(values):
+        for verb in ("create", "delete", "list"):
+            if verb != "create" and args.keep_resources:
+                continue
+            for resource in ("roles", "rolebindings"):
+                if (
+                    command(
+                        ["oc", "auth", "can-i", verb, resource, "-n", "openshift-config-managed"]
+                    ).strip()
+                    != "yes"
+                ):
+                    raise ValueError(
+                        f"Deployment identity needs {verb} access to {resource} in "
+                        "openshift-config-managed for automatic platform CA trust"
+                    )
     for resource in ("namespaces", "clusterroles", "clusterrolebindings"):
         if command(["oc", "auth", "can-i", "create", resource]).strip() != "yes":
             raise ValueError(f"Deployment identity needs create access to {resource}")
@@ -99,6 +114,24 @@ def cluster_preflight(args, command, values):
                 raise ValueError(
                     f"Deployment identity needs list access to {resource} to verify cleanup"
                 )
+
+
+def platform_ca_discovery(values):
+    """Match the chart's default trust mode without preprovisioning trust for it."""
+    configured = {e["name"]: e.get("value") for e in values.get("env", [])}
+    backend = values.get("logBackend") or {}
+    trust = backend.get("trustedCA") or {}
+    return bool(
+        trust.get("autoDiscover", True)
+        and not backend.get("gatewayURL")
+        and not configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL")
+        and not trust.get("configMapName")
+        and not trust.get("bundle")
+        and not any(
+            name in configured
+            for name in ("TRAINING_SERVICE_RAY_CA_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+        )
+    )
 
 
 def public_certificates(pem, source):
@@ -188,7 +221,13 @@ def prepare_tls(args, command, results, values):
     if ca_file_configured and not args.ray_ca_bundle:
         args.ray_ca_bundle = discovered_file
         ray_pem = discovered
-    ray_source = "Helm public CA bundle" if trust.get("bundle") else "system trust"
+    ray_source = (
+        "Helm public CA bundle"
+        if trust.get("bundle")
+        else "platform ingress CA discovery"
+        if platform_ca_discovery(values)
+        else "system trust"
+    )
     if ray_override:
         ray_source = "--ray-ca-bundle"
     elif ray_pem:
@@ -207,6 +246,7 @@ class RunEnvironment:
         self.namespace_creation_attempted = False
         self.pod_uid = None
         self.kueue_setup_error = None
+        self.platform_ca_discovery = False
         self.pull_secret = PullSecret(args.namespace, run_id) if args.use_podman_auth else None
 
     def create(self, filename, document):
@@ -505,6 +545,26 @@ class RunEnvironment:
                         raise RuntimeError(
                             "Helm cluster-scoped RBAC remains; inspect the test release"
                         )
+                    if self.platform_ca_discovery:
+                        trust_rbac = json.loads(
+                            self.command(
+                                [
+                                    "oc",
+                                    "get",
+                                    "roles,rolebindings",
+                                    "-n",
+                                    "openshift-config-managed",
+                                    "-l",
+                                    "app.kubernetes.io/instance=" + release,
+                                    "-o",
+                                    "json",
+                                ]
+                            )
+                        )
+                        if trust_rbac.get("items"):
+                            raise RuntimeError(
+                                "Helm platform CA RBAC remains; inspect the test release"
+                            )
                     evidence["deployment_cleanup"] = "removed"
                 core.delete_namespace(
                     self.args.namespace,

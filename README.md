@@ -3,7 +3,7 @@
 Python/FastAPI service generated from the Training API contract in
 `docs/api/openapi.yaml`. OpenShift TokenReview authenticates callers,
 SubjectAccessReview authorizes project operations, and POST training-job
-submission uses CodeFlare. Job listing, details, driver logs, and terminal
+submission uses CodeFlare. Job listing, details, driver logs, and active/terminal
 RayJob deletion and algorithm discovery are implemented. Queue discovery and
 estimation remain fail-closed with `501`.
 
@@ -99,6 +99,15 @@ route:
 
 These are the chart defaults. The HTTPS OpenShift Route gets a cluster-assigned
 hostname. Set `route.enabled=false` for an internal-only deployment.
+The log gateway and its public ingress CA are discovered automatically. Customers
+do not need to extract certificates, create a CA ConfigMap or supply a values file.
+Optional customization goes directly in `charts/training-service/values.yaml`:
+
+```bash
+helm upgrade --install training-service ./charts/training-service \
+  --namespace training-service --create-namespace --wait --timeout 15m
+```
+
 The service repository above is the intended public release location, but a
 public image there has not been verified. A `modh` maintainer must create or
 configure the repository as public and publish the service image first. Until

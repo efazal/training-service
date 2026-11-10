@@ -14,17 +14,26 @@ Kueue.
 
 ## Gateway configuration
 
-Leave `logBackend.gatewayURL` empty on RHOAI/ODH. The first log request reads
+The chart defaults discover both the gateway and its public ingress CA on RHOAI/ODH.
+No CA extraction, customer-created ConfigMap, extra values file or `--set` flag is
+needed. The first log request reads
 `GatewayConfig/default-gateway.status.domain`; Helm installs narrowly scoped
-read access for the service account. Discovered addresses are cached for 60
+read access for the service account. It also installs a Role/RoleBinding in
+`openshift-config-managed` allowing only `get` on ConfigMap `default-ingress-cert`.
+The service combines that public ingress CA with its normal public roots in
+writable temporary storage. No Secret or private key is read. Addresses and
+discovered CA material are cached for 60
 seconds and refreshed on the next log request after expiry. Discovery or trust
 failures return `503 logs_unavailable` from log endpoints; job operations and
 `/readyz` remain available when the runtime catalog is valid. Failed discovery
 is retried on the next log request. Existing streams keep their original address.
 
-For a custom platform, set `logBackend.gatewayURL` to its authenticated HTTPS
-gateway origin. The optional CA settings remain independent: use normal
-container trust or configure `logBackend.trustedCA` for a private issuer.
+For a custom platform, edit `logBackend.gatewayURL` in the chart's `values.yaml`.
+An explicit gateway uses normal container trust by default. For a custom issuer,
+edit `logBackend.trustedCA.configMapName`/`key` to reference an existing
+namespace-local ConfigMap, or set `bundle` to public PEM certificates so Helm
+creates one. Either overrides automatic CA discovery. Set `autoDiscover: false`
+to use only normal container trust with the automatically discovered gateway.
 `scripts/platform_values.py` remains an optional helper for exporting explicit
 gateway/public CA values. See [log configuration](job-operations.md#driver-logs).
 
@@ -72,15 +81,19 @@ Route/TLS hostname override. It does not install anything on a cluster.
 
 ## Install or upgrade from a checkout
 
-Use the exact image tag that was pushed above:
+On a prepared RHOAI/ODH cluster, install using the chart's defaults:
 
 ```bash
 helm upgrade --install training-service ./charts/training-service \
   --namespace training-service \
   --create-namespace \
-  --set-string image.repository="$IMAGE_REPOSITORY" \
-  --set-string image.tag="$IMAGE_TAG"
+  --wait --timeout 15m
 ```
+
+Optional customization goes directly in `charts/training-service/values.yaml`.
+For a development build, change `image.repository` and `image.tag` there to the
+image you built and pushed, then run the same install command. No `-f` is needed;
+Helm reads the chart's own `values.yaml` automatically.
 
 The service image and training image are separate settings. The chart defaults
 to public `quay.io/modh/ray:2.58.0-py312-cu130-th0112`, matching the API's Ray pin
@@ -115,12 +128,11 @@ helm upgrade --install training-service ./charts/training-service \
   --set 'imagePullSecrets[0].name=training-service-pull'
 ```
 
-Prefer a checked-in, environment-specific values file over a long list of
-`--set` arguments when configuring replicas, resources, service settings, or
-runtime environment variables:
+Edit the chart's `values.yaml` to customize replicas, resources, service settings
+or the training runtime, for example:
 
 ```yaml
-# values-development.yaml
+# charts/training-service/values.yaml (selected settings)
 replicaCount: 1
 
 image:

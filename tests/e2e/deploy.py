@@ -90,7 +90,9 @@ def arguments(argv=None):
     parser.add_argument(
         "--namespace", type=namespace, help="New namespace (default: training-e2e-<run>)"
     )
-    parser.add_argument("--values", required=True, type=Path, help="Credential-free Helm values")
+    parser.add_argument(
+        "--values", type=Path, help="Optional Helm overrides; defaults to the chart"
+    )
     parser.add_argument("--platform", default="linux/amd64", choices=("linux/amd64", "linux/arm64"))
     parser.add_argument("--storage-class", help="Existing ReadWriteMany-capable StorageClass")
     parser.add_argument(
@@ -150,10 +152,12 @@ def preflight(args):
     for tool in ("helm", "oc", "git") if args.reuse_image else ("podman", "helm", "oc", "git"):
         if not shutil.which(tool):
             raise ValueError(f"Required executable not found: {tool}")
-    if not args.values.is_file():
+    if args.values is not None and not args.values.is_file():
         raise ValueError("--values must be a readable credential-free Helm values file")
     try:
-        values = yaml.safe_load(args.values.read_text())
+        values = yaml.safe_load(
+            (args.values if args.values is not None else CHART / "values.yaml").read_text()
+        )
     except yaml.YAMLError:
         raise ValueError("--values must be valid YAML; raw values are not logged") from None
     if not isinstance(values, dict):
@@ -197,7 +201,7 @@ def preflight(args):
         allowed = command(["oc", "auth", "can-i", "create", resource, "-n", args.namespace]).strip()
         if allowed != "yes":
             raise ValueError(f"Deployment identity needs create access to {resource}")
-    command(["helm", "lint", CHART, "-f", args.values])
+    command(["helm", "lint", CHART, *(["-f", args.values] if args.values is not None else [])])
     return values
 
 
@@ -238,6 +242,9 @@ def run(args):
         print("Checking fresh namespace, storage, deployment permissions and tooling", flush=True)
         values = preflight(args)
         evidence["tls"] = prepare_tls(args, command, results, values)
+        environment.platform_ca_discovery = (
+            evidence["tls"].get("ray_ca_source") == "platform ingress CA discovery"
+        )
         print("Route/gateway TLS trust configured; certificate verification enabled", flush=True)
         if args.preflight_only:
             evidence["outcome"] = "preflight_passed"
@@ -311,8 +318,7 @@ def run(args):
             CHART,
             "-n",
             args.namespace,
-            "-f",
-            args.values,
+            *(["-f", args.values] if args.values is not None else []),
             "--set-string",
             "fullnameOverride=" + release,
             "--set-string",

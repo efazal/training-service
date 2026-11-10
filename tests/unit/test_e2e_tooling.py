@@ -610,6 +610,42 @@ def test_cluster_preflight_validates_queued_environment_read_only(prepared_clust
     assert all(call.args[0][1] in {"get", "auth"} for call in command.call_args_list)
 
 
+def test_deploy_preflight_accepts_chart_defaults_without_a_values_file(monkeypatch):
+    args = deploy.arguments(
+        [
+            "--image-repository",
+            "quay.io/test/training-service",
+            "--reuse-image",
+            "quay.io/test/training-service@sha256:" + "a" * 64,
+        ]
+    )
+    assert args.values is None
+    monkeypatch.setattr(deploy, "api_token", lambda: "unit-caller-placeholder")
+    monkeypatch.setattr(deploy.shutil, "which", lambda _: "/unit/tool")
+    monkeypatch.setattr(deploy, "cluster_preflight", Mock())
+
+    def query(argv, **kwargs):
+        if argv[:3] == ["oc", "get", "nodes"]:
+            return json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {"labels": {"kubernetes.io/arch": "amd64"}},
+                            "status": {"allocatable": {"nvidia.com/gpu": "1"}},
+                        }
+                    ]
+                }
+            )
+        return "yes"
+
+    command = Mock(side_effect=query)
+    monkeypatch.setattr(deploy, "command", command)
+    values = deploy.preflight(args)
+    assert values["logBackend"]["trustedCA"]["autoDiscover"] is True
+    assert values["logBackend"]["trustedCA"]["configMapName"] == ""
+    command.assert_any_call(["helm", "lint", deploy.CHART])
+
+
 def test_cluster_preflight_uses_chart_runtime_default(prepared_cluster):
     args, values, _, _, command = prepared_cluster
     values.pop("trainingRuntime")

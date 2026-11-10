@@ -97,10 +97,23 @@ def test_explicit_overrides_do_not_need_configmap_access(
 
 def test_public_gateway_can_keep_system_trust(tmp_path, certificates):
     args = Namespace(ray_ca_bundle=None)
-    evidence = prepare_tls(args, discovery(certificates[0]), tmp_path, {})
+    evidence = prepare_tls(
+        args,
+        discovery(certificates[0]),
+        tmp_path,
+        {"logBackend": {"gatewayURL": "https://custom.example"}},
+    )
     assert args.ray_ca_bundle is None
     assert args.ingress_ca_bundle.is_file()
     assert evidence["ray_ca_source"] == "system trust"
+
+
+def test_default_chart_trust_is_not_preprovisioned_by_the_e2e_runner(tmp_path, certificates):
+    args = Namespace(ray_ca_bundle=None)
+    evidence = prepare_tls(args, discovery(certificates[0]), tmp_path, {})
+    assert args.ray_ca_bundle is None
+    assert evidence["ray_ca_source"] == "platform ingress CA discovery"
+    assert args.ingress_ca_bundle.is_file()  # External test client still verifies Route TLS.
 
 
 @pytest.mark.parametrize("pem", [None, "", "not a certificate", "Fixture PRIVATE KEY marker"])

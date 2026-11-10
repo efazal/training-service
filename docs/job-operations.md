@@ -69,8 +69,11 @@ service account only `get` access to this named configuration; job operations
 still use the caller's identity. No backend URL is needed from dashboard users.
 
 Gateway discovery runs on the first log request and caches the validated
-address for 60 seconds. The next log request after expiry refreshes it from
-platform metadata; existing streams keep their original address. Address changes
+address for 60 seconds. The default chart also reads the public ingress CA from
+`openshift-config-managed/default-ingress-cert` using namespace-scoped, named
+ConfigMap read permission. Customers do not need to create a CA ConfigMap.
+The next log request after expiry refreshes platform metadata and certificates;
+existing streams keep their original address and TLS context. Address changes
 and their configuration source are logged. Failed discovery or invalid trust
 returns `503 logs_unavailable` from log endpoints and is retried on subsequent
 log requests. Job operations and `/readyz` do not depend on logging availability.
@@ -87,9 +90,13 @@ The legacy `TRAINING_SERVICE_RAY_GATEWAY_URL` environment override remains
 supported; configure it or the structured value once. Invalid overrides fail
 validation without falling back to a discovered endpoint.
 
-TLS verification is always enabled. The gateway certificate must be trusted
-by the container. `TRAINING_SERVICE_RAY_CA_FILE` can select a CA bundle that
-is already present in the image or mounted by the deployment. Do not set
+TLS verification is always enabled. Default platform trust combines normal public
+roots and the discovered ingress CA. Optional overrides in the chart's
+`values.yaml` select a custom gateway, an existing namespace-local CA ConfigMap,
+or a public PEM bundle managed by Helm. `trustedCA.autoDiscover: false` disables
+ingress CA discovery. Explicit gateways use normal container trust unless a
+custom CA is supplied. `TRAINING_SERVICE_RAY_CA_FILE` remains supported for
+non-Helm deployments. Do not set
 `RAY_ADDRESS` or `RAY_API_SERVER_ADDRESS`, which override SDK address resolution.
 No caller-supplied dashboard URL is used. RayJob and RayCluster reads use the
 caller token and require a verified RayJob controller owner reference. Shared

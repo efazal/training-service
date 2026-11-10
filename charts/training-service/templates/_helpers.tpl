@@ -92,6 +92,7 @@ Create the name of the service account to use.
 {{- if or $ca.configMapName $ca.bundle $legacyCA -}}{{- fail "Configure logBackend.trustedCA or env TRAINING_SERVICE_RAY_CA_FILE once, not both." -}}{{- end -}}
 {{- $legacyCA = true -}}
 {{- end -}}
+{{- if eq .name "TRAINING_SERVICE_RAY_CA_DISCOVERY" -}}{{- fail "Configure logBackend.trustedCA.autoDiscover instead of env TRAINING_SERVICE_RAY_CA_DISCOVERY." -}}{{- end -}}
 {{- if eq .name "TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS" -}}
 {{- if or (ne (int $.Values.logBackend.streamTimeoutSeconds) 300) $legacyTimeout -}}{{- fail "Configure logBackend.streamTimeoutSeconds or env TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS once, not both." -}}{{- end -}}
 {{- if not (regexMatch "^[1-9][0-9]*$" (.value | default "" | toString)) -}}{{- fail "env TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS must be a positive integer." -}}{{- end -}}
@@ -125,4 +126,15 @@ Create the name of the service account to use.
 {{- end -}}
 {{- end -}}
 {{- if not $gateway -}}true{{- end -}}
+{{- end -}}
+
+{{/* Platform ingress trust accompanies gateway discovery unless explicitly overridden. */}}
+{{- define "training-service.discoverLogCA" -}}
+{{- $override := or .Values.logBackend.trustedCA.configMapName .Values.logBackend.trustedCA.bundle -}}
+{{- range .Values.env -}}
+{{- if has .name (list "TRAINING_SERVICE_RAY_CA_FILE" "REQUESTS_CA_BUNDLE" "CURL_CA_BUNDLE") -}}
+{{- $override = true -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.logBackend.trustedCA.autoDiscover (include "training-service.discoverGateway" .) (not $override) -}}true{{- end -}}
 {{- end -}}

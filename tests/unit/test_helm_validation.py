@@ -27,6 +27,11 @@ def render(tmp_path, values):
     "values, message",
     [
         ({"serviceAccount": {"automount": False}}, "serviceAccount.automount"),
+        ({"logBackend": {"trustedCA": {"autoDiscover": "true"}}}, "autoDiscover"),
+        (
+            {"env": [{"name": "TRAINING_SERVICE_RAY_CA_DISCOVERY", "value": "true"}]},
+            "trustedCA.autoDiscover",
+        ),
         ({"logBackend": {"gatewayURL": "http://gateway.example"}}, "HTTPS origin"),
         ({"logBackend": {"gatewayURL": "https://user:pass@gateway.example"}}, "HTTPS origin"),
         ({"logBackend": {"gatewayURL": "https://gateway.example/path"}}, "HTTPS origin"),
@@ -208,3 +213,56 @@ def test_gateway_discovery_binds_custom_service_account(tmp_path):
         and d["metadata"]["name"].endswith("-gateway-discovery")
     )
     assert binding["subjects"][0]["name"] == "platform-service"
+
+
+def test_default_install_discovers_ca_with_only_namespace_scoped_named_read_access(tmp_path):
+    result = render(tmp_path, {})
+    assert result.returncode == 0, result.stderr
+    documents = list(yaml.safe_load_all(result.stdout))
+    role = next(d for d in documents if d["kind"] == "Role")
+    assert role["metadata"]["namespace"] == "openshift-config-managed"
+    assert role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["configmaps"],
+            "resourceNames": ["default-ingress-cert"],
+            "verbs": ["get"],
+        }
+    ]
+    binding = next(d for d in documents if d["kind"] == "RoleBinding")
+    assert binding["metadata"]["namespace"] == role["metadata"]["namespace"]
+    assert binding["roleRef"]["kind"] == "Role"
+    assert binding["roleRef"]["name"] == role["metadata"]["name"]
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "validation-training-service",
+            "namespace": "default",
+        }
+    ]
+    pod = next(d for d in documents if d["kind"] == "Deployment")["spec"]["template"]["spec"]
+    env = {e["name"]: e.get("value") for e in pod["containers"][0]["env"]}
+    assert env["TRAINING_SERVICE_RAY_CA_DISCOVERY"] == "true"
+    assert "TRAINING_SERVICE_RAY_CA_FILE" not in env
+    assert not any(v["name"] == "training-service-log-ca" for v in pod["volumes"])
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"logBackend": {"trustedCA": {"autoDiscover": False}}},
+        {"logBackend": {"trustedCA": {"configMapName": "customer-ca"}}},
+        {"logBackend": {"trustedCA": {"bundle": Path(where()).read_text()}}},
+        {"logBackend": {"gatewayURL": "https://custom.example"}},
+        {"env": [{"name": "TRAINING_SERVICE_RAY_CA_FILE", "value": "/custom/ca.crt"}]},
+    ],
+)
+def test_custom_trust_or_gateway_omits_platform_ca_permission(tmp_path, values):
+    result = render(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    documents = list(yaml.safe_load_all(result.stdout))
+    assert not any(d["kind"] in {"Role", "RoleBinding"} for d in documents)
+    pod = next(d for d in documents if d["kind"] == "Deployment")["spec"]["template"]["spec"]
+    assert "TRAINING_SERVICE_RAY_CA_DISCOVERY" not in {
+        e["name"] for e in pod["containers"][0]["env"]
+    }

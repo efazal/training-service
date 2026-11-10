@@ -125,6 +125,10 @@ spec:
             - name: TRAINING_SERVICE_RAY_CA_FILE
               value: /var/run/training-service/log-ca/ca.crt
             {{- end }}
+            {{- if include "training-service.discoverLogCA" . }}
+            - name: TRAINING_SERVICE_RAY_CA_DISCOVERY
+              value: "true"
+            {{- end }}
             {{- $legacyTimeout := false }}
             {{- range .Values.env }}
             {{- if eq .name "TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS" }}

@@ -44,10 +44,15 @@ authentication:
 logBackend:
   gatewayURL: ""
   streamTimeoutSeconds: 300
-  # Optional: leave empty when the gateway uses the container's normal trust.
-  # Reference a namespace-local ConfigMap for platform-managed CA rotation,
-  # or supply a public PEM bundle for the chart to create a ConfigMap.
   trustedCA:
+    # Default OpenShift install: automatically read the public ingress CA from
+    # openshift-config-managed/default-ingress-cert. No CA file or ConfigMap setup.
+    # New log connections pick up platform certificate rotation within 60 seconds.
+    autoDiscover: true
+    # Optional custom trust overrides; leave empty for the standard installation.
+    # configMapName references an existing ConfigMap in the service namespace.
+    # bundle supplies public PEM certificates for Helm to create a ConfigMap.
+    # Either override takes precedence over automatic discovery.
     configMapName: ""
     key: ca-bundle.crt
     bundle: ""
