@@ -40,7 +40,7 @@ authentication:
     enabled: true
 
 # By default the service discovers GatewayConfig/default-gateway status.domain
-# at startup. Set gatewayURL only to override discovery for a custom platform.
+# on log requests. Set gatewayURL only to override discovery for a custom platform.
 logBackend:
   gatewayURL: ""
   streamTimeoutSeconds: 300

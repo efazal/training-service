@@ -11,10 +11,10 @@ info:
     Requests authenticate the caller, propagate caller identity, and enforce
     existing OpenShift permissions and project isolation without privilege
     elevation. Supports submission, listing, job details, logs, and deletion of
-    terminal RayJob resources. Cancel, pause, and resume are outside this
-    Developer Preview. Resource estimation is a stretch goal. Job discovery,
-    details, and terminal deletion use caller-authorized Kubernetes APIs for
-    RayJob resources; driver logs use the Ray Jobs SDK.
+    active or terminal RayJob resources. Deleting an active job cancels execution;
+    pause and resume are outside this Developer Preview. Resource estimation is
+    a stretch goal. Job discovery, details, and deletion use caller-authorized
+    Kubernetes APIs for RayJob resources; driver logs use the Ray Jobs SDK.
   version: 1.4.0-dp
 servers:
   - url: https://taas.openshift.example.com/api/v1

@@ -293,6 +293,11 @@ class LiveAPI:
             status = detail.get("status")
             if not deleting:
                 deleted = self.request("DELETE", path, expected=(204, 404, 409))
+                if deleted.status_code == 409 and self.object(deleted).get("code") != "conflict":
+                    pytest.fail(
+                        "Cleanup refused: DELETE rejected for a non-retryable reason",
+                        pytrace=False,
+                    )
                 deleting = deleted.status_code in {204, 404}
             remaining = deadline - time.monotonic()
             if remaining <= 0:

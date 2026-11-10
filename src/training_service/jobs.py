@@ -19,7 +19,6 @@ from urllib.parse import unquote, urlsplit
 import anyio
 from codeflare_sdk import RayJob
 from codeflare_sdk.ray.cluster.config import ClusterConfiguration
-from codeflare_sdk.vendored.python_client.kuberay_job_api import RayjobApi
 from fastapi import Request
 from jsonschema import ValidationError
 from kubernetes import client
@@ -90,54 +89,6 @@ class _CallerApiClient(client.ApiClient):
                 # remains the creator while our API can map the actual status.
                 raise _SdkSubmissionError(error) from error
             raise
-
-
-class _SdkDeletionError(Exception):
-    """Carry Kubernetes errors through CodeFlare 0.40.1's catch-and-return wrapper."""
-
-    def __init__(self, error: ApiException) -> None:
-        super().__init__("The SDK RayJob deletion failed.")
-        self.error = error
-
-
-class _CallerDeleteTransport:
-    """Add the preconditions and cascading policy missing from the SDK delete API."""
-
-    def __init__(self, api: client.ApiClient, metadata: dict[str, Any]) -> None:
-        self.api = client.CustomObjectsApi(api)
-        self.options = client.V1DeleteOptions(
-            propagation_policy="Foreground",
-            preconditions=client.V1Preconditions(
-                uid=metadata["uid"], resource_version=metadata["resourceVersion"]
-            ),
-        )
-
-    def delete_namespaced_custom_object(self, **kwargs: Any) -> Any:
-        try:
-            return self.api.delete_namespaced_custom_object(
-                **kwargs, body=self.options, _request_timeout=TIMEOUT
-            )
-        except ApiException as error:
-            # RayjobApi catches ApiException and RayJob.delete then reports success,
-            # including for 403/409/500. Preserve those statuses for the HTTP layer.
-            raise _SdkDeletionError(error) from None
-
-
-def _delete_ray_job(api: client.ApiClient, project: str, job: dict[str, Any]) -> None:
-    """Use RayJob.delete without loading process-global or service-account credentials."""
-    # SDK 0.40.1 has no attach-existing constructor. Its normal constructors load
-    # global kubeconfig, create submission state, and cannot accept delete options.
-    # Hydrate only the fields used by the real, pinned RayJob.delete implementation.
-    sdk = object.__new__(RayJob)
-    sdk.name = job["metadata"]["name"]
-    sdk.namespace = project
-    sdk._api_client = api
-    sdk._api = object.__new__(RayjobApi)
-    sdk._api.api = _CallerDeleteTransport(api, job["metadata"])
-    try:
-        sdk.delete()
-    except _SdkDeletionError as error:
-        raise error.error from None
 
 
 class JobSubmitter(Protocol):
@@ -622,8 +573,22 @@ class CodeFlareJobBackend:
                 if error.status != 404:
                     raise
                 # Normal when shutdown-after-finish already removed the owned cluster.
+            metadata = job["metadata"]
             with describe_not_found("Training job", name, project=project):
-                _delete_ray_job(api, project, job)
+                client.CustomObjectsApi(api).delete_namespaced_custom_object(
+                    group="ray.io",
+                    version="v1",
+                    namespace=project,
+                    plural="rayjobs",
+                    name=name,
+                    body=client.V1DeleteOptions(
+                        propagation_policy="Foreground",
+                        preconditions=client.V1Preconditions(
+                            uid=metadata["uid"], resource_version=metadata["resourceVersion"]
+                        ),
+                    ),
+                    _request_timeout=TIMEOUT,
+                )
 
     def log_client(self, request: Request, project: str, name: str) -> tuple[LogClient, str]:
         validate_names(project, name)

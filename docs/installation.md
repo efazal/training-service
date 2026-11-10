@@ -14,11 +14,13 @@ Kueue.
 
 ## Gateway configuration
 
-Leave `logBackend.gatewayURL` empty on RHOAI/ODH. At startup, the service reads
+Leave `logBackend.gatewayURL` empty on RHOAI/ODH. The first log request reads
 `GatewayConfig/default-gateway.status.domain`; Helm installs narrowly scoped
-read access for its service account. Discovery failures keep `/readyz` at 503
-with a diagnostic message and are retried on later checks. The first valid
-address is fixed until restart; restart the deployment after a gateway change.
+read access for the service account. Discovered addresses are cached for 60
+seconds and refreshed on the next log request after expiry. Discovery or trust
+failures return `503 logs_unavailable` from log endpoints; job operations and
+`/readyz` remain available when the runtime catalog is valid. Failed discovery
+is retried on the next log request. Existing streams keep their original address.
 
 For a custom platform, set `logBackend.gatewayURL` to its authenticated HTTPS
 gateway origin. The optional CA settings remain independent: use normal

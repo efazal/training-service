@@ -1890,3 +1890,74 @@ def test_runner_allows_service_gateway_discovery(prepared_cluster):
     values["env"] = []
     cluster_preflight(args, command, values)
     assert all(call.args[0][1] in {"get", "auth"} for call in command.call_args_list)
+
+
+@pytest.mark.parametrize("code", ["shared_cluster", "unowned_cluster", "other", None])
+def test_cleanup_refuses_non_retryable_conflicts_immediately(monkeypatch, code):
+    sleep = Mock()
+    monkeypatch.setattr(live_config.time, "sleep", sleep)
+    calls = []
+    payload = {"name": "e2e-owned"}
+
+    def transport(request):
+        calls.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "RUNNING", "submission": payload})
+        return httpx.Response(409, json={"code": code, "message": "Deletion refused"})
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        with pytest.raises(pytest.fail.Exception, match="Cleanup refused: DELETE"):
+            LiveAPI(http, "test-project").cleanup("e2e-owned", 0, payload)
+    assert calls == ["GET", "DELETE"]
+    sleep.assert_not_called()
+
+
+def test_cleanup_retries_only_concurrent_change_conflicts(monkeypatch):
+    monkeypatch.setattr(live_config.time, "sleep", lambda _: None)
+    calls = []
+    payload = {"name": "e2e-owned"}
+
+    def transport(request):
+        calls.append(request.method)
+        if len(calls) == 2:
+            return httpx.Response(409, json={"code": "conflict", "message": "Refresh and retry"})
+        if len(calls) == 5:
+            return httpx.Response(404)
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"status": "RUNNING", "submission": payload})
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        LiveAPI(http, "test-project").cleanup("e2e-owned", 10, payload)
+    assert calls == ["GET", "DELETE", "GET", "DELETE", "GET"]
+
+
+@pytest.mark.parametrize("legacy", [{"value": ""}, {}])
+def test_runner_rejects_structured_gateway_with_empty_legacy_entry(prepared_cluster, legacy):
+    args, values, _, _, command = prepared_cluster
+    values["env"] = [{"name": "TRAINING_SERVICE_RAY_GATEWAY_URL", **legacy}]
+    values["logBackend"] = {"gatewayURL": "https://gateway.example.test"}
+    with pytest.raises(ValueError, match="not both"):
+        cluster_preflight(args, command, values)
+    assert len(command.call_args_list) == 2
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("suffix", ["/path", "//", ":0", ":65536", ":bad", ":99999", ":1/path"])
+def test_runner_rejects_non_origin_gateway_before_provisioning(
+    prepared_cluster, structured, suffix
+):
+    args, values, _, _, command = prepared_cluster
+    gateway = "https://gateway.example.test" + suffix
+    if structured:
+        values["env"] = []
+        values["logBackend"] = {"gatewayURL": gateway}
+    else:
+        values["env"][0]["value"] = gateway
+    with pytest.raises(ValueError, match="A gateway override must specify"):
+        cluster_preflight(args, command, values)
+    assert len(command.call_args_list) == 2

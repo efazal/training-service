@@ -1,4 +1,4 @@
-"""Validate permanent log backend settings without connecting to a training job."""
+"""Resolve and validate log backend settings for each new log connection."""
 
 import logging
 import os
@@ -6,6 +6,7 @@ import re
 import ssl
 import threading
 from dataclasses import dataclass
+from time import monotonic
 from urllib.parse import urlsplit
 
 from kubernetes import client, config
@@ -21,6 +22,7 @@ _LOG = logging.getLogger("uvicorn.error")
 _GATEWAY_GROUP = "services.platform.opendatahub.io"
 _GATEWAY_NAME = "default-gateway"
 _DISCOVERY_TIMEOUT = (2, 3)
+_GATEWAY_CACHE_SECONDS = 60
 _DOMAIN = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
 )
@@ -79,7 +81,7 @@ def _discover_gateway() -> str:
             503,
             "logs_unavailable",
             "GatewayConfig/default-gateway is not ready for its current generation; "
-            "gateway discovery will retry on the next readiness check.",
+            "gateway discovery will retry on the next log request.",
         )
     domain = status.get("domain")
     if not isinstance(domain, str) or len(domain) > 253 or _DOMAIN.fullmatch(domain) is None:
@@ -93,28 +95,34 @@ def _discover_gateway() -> str:
 
 
 class LogBackendResolver:
-    """Pin the first valid gateway per backend; failed discovery remains retryable."""
+    """Cache discovered gateways briefly; retry failed refreshes on the next request."""
 
     def __init__(self) -> None:
         self._gateway: str | None = None
+        self._refresh_at = 0.0
         self._lock = threading.Lock()
 
     def configuration(self) -> "LogBackendConfig":
         with self._lock:
-            if self._gateway is None:
+            if self._gateway is None or monotonic() >= self._refresh_at:
                 override = os.getenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
                 gateway = override or _discover_gateway()
                 resolved = log_backend_config(gateway)
+                changed = self._gateway != resolved.gateway_url
                 self._gateway = resolved.gateway_url
+                self._refresh_at = (
+                    float("inf") if override else monotonic() + _GATEWAY_CACHE_SECONDS
+                )
                 source = (
                     "TRAINING_SERVICE_RAY_GATEWAY_URL"
                     if override
                     else "GatewayConfig/default-gateway status.domain"
                 )
-                _LOG.info("Resolved log gateway %s from %s", self._gateway, source)
+                if changed:
+                    _LOG.info("Resolved log gateway %s from %s", self._gateway, source)
                 return resolved
             gateway = self._gateway
-        # Trust files can rotate independently of the pinned gateway address.
+        # Trust files can rotate independently of the cached gateway address.
         return log_backend_config(gateway)
 
 

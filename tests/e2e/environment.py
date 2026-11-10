@@ -55,26 +55,31 @@ def cluster_preflight(args, command, values):
         )
     args.runtime_image = runtime
     structured_gateway = (values.get("logBackend") or {}).get("gatewayURL")
-    if structured_gateway and configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL"):
+    if structured_gateway and "TRAINING_SERVICE_RAY_GATEWAY_URL" in configured:
         raise ValueError(
             "Configure logBackend.gatewayURL or env TRAINING_SERVICE_RAY_GATEWAY_URL, not both"
         )
     gateway = structured_gateway or configured.get("TRAINING_SERVICE_RAY_GATEWAY_URL")
-    parsed = urlsplit(gateway or "")
-    if gateway and (
-        "YOUR_" in gateway
-        or "replace-me" in gateway
-        or parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
+    try:
+        parsed = urlsplit(gateway or "")
+        valid_gateway = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.port != 0
+            and parsed.path in {"", "/"}
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+            and not any(char.isspace() for char in gateway or "")
+        )
+    except ValueError:
+        valid_gateway = False
+    if gateway and ("YOUR_" in gateway or "replace-me" in gateway or not valid_gateway):
         raise ValueError(
             "A gateway override must specify the authenticated HTTPS "
             "TRAINING_SERVICE_RAY_GATEWAY_URL"
-        )
+        ) from None
     if values.get("imagePullSecrets"):
         raise ValueError(
             "Do not reference existing imagePullSecrets in a fresh namespace; "

@@ -1,4 +1,4 @@
-"""Permanent log configuration fails readiness before an active job is needed."""
+"""Invalid log settings fail log configuration without disabling the API."""
 
 import ssl
 from pathlib import Path
@@ -26,15 +26,17 @@ from training_service.main import create_app
         "https://gateway.example:bad",
     ],
 )
-def test_invalid_gateway_fails_readiness_but_not_liveness(monkeypatch, gateway):
+def test_invalid_gateway_fails_log_configuration_but_not_readiness(monkeypatch, gateway):
     monkeypatch.setenv("TRAINING_SERVICE_RAY_GATEWAY_URL", gateway)
-    with TestClient(create_app()) as http:
+    app = create_app()
+    with TestClient(app) as http:
         assert http.get("/healthz").status_code == 200
-        response = http.get("/readyz")
-        assert response.status_code == 503
-        assert response.json()["code"] == "logs_unavailable"
-        assert "TRAINING_SERVICE_RAY_GATEWAY_URL" in response.json()["message"]
-        assert "user:pass" not in response.text
+        assert http.get("/readyz").status_code == 200
+        with pytest.raises(ApiError) as error:
+            app.state.job_backend.log_configuration()
+        assert error.value.status_code == 503 and error.value.code == "logs_unavailable"
+        assert "TRAINING_SERVICE_RAY_GATEWAY_URL" in error.value.message
+        assert "user:pass" not in error.value.message
 
 
 def test_custom_ca_rotation_is_read_without_restart(monkeypatch, tmp_path):
@@ -45,7 +47,9 @@ def test_custom_ca_rotation_is_read_without_restart(monkeypatch, tmp_path):
     assert http.get("/readyz").status_code == 200
     assert log_backend_config().ca_file == str(path)
     path.write_text("invalid replacement")
-    assert http.get("/readyz").status_code == 503
+    with pytest.raises(ApiError, match="CA bundle"):
+        log_backend_config()
+    assert http.get("/readyz").status_code == 200
     path.write_bytes(Path(where()).read_bytes())
     assert http.get("/readyz").status_code == 200
 

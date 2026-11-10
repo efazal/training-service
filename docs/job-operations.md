@@ -68,12 +68,13 @@ backend log access at `/ray/{project}/{rayClusterName}`. The chart grants the
 service account only `get` access to this named configuration; job operations
 still use the caller's identity. No backend URL is needed from dashboard users.
 
-The first valid gateway is fixed until service restart and its address/source
-are logged. If discovery is unavailable or the platform generation is not ready,
-`/readyz` returns an actionable 503 and retries on subsequent checks; `/healthz`
-stays available. Readiness validates configuration, not backend connectivity.
-Gateway changes take effect after a rolling restart. Offline Helm rendering
-requires no cluster lookup.
+Gateway discovery runs on the first log request and caches the validated
+address for 60 seconds. The next log request after expiry refreshes it from
+platform metadata; existing streams keep their original address. Address changes
+and their configuration source are logged. Failed discovery or invalid trust
+returns `503 logs_unavailable` from log endpoints and is retried on subsequent
+log requests. Job operations and `/readyz` do not depend on logging availability.
+Offline Helm rendering requires no cluster lookup.
 
 For custom platforms, set an explicit HTTPS origin to bypass discovery:
 
@@ -107,12 +108,13 @@ after the GPU pods terminate. The response does not mean GPU release has
 already completed: finalizers, controllers, and pod termination are asynchronous.
 Stalled finalizers must be investigated; the API does not force-remove them.
 
-Only execution states `SUCCEEDED`, `FAILED`, and `STOPPED` are eligible.
-Pending/running jobs, unknown execution states, retrying deployments, and
-shared or unowned clusters return **409** without cleanup. This is not a
-cancel endpoint. UID and resource-version preconditions reject a concurrent
-change with 409 rather than deleting a different or restarted job.
-Already-cleaned-up clusters do not prevent deletion of their terminal job.
+Pending, running, and terminal jobs can be deleted, regardless of execution
+or deployment state. Deleting an active job cancels execution as Kubernetes
+removes its owned cluster and pods. Shared or unowned clusters return **409**
+without cleanup. UID and resource-version preconditions reject a concurrent
+change with **409** rather than deleting a different or restarted job. Poll
+`GET /{job_id}` until it returns **404** to confirm cleanup has finished.
+An already-removed cluster does not prevent deletion of its job.
 Existing input/output PVCs, checkpoints, model outputs, and referenced
 Secrets are not explicitly deleted. Normal Kubernetes ownership rules still
 apply to anything a job owner has configured as a dependent.
@@ -134,7 +136,7 @@ is never disabled. Backend-originated `401` responses include
 - 400: malformed path, query, or continuation token.
 - 401/403: authentication or caller permission denied.
 - 404: requested job/project or Ray submission absent.
-- 409: unsafe deletion or driver logs not ready.
+- 409: shared/unowned cluster, concurrent deletion conflict, or driver logs not ready.
 - 410: driver logs gone with the managed RayCluster.
 - 503: authentication, authorization, Kubernetes, or Ray backend unavailable.
 

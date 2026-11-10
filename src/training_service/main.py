@@ -90,8 +90,6 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         try:
             await anyio.to_thread.run_sync(catalog.load_catalog)
-            if isinstance(application.state.job_backend, CodeFlareJobBackend):
-                await anyio.to_thread.run_sync(application.state.job_backend.log_configuration)
         except ApiError as error:
             # Keep diagnostics alive, but never report readiness with a bad catalog.
             _LOG.error("%s", error.message)
@@ -173,8 +171,6 @@ def create_app(
     @application.get("/readyz", include_in_schema=False)
     def ready() -> dict[str, str]:
         catalog.load_catalog()
-        if isinstance(application.state.job_backend, CodeFlareJobBackend):
-            application.state.job_backend.log_configuration()
         return {"status": "ok"}
 
     return application
