@@ -180,9 +180,15 @@ backend integrations are tracked by RHOAIENG-96350 through RHOAIENG-96352.
 
 ## Log-stream lifetime
 
-Each `GET .../logs?follow=true` connection has a total lifetime of 300 seconds
-(five minutes) by default, not an idle timeout. For a two-hour job, allow extra
-time by setting a three-hour limit in your Helm values:
+Each `GET .../logs?follow=true` connection has a maximum total lifetime of
+300 seconds (five minutes) by default. This is a connection limit, not an idle
+timeout or a limit on training duration. Reconnect to keep reading a long job's
+logs. Clients can request a shorter connection with, for example,
+`GET .../logs?follow=true&timeout_seconds=60`. A larger request is capped at the
+deployment's configured maximum.
+
+Administrators can change that maximum in Helm values. To allow connections
+of up to three hours:
 
 ```yaml
 env:
@@ -193,15 +199,19 @@ env:
 Merge this entry into any existing `env` list and upgrade the release to roll
 out the change. The setting is read at application startup and must be a
 positive integer number of seconds; invalid values prevent startup. Zero does
-not disable the limit. No per-request timeout parameter is required.
+not disable the limit. Omitting `timeout_seconds` uses this configured maximum.
+The query value must be between 1 and 2147483647, written with ASCII digits
+without signs, leading zeros, whitespace, or a decimal point. It is validated
+for both follow and snapshot requests: invalid values return 400, and valid
+values have no effect on snapshots (`follow=false`).
 
 At expiry, the API emits an SSE `error` event with code `stream_expired` and
-message `Reconnect to continue.`, then closes the connection. Reconnecting
-reauthenticates the caller; a longer connection retains its initial
-authorization for longer. Training continues unaffected. Snapshot requests
-(`follow=false`) are unchanged. Ingress/network timeouts can close a stream
-earlier, and this setting does not extend token validity or retain logs after
-the Ray cluster is removed.
+message `Reconnect to continue.`, then closes the connection. Each connection
+uses its initial authorization until it closes; reconnecting rechecks the
+caller's authentication and project access. The configured maximum bounds the
+time between those checks, and callers cannot extend it. Training continues
+unaffected. Ingress/network timeouts can close a stream earlier. Logs remain
+available only while the Ray cluster is reachable.
 
 ## OpenShift Route and TLS
 

@@ -133,6 +133,24 @@ async def stream_job_logs(
         alias="tail_lines",
         ge=1,
     ),
+    timeout_seconds: int | None = Query(
+        None,
+        description=(
+            "Requested total lifetime of this follow connection in seconds (1 to "
+            "2147483647), written with ASCII digits and no signs, leading zeros, "
+            "whitespace, or decimal point. The numeric upper bound keeps deadline "
+            "arithmetic representable. The effective lifetime is the smaller of "
+            "this value and TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS (300 "
+            "seconds by default); omission uses that configured maximum. Validated "
+            "for every request: invalid values return 400 even when "
+            "follow&#x3D;false; valid values have no effect on snapshots. Expiry "
+            "closes the stream with a stream_expired event; reconnect to continue "
+            "reading logs. "
+        ),
+        alias="timeout_seconds",
+        ge=1,
+        le=2147483647,
+    ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> str:
     """Read or follow training job driver logs"""
@@ -150,6 +168,7 @@ async def stream_job_logs(
         job_id,
         follow,
         tail_lines,
+        timeout_seconds,
         token_OpenShiftBearer=token_OpenShiftBearer,
         request=request,
     )

@@ -247,6 +247,20 @@ def test_invalid_log_queries(api, missing_job_id, follow, tail):
     )
 
 
+@pytest.mark.parametrize("follow", ["false", "true"])
+@pytest.mark.parametrize("timeout", ["0", "1.0", "+5", "05", "2147483648"])
+def test_invalid_log_timeout_queries(api, missing_job_id, follow, timeout):
+    api.error(
+        api.request(
+            "GET",
+            f"{api.jobs}/{missing_job_id}/logs",
+            expected=400,
+            params={"follow": follow, "timeout_seconds": timeout},
+        ),
+        "bad_request",
+    )
+
+
 @pytest.mark.parametrize(
     "variation",
     [

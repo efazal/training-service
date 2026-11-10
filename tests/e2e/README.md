@@ -367,6 +367,28 @@ POST is **never automatically retried**. For complete training checks:
 make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile with-kueue --observe-cluster --artifact-pod e2e-output-verifier --check-logs --check-stream -s"
 ```
 
+With `--check-stream`, timeout verification opens a one-second SSE connection,
+checks the parsed `stream_expired` error event and measured lifetime, then reconnects
+with a three-second request and requires nonempty log events. It checks that the
+job remains `RUNNING` after each expiry and that a subsequent snapshot still works.
+Timing allows 0.25 seconds early and 0.5 seconds late after response headers;
+connection closure must follow the expiry event within 0.5 seconds. A separate
+total client deadline bounds stalled headers and quiet or continuously active streams.
+Use a workload that remains running throughout these checks; an early completion
+fails rather than silently skipping timeout verification. Per-connection measurements
+are printed with `-s` and saved in `lifecycle.json` under `log_timeouts` when an evidence
+directory is configured.
+
+For default-lifetime and server-cap checks, configure a **separate test deployment**
+with `TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS=3`, then add
+`--log-stream-max-seconds 3` to the existing-deployment command above. The test also
+measures a connection with the parameter omitted and one requesting `2147483647`
+seconds; both must expire at the configured three-second maximum. This flag states
+an expected existing configuration; it does not modify the deployment. Allow at
+least twelve seconds of running-job time for the four connections. Omitting the
+flag measures only the one- and three-second requests and does not certify the
+deployment maximum. Keep the normal service default at five minutes.
+
 The default HTTP suite pairs invalid parameters with valid representative/default
 requests for all four execution profiles. Valid requests must reach a deliberately
 missing PVC and return a contextual `404`; invalid requests must return a targeted
@@ -383,6 +405,7 @@ training fixture described above. Constraints absent from a runtime skip visibly
 | --- | --- |
 | `--job-timeout 1800` | Training deadline, seconds |
 | `--stream-timeout 60` | SSE deadline; socket reads bounded too |
+| `--log-stream-max-seconds N` | Expected deployed limit; with `--check-stream`, also measure omitted-timeout and above-limit requests |
 | `--cleanup-timeout 180` | Terminal/resource cleanup deadline |
 | `--request-timeout 30` | Per HTTP timeout, existing-deployment command |
 | `--build-timeout 1800`, `--deploy-timeout 300` | Build/push and rollout/Route deadlines, deployment runner |

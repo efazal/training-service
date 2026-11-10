@@ -45,9 +45,15 @@ data: {"message":"Epoch 1 complete\n"}
 Following uses Ray's `tail_job_logs`; `tail_lines` applies only to snapshots.
 Following checks backend status before sending HTTP 200 without first
 downloading the full log. Later failures produce a
-sanitized SSE `error` event. A stream lasts at most five minutes; reconnecting
-revalidates authentication and authorization. Disconnection closes the SDK
-iterator. Logs are not persisted or aggregated across workers.
+sanitized SSE `error` event. A stream lasts at most the deployment's configured
+maximum (five minutes by default). Add `timeout_seconds=60` to request a shorter
+connection; larger values are capped at that maximum. The parameter must use
+ASCII digits without signs, leading zeros, whitespace, or a decimal point, in
+the range 1 to 2147483647. Invalid values return 400 for both follow and snapshot
+requests; valid values have no effect on snapshots. Expiry emits `stream_expired`
+and closes the connection. Reconnecting revalidates authentication and
+authorization. Disconnection closes the SDK iterator. Logs are not persisted
+or aggregated across workers.
 
 Before Ray submission, logs return `409 logs_not_ready`; KubeRay may already
 have allocated a job ID at this point. If Ray reports that the submission is
