@@ -1,9 +1,10 @@
 openapi: 3.0.3
 info:
-  title: "Training API"
+  title: "Training API - RHOAI 3.6 Developer Preview"
   description: >-
     Submit and manage model fine-tuning jobs. Discover training algorithms, configure training
-    resources, monitor job status, and retrieve logs.
+    resources, monitor job status, and retrieve logs. RHOAI 3.6 Developer Preview supports the
+    Ray backend only.
   version: "0.1.0"
 servers:
   - url: "/api/v1"
@@ -98,8 +99,8 @@ paths:
       summary: "Submit a training job"
       description: >-
         Validate and submit a training job in the specified project. Reference existing model,
-        dataset, and optional output storage in that project. The response confirms acceptance;
-        use the returned ID to check status or retrieve logs.
+        dataset, and output storage in that project. An S3 or PVC output destination is required
+        to retain trained model artifacts. Use the returned ID to check status or retrieve logs.
       operationId: createTrainingJob
       x-submission-context: true
       x-project-authorization:
@@ -462,7 +463,7 @@ paths:
                     started_at: '2026-10-04T08:31:00Z'
                     finished_at: '2026-10-04T08:50:00Z'
                 minimal_submission:
-                  summary: Job submitted with required fields only
+                  summary: Earlier submission without output storage
                   value:
                     id: minimal-ray-job
                     name: minimal-ray-job
@@ -636,9 +637,10 @@ paths:
 
   /projects/{project}/queues:
     get:
-      summary: "List training queues"
+      summary: "List Kueue LocalQueues"
       description: >-
-        Queue discovery is not available in this release and returns 501.
+        List LocalQueues in the specified project. Kueue must be enabled in RHOAI. This endpoint
+        is not yet implemented and currently returns 501.
       operationId: listQueues
       x-project-authorization:
         group: kueue.x-k8s.io
@@ -650,7 +652,7 @@ paths:
         - $ref: '#/components/parameters/Project'
       responses:
         '200':
-          description: "Training queues in the project."
+          description: "LocalQueues in the specified project."
           content:
             application/json:
               schema:
@@ -779,7 +781,7 @@ components:
       type: string
       enum: [ray, kft]
       default: ray
-      description: "Training backend. Currently supports ray; kft requests return 501."
+      description: "Execution backend. RHOAI 3.6 Developer Preview supports ray only; kft requests return 501."
 
     JobStatus:
       type: string
@@ -787,6 +789,14 @@ components:
       description: >-
         Current job state. PENDING includes jobs waiting for resources or startup.
     CreateJobRequest:
+      description: Submit a training job with persistent output storage.
+      allOf:
+        - $ref: '#/components/schemas/TrainingConfiguration'
+        - type: object
+          required: [output]
+
+    TrainingConfiguration:
+      description: Configuration recorded for a training job.
       type: object
       additionalProperties: false
       required:
@@ -878,8 +888,9 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        Training dataset location. The config and split options apply to Hugging Face datasets
-        for SFT, OSFT, and LoRA SFT. For LoRA GRPO, use the algorithm's data_config parameter.
+        Training dataset location. For Hugging Face datasets, config selects a named
+        configuration and split selects a split or slice; valid values depend on the dataset.
+        These options are currently unsupported for LoRA GRPO.
       required: [uri]
       properties:
         uri:
@@ -887,11 +898,11 @@ components:
         config:
           type: string
           minLength: 1
-          description: "Hugging Face dataset configuration name."
+          description: "Named configuration (subset) defined by the Hugging Face dataset."
         split:
           type: string
           minLength: 1
-          description: "Hugging Face dataset split. Defaults to train."
+          description: "Hugging Face dataset split or slice, such as train or train[:100]. Defaults to train."
       example:
         uri: hf://hf-secret-token/tatsu-lab/alpaca
 
@@ -947,8 +958,9 @@ components:
       additionalProperties: false
       required: [destination_uri]
       description: >-
-        Destination for saved training output. Supports existing S3 connections and PVCs. If
-        omitted, output is ephemeral.
+        Required storage destination for saved model checkpoints and training artifacts. Use an
+        existing S3 connection or PVC in the target project. Saved output remains after job
+        cleanup.
       properties:
         destination_uri:
           type: string
@@ -1051,7 +1063,7 @@ components:
             Original accepted request, preserving supplied values. Omitted for jobs without
             recorded submission details.
           allOf:
-            - $ref: '#/components/schemas/CreateJobRequest'
+            - $ref: '#/components/schemas/TrainingConfiguration'
         queue_name:
           type: string
           nullable: true
@@ -1126,7 +1138,7 @@ components:
       properties:
         kueue_enabled:
           type: boolean
-          description: "Whether training queues are enabled for the deployment."
+          description: "Whether Kueue is enabled in RHOAI."
         queues:
           type: array
           items:

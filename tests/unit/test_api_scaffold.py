@@ -104,3 +104,15 @@ def test_generated_models_preserve_approved_wire_format() -> None:
         invalid[field].update(value)
         with pytest.raises(ValidationError):
             CreateJobRequest.model_validate(invalid)
+
+
+def test_new_submission_requires_output_but_recorded_configuration_does_not() -> None:
+    from training_service.contract import component_validator
+
+    examples = load_contract()["paths"]["/projects/{project}/training-jobs"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["examples"]
+    payload = deepcopy(next(iter(examples.values()))["value"])
+    del payload["output"]
+    assert not component_validator("CreateJobRequest").is_valid(payload)
+    component_validator("TrainingConfiguration").validate(payload)

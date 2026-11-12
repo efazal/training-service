@@ -70,5 +70,5 @@ class BaseInfrastructureDiscoveryApi:
         ],
         token_OpenShiftBearer: TokenModel,
     ) -> QueueInfoResponse:
-        """List training queues"""
+        """List Kueue LocalQueues"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")

@@ -37,6 +37,9 @@ connection Secrets in the target project. Example `job.json`:
 }
 ```
 
+Every submission requires `output.destination_uri`, using an existing PVC or S3
+connection. Saved artifacts remain after the training cluster is cleaned up.
+
 Use a unique job name. The project PVC and its files must already exist and be
 accessible to the caller. Size `resources` to fit one GPU node; a job that cannot
 be scheduled stays `PENDING` with no status message; delete it and resubmit

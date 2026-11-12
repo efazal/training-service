@@ -1,21 +1,35 @@
 # OpenDataHub Training Service
 
-A project-scoped API to discover training algorithms, submit jobs, check status,
-read driver logs, and delete jobs. OpenShift bearer tokens and project permissions
-control access. Dashboard callers use one service URL; platform administrators
-configure the training backend during installation.
+Fine-tune models through a project-scoped REST API on Red Hat OpenShift AI.
+
+Fine-tuning often starts with a workbench, a suitable notebook image, a training
+loop, and a backend SDK. That flexibility is useful for advanced workflows,
+but creates extra setup for applications that need a straightforward way to
+adapt a model to their data.
+
+Training Service exposes Training Hub recipes through one HTTP interface and
+handles backend-specific job submission. Dashboards, CLIs, and other applications
+can choose a model, dataset, algorithm, resources, and output destination without
+requiring their users to configure a notebook or learn a training SDK. Existing
+workbench and SDK workflows remain available for advanced customization.
+
+**RHOAI 3.6 Developer Preview supports Ray as the execution backend.** The API
+handles that integration; callers submit training configuration and monitor jobs
+through the same service URL. OpenShift bearer tokens and project permissions
+control access. Every new job requires an S3 or PVC output destination so trained
+model artifacts remain available after job cleanup.
 
 - **Install the service:** [Helm quickstart](docs/installation.md).
 - **Integrate a dashboard:** [API quickstart](docs/dashboard-integration.md).
-- **Explore the API:** open `/docs` on your service, or read the
-  [OpenAPI contract](docs/api/openapi.yaml).
+- **Explore the API:** open `/docs` on your service, or read the upstream
+  [OpenAPI contract](https://github.com/opendatahub-io/training-service/blob/main/docs/api/openapi.yaml).
 
 Supported submission profiles are `sft`, `osft`, `lora_sft`, and `lora_grpo`.
-Algorithm discovery and submission validation use the same catalog, discovered
-from the configured training image. Check
-[runtime compatibility](docs/training-runtime.md) before selecting an image;
-GRPO still requires a compatible verl/TRL runtime. Queue discovery returns `501`
-until implemented.
+Discovery and submission validation use the same catalog from the configured
+training image. Check [runtime compatibility](docs/training-runtime.md) before
+selecting an image; GRPO requires a compatible verl/TRL runtime. The queue
+discovery endpoint is reserved for listing project LocalQueues with Kueue enabled
+in RHOAI; it currently returns `501` until implemented.
 
 ## Development
 

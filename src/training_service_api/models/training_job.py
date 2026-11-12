@@ -18,9 +18,9 @@ from pydantic import (
 )
 
 from training_service.contract import ContractModel
-from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_status import JobStatus
 from training_service_api.models.resource_spec import ResourceSpec
+from training_service_api.models.training_configuration import TrainingConfiguration
 from training_service_api.models.training_job_progress import TrainingJobProgress
 
 
@@ -46,7 +46,7 @@ class TrainingJob(ContractModel):
         ),
         json_schema_extra={"examples": ["alice"]},
     )
-    submission: CreateJobRequest | None = Field(
+    submission: TrainingConfiguration | None = Field(
         default=None,
         description=(
             "Original accepted request, preserving supplied values. Omitted for "

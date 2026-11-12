@@ -45,7 +45,7 @@ class CreateJobRequest(ContractModel):
     dataset: DatasetSpec
     algorithm: AlgorithmSpec
     resources: ResourceSpec | None = None
-    output: OutputSpec | None = None
+    output: OutputSpec
 
     @field_validator("name")
     def name_validate_regular_expression(cls, value):
@@ -58,7 +58,7 @@ class CreateJobRequest(ContractModel):
         populate_by_name=True,
         validate_assignment=True,
         protected_namespaces=(),
-        extra="forbid",
+        extra="allow",
     )
 
     def to_dict(self) -> dict[str, Any]:

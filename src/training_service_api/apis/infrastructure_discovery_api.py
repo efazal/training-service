@@ -126,7 +126,7 @@ async def get_algorithm(
 @router.get(
     "/projects/{project}/queues",
     responses={
-        200: {"model": QueueInfoResponse, "description": "Training queues in the project."},
+        200: {"model": QueueInfoResponse, "description": "LocalQueues in the specified project."},
         501: {
             "model": ErrorResponse,
             "description": "The requested operation or training backend is not available.",
@@ -146,7 +146,7 @@ async def get_algorithm(
         },
     },
     tags=["Infrastructure &amp; Discovery"],
-    summary="List training queues",
+    summary="List Kueue LocalQueues",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -169,7 +169,7 @@ async def list_queues(
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> QueueInfoResponse:
-    """List training queues"""
+    """List Kueue LocalQueues"""
     await authorize_project_request(
         request,
         project,

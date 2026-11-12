@@ -121,6 +121,25 @@ def test_post_authorizes_then_submits_with_verified_caller_and_202() -> None:
     ]
 
 
+@pytest.mark.parametrize("invalid_output", ["missing", "null", "empty"])
+def test_post_requires_persistent_output_before_submission(invalid_output: str) -> None:
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    if invalid_output == "missing":
+        del payload["output"]
+    else:
+        payload["output"] = None if invalid_output == "null" else {}
+    submitter = RecordingSubmitter()
+    response = TestClient(create_app(FakeAuthenticator(), FakeAuthorizer(), submitter)).post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=payload,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert "output" in response.json()["message"]
+    assert submitter.calls == []
+
+
 def test_omitted_queue_is_not_invented_in_receipt() -> None:
     payload = _sample().model_dump(mode="json", exclude_unset=True)
     del payload["queue_name"]
@@ -576,7 +595,7 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(submission, "_entrypoint", record_entrypoint)
     payload = _sample().model_dump(mode="json", exclude_unset=True)
-    for key in ("queue_name", "resources", "output"):
+    for key in ("queue_name", "resources"):
         payload.pop(key)
     payload["algorithm"].pop("parameters")
     body = CreateJobRequest.model_validate(payload)
@@ -592,9 +611,10 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     assert cluster.head_cpu_requests == "4"
     assert cluster.head_memory_requests == "16Gi"
     assert cluster.head_extended_resource_requests == {"nvidia.com/gpu": 1}
-    assert len(cluster.volumes) == 2
+    assert len(cluster.volumes) == 3
     assert entry_config["parameters"] == {}
-    assert "output" not in entry_config
+    assert entry_config["output"]["scheme"] == "pvc"
+    assert entry_config["output"]["mount_path"].endswith("/checkpoints/pvc-training/")
 
 
 @pytest.mark.parametrize(

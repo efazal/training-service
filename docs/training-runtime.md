@@ -22,7 +22,10 @@ in the notebooks is still performed before calling the API; the request uses
 existing project storage or Hugging Face repositories.
 For Hugging Face datasets loaded on the Ray head, `dataset.config` selects
 a named dataset configuration and `dataset.split` selects a split (default:
-`train`). These options are not used by the remote GRPO loader.
+`train`). These fields are rejected for LoRA GRPO. Where supported by the runtime,
+GRPO's separate `algorithm.parameters.data_config` selects the Hugging Face
+configuration for tool-call datasets. It is not a column mapping and does not
+apply to local JSONL math datasets.
 
 For SFT, OSFT, and LoRA SFT, the Ray head runs training and receives
 `resources.gpus_per_node` GPUs, matching the one-node examples. For LoRA GRPO,

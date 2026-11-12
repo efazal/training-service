@@ -134,6 +134,7 @@ def test_missing_submission_resource_has_context(api, missing_job_id, pytestconf
         "model": {"uri": f"{scheme}://{missing_job_id}/{paths[scheme]}"},
         "dataset": {"uri": f"pvc://{missing_job_id}/dataset.jsonl"},
         "algorithm": {"name": "lora_sft"},
+        "output": {"destination_uri": "pvc://e2e-missing-input/output/"},
     }
     try:
         response = api.request("POST", api.jobs, expected=404, json=payload)
@@ -281,6 +282,9 @@ def test_invalid_log_timeout_queries(api, missing_job_id, follow, timeout):
         "kft",
         "empty_queue",
         "hf_output",
+        "missing_output",
+        "null_output",
+        "empty_output",
     ],
 )
 def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, variation):
@@ -289,6 +293,7 @@ def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, v
         "model": {"uri": "pvc://e2e-missing-input/model/"},
         "dataset": {"uri": "pvc://e2e-missing-input/data.jsonl"},
         "algorithm": {"name": "lora_sft", "parameters": {}},
+        "output": {"destination_uri": "pvc://e2e-missing-input/output/"},
     }
     changes = {
         "unknown_algorithm": {"name": "not-an-algorithm"},
@@ -317,6 +322,12 @@ def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, v
         payload["queue_name"] = ""
     if variation == "hf_output":
         payload["output"] = {"destination_uri": "hf://e2e-missing-input/org/repository"}
+    if variation == "missing_output":
+        del payload["output"]
+    elif variation == "null_output":
+        payload["output"] = None
+    elif variation == "empty_output":
+        payload["output"] = {}
     try:
         response = api.request(
             "POST", api.jobs, expected=501 if variation == "kft" else 422, json=payload
@@ -326,6 +337,8 @@ def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, v
             "negative_epochs": "num_epochs",
             "zero_batch": "effective_batch_size",
         }.get(variation)
+        if variation in {"missing_output", "null_output", "empty_output"}:
+            assert "output" in api.object(response)["message"]
         if parameter:
             message = api.object(response)["message"]
             assert parameter in message
@@ -361,6 +374,7 @@ def test_algorithm_parameters_rejected_before_submission(
         "model": {"uri": "pvc://e2e-missing-input/model/"},
         "dataset": {"uri": "pvc://e2e-missing-input/data.jsonl"},
         "algorithm": {"name": algorithm, "parameters": parameters},
+        "output": {"destination_uri": "pvc://e2e-missing-input/output/"},
     }
     try:
         response = api.request("POST", api.jobs, expected=422, json=payload)
