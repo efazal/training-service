@@ -90,7 +90,9 @@ def arguments(argv=None):
     parser.add_argument(
         "--namespace", type=namespace, help="New namespace (default: training-e2e-<run>)"
     )
-    parser.add_argument("--values", required=True, type=Path, help="Credential-free Helm values")
+    parser.add_argument(
+        "--values", type=Path, help="Optional Helm overrides; defaults to the chart"
+    )
     parser.add_argument("--platform", default="linux/amd64", choices=("linux/amd64", "linux/arm64"))
     parser.add_argument("--storage-class", help="Existing ReadWriteMany-capable StorageClass")
     parser.add_argument(
@@ -150,10 +152,12 @@ def preflight(args):
     for tool in ("helm", "oc", "git") if args.reuse_image else ("podman", "helm", "oc", "git"):
         if not shutil.which(tool):
             raise ValueError(f"Required executable not found: {tool}")
-    if not args.values.is_file():
+    if args.values is not None and not args.values.is_file():
         raise ValueError("--values must be a readable credential-free Helm values file")
     try:
-        values = yaml.safe_load(args.values.read_text())
+        values = yaml.safe_load(
+            (args.values if args.values is not None else CHART / "values.yaml").read_text()
+        )
     except yaml.YAMLError:
         raise ValueError("--values must be valid YAML; raw values are not logged") from None
     if not isinstance(values, dict):
@@ -197,7 +201,7 @@ def preflight(args):
         allowed = command(["oc", "auth", "can-i", "create", resource, "-n", args.namespace]).strip()
         if allowed != "yes":
             raise ValueError(f"Deployment identity needs create access to {resource}")
-    command(["helm", "lint", CHART, "-f", args.values])
+    command(["helm", "lint", CHART, *(["-f", args.values] if args.values is not None else [])])
     return values
 
 
@@ -238,6 +242,9 @@ def run(args):
         print("Checking fresh namespace, storage, deployment permissions and tooling", flush=True)
         values = preflight(args)
         evidence["tls"] = prepare_tls(args, command, results, values)
+        environment.platform_ca_discovery = (
+            evidence["tls"].get("ray_ca_source") == "platform ingress CA discovery"
+        )
         print("Route/gateway TLS trust configured; certificate verification enabled", flush=True)
         if args.preflight_only:
             evidence["outcome"] = "preflight_passed"
@@ -311,8 +318,7 @@ def run(args):
             CHART,
             "-n",
             args.namespace,
-            "-f",
-            args.values,
+            *(["-f", args.values] if args.values is not None else []),
             "--set-string",
             "fullnameOverride=" + release,
             "--set-string",
@@ -436,6 +442,7 @@ def run(args):
             "with-kueue",
             "--observe-cluster",
             "--check-logs",
+            "--check-active-delete",
             "--artifact-pod",
             args.artifact_pod,
             "--artifact-container",
@@ -448,17 +455,19 @@ def run(args):
         if args.forbidden_project:
             test_args += ["--forbidden-project", args.forbidden_project]
         print(f"Testing {url}; results: {results}", flush=True)
+        from tests.e2e.algorithms import ALGORITHMS
+
+        # Allow each lifecycle and the two cancellation cases their own deadlines.
+        job_count = (len(ALGORITHMS) if args.algorithm_matrix else 1) + 2
         # Live tests produce only sanitized assertions; no --showlocals or verbose HTTP logging.
         command(
             test_args,
-            timeout=args.job_timeout + args.cleanup_timeout + 600,
+            timeout=job_count * (args.job_timeout + args.cleanup_timeout) + 600,
             capture=False,
             env=env,
             cleanup_timeout=args.cleanup_timeout,
         )
         # An overridden pytest selection must not silently turn this into a smoke-only pass.
-        from tests.e2e.algorithms import ALGORITHMS
-
         names = ALGORITHMS if args.algorithm_matrix else (None,)
         for name in names:
             filename = f"lifecycle-{name}.json" if name else "lifecycle.json"
@@ -474,6 +483,13 @@ def run(args):
                 raise RuntimeError(
                     f"Required {label} queued training/log/artifact/cleanup evidence is missing"
                 )
+        for state in ("PENDING", "RUNNING"):
+            path = results / f"active-delete-{state}.json"
+            deletion = json.loads(path.read_text()) if path.is_file() else {}
+            if deletion.get("deleted_at") != state or not all(
+                deletion.get(key) for key in ("job", "resource_cleanup", "not_found")
+            ):
+                raise RuntimeError(f"Active-job deletion evidence is missing for {state}")
         evidence["outcome"] = "passed"
     except BaseException:
         evidence["outcome"] = "failed"

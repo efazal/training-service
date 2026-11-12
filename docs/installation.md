@@ -12,6 +12,35 @@ Kueue.
 - `kubectl` or `oc` access to the target cluster.
 - Push access to a registry that the target cluster can pull from.
 
+## Gateway configuration
+
+The chart defaults discover both the gateway and its public ingress CA on RHOAI/ODH.
+No CA extraction, customer-created ConfigMap, extra values file or `--set` flag is
+needed. The first log request reads
+`GatewayConfig/default-gateway.status.domain`; Helm installs narrowly scoped
+read access for the service account. It also installs a Role/RoleBinding in
+`openshift-config-managed` allowing only `get` on ConfigMap `default-ingress-cert`.
+The service combines that public ingress CA with its normal public roots in
+writable temporary storage. No Secret or private key is read. Addresses and
+discovered CA material are cached for 60
+seconds and refreshed on the next log request after expiry. If refresh fails,
+new connections continue using the last validated gateway and CA; a warning is
+logged and discovery retries after five seconds. Concurrent connections use the
+cache while one refresh is in progress. Without a validated configuration, log
+endpoints return `503 logs_unavailable` and retry after the same delay. Local trust
+files and TLS certificates are still verified on every new connection. Job
+operations and `/readyz` remain available when the runtime catalog is valid.
+Existing streams keep their original address.
+
+For a custom platform, edit `logBackend.gatewayURL` in the chart's `values.yaml`.
+An explicit gateway uses normal container trust by default. For a custom issuer,
+edit `logBackend.trustedCA.configMapName`/`key` to reference an existing
+namespace-local ConfigMap, or set `bundle` to public PEM certificates so Helm
+creates one. Either overrides automatic CA discovery. Set `autoDiscover: false`
+to use only normal container trust with the automatically discovered gateway.
+`scripts/platform_values.py` remains an optional helper for exporting explicit
+gateway/public CA values. See [log configuration](job-operations.md#driver-logs).
+
 ## Build and publish a development image
 
 Run the repository checks before building an image:
@@ -54,17 +83,31 @@ make helm-template
 `make helm-template` validates the default chart and an explicit OpenShift
 Route/TLS hostname override. It does not install anything on a cluster.
 
-## Install or upgrade from a checkout
+## Install the published chart
 
-Use the exact image tag that was pushed above:
+On a prepared RHOAI/ODH cluster, install using the chart's defaults:
 
 ```bash
-helm upgrade --install training-service ./charts/training-service \
+helm repo add training-service https://raw.githubusercontent.com/opendatahub-io/training-service/helm-charts/
+helm repo update training-service
+helm install training-service training-service/training-service \
   --namespace training-service \
   --create-namespace \
-  --set-string image.repository="$IMAGE_REPOSITORY" \
-  --set-string image.tag="$IMAGE_TAG"
+  --wait --timeout 15m
 ```
+
+No checkout, separate values file or registry login is needed. The Helm output
+shows how to get the Route URL; open `/docs` there for the API reference.
+
+To customize, run `helm pull training-service/training-service --untar`, edit
+`training-service/values.yaml`, then install `./training-service` instead.
+When developing from a checkout, customization goes directly in
+`charts/training-service/values.yaml` and the chart path is `./charts/training-service`.
+For a development build, change `image.repository` and `image.tag` there to the
+image you built and pushed, then run `helm upgrade --install training-service
+./charts/training-service --namespace training-service --create-namespace --wait
+--timeout 15m`. No `-f` is needed;
+Helm reads the chart's own `values.yaml` automatically.
 
 The service image and training image are separate settings. The chart defaults
 to public `quay.io/modh/ray:2.58.0-py312-cu130-th0112`, matching the API's Ray pin
@@ -74,10 +117,7 @@ service internally. No `TRAINING_RAY_IMAGE` entry under `env` is needed. Legacy
 entries still override the chart default; combining one with a non-default
 `trainingRuntime.image` is rejected.
 
-The intended public API image default is `quay.io/modh/training-service:0.1.0`.
-This image has not been verified publicly accessible: a `modh` maintainer must
-create or configure the repository as public and publish the tag before a
-default installation can pull it. Until then, use the image overrides above.
+The public API image default is `quay.io/modh/training-service:0.1.0`.
 
 For a private registry, create the pull secret first and pass it through chart
 values:
@@ -99,12 +139,11 @@ helm upgrade --install training-service ./charts/training-service \
   --set 'imagePullSecrets[0].name=training-service-pull'
 ```
 
-Prefer a checked-in, environment-specific values file over a long list of
-`--set` arguments when configuring replicas, resources, service settings, or
-runtime environment variables:
+Edit the chart's `values.yaml` to customize replicas, resources, service settings
+or the training runtime, for example:
 
 ```yaml
-# values-development.yaml
+# charts/training-service/values.yaml (selected settings)
 replicaCount: 1
 
 image:

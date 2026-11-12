@@ -1,8 +1,7 @@
 replicaCount: 1
 
 image:
-  # Intended public release repository; requires publication by a modh maintainer.
-  # Until published, override repository/tag with an available service image.
+  # Public API service image. No registry credentials are needed for the default.
   repository: quay.io/modh/training-service
   pullPolicy: IfNotPresent
   tag: "0.1.0"
@@ -33,13 +32,32 @@ podLabels: {}
 
 # Authenticate callers and authorize project-scoped operations through Kubernetes
 # TokenReview and SubjectAccessReview APIs. The service account can create only
-# these review requests; it does not receive workload permissions.
+# these review requests and read the named platform gateway configuration;
+# it does not receive workload permissions.
 authentication:
   tokenReview:
     enabled: true
 
-# Additional settings, such as the Ray gateway URL and trusted CA path.
-# Use trainingRuntime.image instead of setting TRAINING_RAY_IMAGE here.
+# By default the service discovers GatewayConfig/default-gateway status.domain
+# on log requests. Set gatewayURL only to override discovery for a custom platform.
+logBackend:
+  gatewayURL: ""
+  streamTimeoutSeconds: 300
+  trustedCA:
+    # Default OpenShift install: automatically read the public ingress CA from
+    # openshift-config-managed/default-ingress-cert. No CA file or ConfigMap setup.
+    # New log connections pick up platform certificate rotation within 60 seconds.
+    autoDiscover: true
+    # Optional custom trust overrides; leave empty for the standard installation.
+    # configMapName references an existing ConfigMap in the service namespace.
+    # bundle supplies public PEM certificates for Helm to create a ConfigMap.
+    # Either override takes precedence over automatic discovery.
+    configMapName: ""
+    key: ca-bundle.crt
+    bundle: ""
+
+# Additional settings. Prefer the structured settings above and trainingRuntime.image.
+# Legacy gateway/CA environment variables remain supported; do not configure both.
 env: []
 envFrom: []
 

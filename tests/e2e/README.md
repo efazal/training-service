@@ -26,33 +26,38 @@ Prepare once:
   StorageClass/node reads, Route/service/pod reads, `get` access to ConfigMap
   `openshift-config-managed/default-ingress-cert` for public TLS trust discovery,
   pod exec for evidence, and permission to install the chart's
-  TokenReview/SAR ClusterRole and ClusterRoleBinding (list/delete for cleanup verification).
+  TokenReview/SAR and named GatewayConfig-read ClusterRoles and ClusterRoleBindings,
+  plus the named ingress-CA Role/RoleBinding in `openshift-config-managed`
+  (list/delete for cleanup verification).
   This is separate from the
   HTTP caller token below; admin credentials cannot prove restricted-user isolation.
 - Use your own Quay repo. Public images need no credential transfer. For a private
   repo, add `--use-podman-auth` as described below: local Podman login alone does
   not authorize Kubernetes image pulls. The runner never copies a pre-existing
   cluster Secret or changes cluster-wide pull credentials.
-- Copy [values.example.yaml](examples/values.example.yaml) outside the repo and supply
-  the authenticated Ray gateway. The chart's public Ray + Training Hub image is
-  used by default; set `trainingRuntime.image` only to override it.
-  The runner automatically reads the cluster's **public ingress certificate
-  bundle** from `openshift-config-managed/default-ingress-cert` (`ca-bundle.crt`).
-  It saves it only under the ignored per-run results directory, uses it for
-  Route TLS, and provisions `training-service-ray-ca` for the gateway using the
-  example's read-only mount. No PEM needs to be prepared or committed; no Secret
-  or private key is read. Discovery uses the authenticated `oc` connection,
-  never an unverified peer certificate.
+- No custom values file is required. The service discovers the platform gateway
+  and public ingress CA itself, using the chart's defaults. The runner does not
+  create a CA ConfigMap or supply trust to the service for this default path.
+  It reads the public ingress bundle only for the external HTTP test client's
+  Route TLS verification, saving it under the ignored per-run results directory.
+  No Secret or private key is read; TLS verification is never disabled.
+  Optional customization can be made in `charts/training-service/values.yaml`;
+  `--values` remains an optional test override for custom platforms.
   This PR does not change SDK/Ray pins or establish a new compatibility matrix.
 
 From the repository root:
 
 ```bash
-make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS"
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --storage-class YOUR_RWX_CLASS"
 ```
 
 This keeps PR #10's baseline `lora_sft` lifecycle. To run the **four-algorithm
 matrix** on the same isolated deployment, add `--algorithm-matrix` to `E2E_ARGS`.
+Both modes also submit two isolated LoRA jobs and delete them while `PENDING`
+and `RUNNING`, verifying RayCluster/pod cleanup and a final `404`. The deploy
+runner always enables `--check-active-delete` and requires evidence for both
+states; skipped cancellation tests cannot produce a passing run. Against an
+existing deployment, add `--check-active-delete` to `make test-e2e`'s arguments.
 It submits separate `sft`, `osft`, `lora_sft` and `lora_grpo` jobs, checks
 accepted requests and preserved parameters, waits for `SUCCEEDED`, reads log snapshots,
 checks output files and verifies owner-scoped cleanup. The fixture prepares chat
@@ -412,7 +417,8 @@ training fixture described above. Constraints absent from a runtime skip visibly
 | `--fixture-timeout 900` | PVC/model preparation deadline, deployment runner |
 | `--namespace NEW_NAME`, `--cluster-queue existing-cq` | New namespace name and existing ClusterQueue override |
 | `--preflight-only` | Read-only cluster/tooling/config checks; no build/push/deploy |
-| `--ray-ca-bundle /path/to/custom-ray-ca.pem` | Override automatic ingress trust for a custom Ray gateway |
+| `--values /path/to/overrides.yaml` | Optional test overrides; omitted uses chart defaults |
+| `--ray-ca-bundle /path/to/custom-ray-ca.pem` | Override trust for a custom gateway using the legacy CA mount configuration |
 | `--forbidden-project other-project` | Existing project the HTTP caller cannot access; not an admin-token test |
 | `--keep-failed-job` | Existing-deployment only: retain FAILED/STOPPED for inspection, still fail |
 | `--junitxml /path/results.xml` | Optional sanitized report, existing-deployment command |

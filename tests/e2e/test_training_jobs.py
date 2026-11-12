@@ -363,3 +363,47 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             else "lifecycle.json"
         )
         (Path(directory) / filename).write_text(json.dumps(evidence, indent=2) + "\n")
+
+
+@pytest.mark.parametrize("delete_at", ["PENDING", "RUNNING"])
+@pytest.mark.parametrize(
+    "training_job", [None, "lora_sft"], indirect=True, ids=["baseline", "matrix"]
+)
+def test_delete_active_job(api, training_job, pytestconfig, observer, delete_at):
+    """Cancel only a newly submitted, uniquely named job owned by this test."""
+    if not pytestconfig.getoption("check_active_delete"):
+        pytest.skip("Pass --check-active-delete to verify active job cancellation")
+    job_id, payload = training_job
+    path = f"{api.jobs}/{job_id}"
+    api.request("POST", api.jobs, expected=202, json=payload)
+    deadline = time.monotonic() + pytestconfig.getoption("job_timeout")
+    while True:
+        detail = api.object(api.request("GET", path))
+        assert detail.get("submission") == payload
+        observe(observer, job_id)
+        if detail["status"] == delete_at:
+            deleted = api.request("DELETE", path, expected=(204, 409))
+            if deleted.status_code == 204:
+                break
+            api.error(deleted, "conflict")
+        assert detail["status"] not in TERMINAL, f"Job became terminal before {delete_at} deletion"
+        assert time.monotonic() < deadline, f"Job never reached {delete_at}"
+        time.sleep(1)
+    api.cleanup(job_id, pytestconfig.getoption("cleanup_timeout"), payload)
+    if observer:
+        observer.verify_cleanup(
+            job_id,
+            pytestconfig.getoption("cleanup_timeout"),
+            require_running=delete_at == "RUNNING",
+        )
+    api.request("GET", path, expected=404)
+    if directory := os.getenv("TRAINING_SERVICE_EVIDENCE_DIR"):
+        evidence = {
+            "job": job_id,
+            "deleted_at": delete_at,
+            "resource_cleanup": observer is not None,
+            "not_found": True,
+        }
+        (Path(directory) / f"active-delete-{delete_at}.json").write_text(
+            json.dumps(evidence, indent=2) + "\n"
+        )

@@ -3,7 +3,7 @@
 Python/FastAPI service generated from the Training API contract in
 `docs/api/openapi.yaml`. OpenShift TokenReview authenticates callers,
 SubjectAccessReview authorizes project operations, and POST training-job
-submission uses CodeFlare. Job listing, details, driver logs, and terminal
+submission uses CodeFlare. Job listing, details, driver logs, and active/terminal
 RayJob deletion and algorithm discovery are implemented. Queue discovery and
 estimation remain fail-closed with `501`.
 
@@ -99,10 +99,21 @@ route:
 
 These are the chart defaults. The HTTPS OpenShift Route gets a cluster-assigned
 hostname. Set `route.enabled=false` for an internal-only deployment.
-The service repository above is the intended public release location, but a
-public image there has not been verified. A `modh` maintainer must create or
-configure the repository as public and publish the service image first. Until
-then, override `image.repository` and `image.tag` with an available image.
+The log gateway and its public ingress CA are discovered automatically. Customers
+do not need to extract certificates, create a CA ConfigMap or supply a values file.
+Install the published chart:
+
+```bash
+helm repo add training-service https://raw.githubusercontent.com/opendatahub-io/training-service/helm-charts/
+helm repo update training-service
+helm install training-service training-service/training-service \
+  --namespace training-service --create-namespace --wait --timeout 15m
+```
+
+The default image is published in `quay.io/modh/training-service`. No registry
+login or separate values file is required. To customize, download the chart with
+`helm pull training-service/training-service --untar`, edit its `values.yaml`,
+then install `./training-service` instead.
 
 Legacy values files using `env: [{name: TRAINING_RAY_IMAGE, value: ...}]`
 still override the default. Move that entry to `trainingRuntime.image`; combining
