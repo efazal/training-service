@@ -4,6 +4,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from threading import Event
 from unittest.mock import Mock
 
 import pytest
@@ -101,8 +102,10 @@ def test_invalid_explicit_override_is_not_replaced_by_discovery(platform, monkey
     api.get_cluster_custom_object.assert_not_called()
 
 
-def test_not_ready_retries_then_recovers_without_restart(platform):
+def test_not_ready_retries_then_recovers_without_restart(platform, monkeypatch):
     api, *_ = platform
+    now = [100.0]
+    monkeypatch.setattr(log_config, "monotonic", lambda: now[0])
     waiting = ready_gateway()
     waiting["status"]["phase"] = "Progressing"
     api.get_cluster_custom_object.side_effect = [waiting, waiting, ready_gateway()]
@@ -113,6 +116,7 @@ def test_not_ready_retries_then_recovers_without_restart(platform):
             with pytest.raises(ApiError, match="not ready"):
                 app.state.job_backend.log_configuration()
             assert http.get("/readyz").status_code == 200
+            now[0] += 5
         assert (
             app.state.job_backend.log_configuration().gateway_url
             == "https://rh-ai.apps.example.com"
@@ -122,8 +126,10 @@ def test_not_ready_retries_then_recovers_without_restart(platform):
 
 
 @pytest.mark.parametrize("status", [403, 404, 500])
-def test_discovery_api_errors_are_actionable_sanitized_and_retryable(platform, status):
+def test_discovery_api_errors_are_actionable_sanitized_and_retryable(platform, status, monkeypatch):
     api, *_ = platform
+    now = [100.0]
+    monkeypatch.setattr(log_config, "monotonic", lambda: now[0])
     api.get_cluster_custom_object.side_effect = [
         ApiException(status=status, reason="sensitive-backend-response"),
         ready_gateway(),
@@ -134,6 +140,10 @@ def test_discovery_api_errors_are_actionable_sanitized_and_retryable(platform, s
     assert error.value.status_code == 503 and error.value.code == "logs_unavailable"
     assert "TRAINING_SERVICE_RAY_GATEWAY_URL" in error.value.message
     assert "sensitive-backend-response" not in error.value.message
+    with pytest.raises(ApiError):
+        backend.log_configuration()
+    assert api.get_cluster_custom_object.call_count == 1
+    now[0] += 5
     assert backend.log_configuration().gateway_url == "https://rh-ai.apps.example.com"
 
 
@@ -271,7 +281,7 @@ def test_discovered_gateway_refreshes_after_sixty_seconds(platform, monkeypatch)
     assert api.get_cluster_custom_object.call_count == 2
 
 
-def test_failed_gateway_refresh_does_not_use_stale_address_and_retries(platform, monkeypatch):
+def test_failed_gateway_refresh_preserves_cache_and_recovers(platform, monkeypatch, caplog):
     api, *_ = platform
     now = [100.0]
     monkeypatch.setattr(log_config, "monotonic", lambda: now[0])
@@ -281,9 +291,11 @@ def test_failed_gateway_refresh_does_not_use_stale_address_and_retries(platform,
     changed = deepcopy(ready_gateway())
     changed["status"]["domain"] = "new.apps.example.com"
     api.get_cluster_custom_object.side_effect = [ApiException(status=404), changed]
-    with pytest.raises(ApiError) as error:
-        backend.log_configuration()
-    assert error.value.status_code == 503 and error.value.code == "logs_unavailable"
+    assert backend.log_configuration().gateway_url == "https://rh-ai.apps.example.com"
+    assert backend.log_configuration().gateway_url == "https://rh-ai.apps.example.com"
+    assert api.get_cluster_custom_object.call_count == 2
+    assert "cached" in caplog.text
+    now[0] = 165.0
     assert backend.log_configuration().gateway_url == "https://new.apps.example.com"
     assert api.get_cluster_custom_object.call_count == 3
 
@@ -298,5 +310,55 @@ def test_concurrent_requests_share_gateway_refresh(platform, monkeypatch):
     now[0] = 160.0
     with ThreadPoolExecutor(max_workers=8) as pool:
         endpoints = list(pool.map(lambda _: backend.log_configuration().gateway_url, range(16)))
-    assert set(endpoints) == {"https://new.apps.example.com"}
+    assert set(endpoints) <= {"https://rh-ai.apps.example.com", "https://new.apps.example.com"}
+    assert "https://new.apps.example.com" in endpoints
+    assert api.get_cluster_custom_object.call_count == 2
+
+
+def test_warm_requests_do_not_wait_for_gateway_refresh(platform, monkeypatch):
+    api, *_ = platform
+    now = [100.0]
+    monkeypatch.setattr(log_config, "monotonic", lambda: now[0])
+    backend = CodeFlareJobBackend()
+    original = backend.log_configuration()
+    entered, release = Event(), Event()
+
+    def slow_refresh(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        changed = ready_gateway()
+        changed["status"]["domain"] = "new.apps.example.com"
+        return changed
+
+    api.get_cluster_custom_object.side_effect = slow_refresh
+    now[0] = 160.0
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        refreshing = pool.submit(backend.log_configuration)
+        try:
+            assert entered.wait(2)
+            assert pool.submit(backend.log_configuration).result(timeout=2) == original
+        finally:
+            release.set()
+        assert refreshing.result(timeout=2).gateway_url == "https://new.apps.example.com"
+    assert api.get_cluster_custom_object.call_count == 2
+
+
+def test_concurrent_cold_failures_share_discovery_and_retry_window(platform, monkeypatch):
+    api, *_ = platform
+    now = [100.0]
+    monkeypatch.setattr(log_config, "monotonic", lambda: now[0])
+    api.get_cluster_custom_object.side_effect = ApiException(status=500)
+    backend = CodeFlareJobBackend()
+
+    def unavailable(_):
+        with pytest.raises(ApiError) as error:
+            backend.log_configuration()
+        return error.value.code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert set(pool.map(unavailable, range(16))) == {"logs_unavailable"}
+    api.get_cluster_custom_object.assert_called_once()
+    now[0] += 5
+    api.get_cluster_custom_object.side_effect = None
+    assert backend.log_configuration().gateway_url == "https://rh-ai.apps.example.com"
     assert api.get_cluster_custom_object.call_count == 2

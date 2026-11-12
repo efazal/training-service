@@ -366,6 +366,9 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
 
 
 @pytest.mark.parametrize("delete_at", ["PENDING", "RUNNING"])
+@pytest.mark.parametrize(
+    "training_job", [None, "lora_sft"], indirect=True, ids=["baseline", "matrix"]
+)
 def test_delete_active_job(api, training_job, pytestconfig, observer, delete_at):
     """Cancel only a newly submitted, uniquely named job owned by this test."""
     if not pytestconfig.getoption("check_active_delete"):
@@ -394,3 +397,13 @@ def test_delete_active_job(api, training_job, pytestconfig, observer, delete_at)
             require_running=delete_at == "RUNNING",
         )
     api.request("GET", path, expected=404)
+    if directory := os.getenv("TRAINING_SERVICE_EVIDENCE_DIR"):
+        evidence = {
+            "job": job_id,
+            "deleted_at": delete_at,
+            "resource_cleanup": observer is not None,
+            "not_found": True,
+        }
+        (Path(directory) / f"active-delete-{delete_at}.json").write_text(
+            json.dumps(evidence, indent=2) + "\n"
+        )

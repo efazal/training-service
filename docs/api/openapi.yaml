@@ -666,14 +666,27 @@ paths:
         '404':
           $ref: '#/components/responses/404NotFound'
         '409':
-          description: RayJob changed concurrently or does not have an exclusively owned RayCluster
+          description: >
+            conflict means the resource changed concurrently; refresh and retry.
+            shared_cluster and unowned_cluster refuse deletion because the RayCluster
+            is shared or not exclusively owned by this RayJob.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-              example:
-                code: conflict
-                message: The operation conflicts with the current resource state. Refresh and retry.
+              examples:
+                conflict:
+                  value:
+                    code: conflict
+                    message: The operation conflicts with the current resource state. Refresh and retry.
+                shared_cluster:
+                  value:
+                    code: shared_cluster
+                    message: Shared RayClusters cannot be deleted by this API.
+                unowned_cluster:
+                  value:
+                    code: unowned_cluster
+                    message: RayCluster is not exclusively owned by this RayJob.
 
   /projects/{project}/training-jobs/{job_id}/logs:
     get:

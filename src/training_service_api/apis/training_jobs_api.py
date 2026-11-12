@@ -438,7 +438,9 @@ async def get_training_job(
         409: {
             "model": ErrorResponse,
             "description": (
-                "RayJob changed concurrently or does not have an exclusively owned RayCluster"
+                "conflict means the resource changed concurrently; refresh and retry. "
+                "shared_cluster and unowned_cluster refuse deletion because the "
+                "RayCluster is shared or not exclusively owned by this RayJob. "
             ),
         },
     },

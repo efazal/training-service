@@ -349,7 +349,13 @@ def test_partial_setup_failure_or_interruption_still_cleans_owned_namespace(
 
 @pytest.mark.parametrize(
     "failure,keep,missing_evidence",
-    [(False, False, False), (False, True, False), (True, False, False), (False, False, True)],
+    [
+        (False, False, False),
+        (False, True, False),
+        (True, False, False),
+        (False, False, True),
+        (False, False, "active-delete"),
+    ],
 )
 @pytest.mark.parametrize("reuse", [False, True])
 @pytest.mark.parametrize("private", [False, True])
@@ -431,11 +437,13 @@ def test_runner_build_push_digest_install_test_cleanup(
             return "{}"
         if "pytest" in command:
             assert kwargs["cleanup_timeout"] == args.cleanup_timeout
+            job_count = (len(ALGORITHMS) if matrix else 1) + 2
+            assert kwargs["timeout"] == job_count * (args.job_timeout + args.cleanup_timeout) + 600
             assert kwargs["env"]["TRAINING_SERVICE_CA_BUNDLE"] == str(args.ingress_ca_bundle)
             assert ("--algorithm-matrix" in command) == matrix
             if failure:
                 raise RuntimeError("live tests failed")
-            if missing_evidence:
+            if missing_evidence is True:
                 return ""
             results = Path(kwargs["env"]["TRAINING_SERVICE_EVIDENCE_DIR"])
             names = ALGORITHMS if matrix else (None,)
@@ -453,6 +461,18 @@ def test_runner_build_push_digest_install_test_cleanup(
                         }
                     )
                 )
+            if not missing_evidence:
+                for state in ("PENDING", "RUNNING"):
+                    (results / f"active-delete-{state}.json").write_text(
+                        json.dumps(
+                            {
+                                "job": "e2e-owned-job",
+                                "deleted_at": state,
+                                "resource_cleanup": True,
+                                "not_found": True,
+                            }
+                        )
+                    )
         return ""
 
     monkeypatch.setattr(deploy, "command", run)
@@ -490,6 +510,7 @@ def test_runner_build_push_digest_install_test_cleanup(
     assert "--maxfail=0" in invocation
     assert {"--job-file", "--artifact-pod", "--observe-cluster"} <= set(invocation)
     assert ("--check-stream" in invocation) != matrix
+    assert "--check-active-delete" in invocation
     environment.provision.assert_called_once()
     assert environment.cleanup.called == (not keep)
     report = json.loads(next((tmp_path / "results").glob("*/run.json")).read_text())

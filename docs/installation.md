@@ -23,10 +23,14 @@ read access for the service account. It also installs a Role/RoleBinding in
 The service combines that public ingress CA with its normal public roots in
 writable temporary storage. No Secret or private key is read. Addresses and
 discovered CA material are cached for 60
-seconds and refreshed on the next log request after expiry. Discovery or trust
-failures return `503 logs_unavailable` from log endpoints; job operations and
-`/readyz` remain available when the runtime catalog is valid. Failed discovery
-is retried on the next log request. Existing streams keep their original address.
+seconds and refreshed on the next log request after expiry. If refresh fails,
+new connections continue using the last validated gateway and CA; a warning is
+logged and discovery retries after five seconds. Concurrent connections use the
+cache while one refresh is in progress. Without a validated configuration, log
+endpoints return `503 logs_unavailable` and retry after the same delay. Local trust
+files and TLS certificates are still verified on every new connection. Job
+operations and `/readyz` remain available when the runtime catalog is valid.
+Existing streams keep their original address.
 
 For a custom platform, edit `logBackend.gatewayURL` in the chart's `values.yaml`.
 An explicit gateway uses normal container trust by default. For a custom issuer,

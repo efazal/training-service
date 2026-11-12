@@ -25,6 +25,7 @@ _GATEWAY_GROUP = "services.platform.opendatahub.io"
 _GATEWAY_NAME = "default-gateway"
 _DISCOVERY_TIMEOUT = (2, 3)
 _GATEWAY_CACHE_SECONDS = 60
+_DISCOVERY_RETRY_SECONDS = 5
 _INGRESS_CA_NAMESPACE = "openshift-config-managed"
 _INGRESS_CA_NAME = "default-ingress-cert"
 _DOMAIN = re.compile(
@@ -133,7 +134,7 @@ def _discover_ingress_ca() -> str:
 
 
 class LogBackendResolver:
-    """Cache platform endpoint/trust briefly; retry failed refreshes on the next request."""
+    """Refresh platform metadata without discarding the last validated configuration."""
 
     def __init__(self) -> None:
         self._gateway: str | None = None
@@ -141,7 +142,11 @@ class LogBackendResolver:
         self._ca_directory: TemporaryDirectory[str] | None = None
         self._ca_file: str | None = None
         self._ca_refresh_at = 0.0
-        self._lock = threading.Lock()
+        self._settings: LogBackendConfig | None = None
+        self._failure: ApiError | None = None
+        self._retry_at = 0.0
+        self._refreshing = False
+        self._condition = threading.Condition()
 
     def _platform_ca_file(self) -> str | None:
         if os.getenv("TRAINING_SERVICE_RAY_CA_DISCOVERY") != "true" or any(
@@ -173,26 +178,73 @@ class LogBackendResolver:
         return self._ca_file
 
     def configuration(self) -> "LogBackendConfig":
-        with self._lock:
-            if self._gateway is None or monotonic() >= self._refresh_at:
-                override = os.getenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
-                gateway = override or _discover_gateway()
-                resolved = log_backend_config(gateway, ca_file=self._platform_ca_file())
+        with self._condition:
+            # Only cold-start callers wait. Warm callers can use the validated cache
+            # while one request refreshes it, without holding a lock over network I/O.
+            while self._refreshing and self._settings is None:
+                self._condition.wait()
+            cached = self._settings
+            now = monotonic()
+            due = (
+                cached is None
+                or now >= self._refresh_at
+                or (self._ca_file is not None and now >= self._ca_refresh_at)
+            )
+            refresh = due and not self._refreshing and now >= self._retry_at
+            if refresh:
+                self._refreshing = True
+            elif cached is None:
+                assert self._failure is not None
+                raise ApiError(503, self._failure.code, self._failure.message)
+        if not refresh:
+            assert cached is not None
+            return log_backend_config(cached.gateway_url, ca_file=cached.ca_file)
+
+        try:
+            override = os.getenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
+            gateway = override or (
+                self._gateway
+                if self._gateway is not None and monotonic() < self._refresh_at
+                else _discover_gateway()
+            )
+            resolved = log_backend_config(gateway, ca_file=self._platform_ca_file())
+        except ApiError as error:
+            with self._condition:
+                self._failure = error
+                self._retry_at = monotonic() + _DISCOVERY_RETRY_SECONDS
+            if cached is None:
+                raise
+            _LOG.warning(
+                "Log configuration refresh failed; using cached gateway and CA, "
+                "retrying in %s seconds: %s",
+                _DISCOVERY_RETRY_SECONDS,
+                error.message,
+            )
+            # Revalidate local trust and explicit overrides; cached metadata never
+            # disables TLS verification or hides a damaged/deleted trust file.
+            return log_backend_config(cached.gateway_url, ca_file=cached.ca_file)
+        else:
+            with self._condition:
                 changed = self._gateway != resolved.gateway_url
                 self._gateway = resolved.gateway_url
+                self._settings = resolved
+                self._failure = None
+                self._retry_at = 0.0
                 self._refresh_at = (
                     float("inf") if override else monotonic() + _GATEWAY_CACHE_SECONDS
                 )
-                source = (
-                    "TRAINING_SERVICE_RAY_GATEWAY_URL"
-                    if override
-                    else "GatewayConfig/default-gateway status.domain"
-                )
-                if changed:
-                    _LOG.info("Resolved log gateway %s from %s", self._gateway, source)
-                return resolved
-            # Trust files and platform certificates can rotate independently of the address.
-            return log_backend_config(self._gateway, ca_file=self._platform_ca_file())
+            source = (
+                "TRAINING_SERVICE_RAY_GATEWAY_URL"
+                if override
+                else "GatewayConfig/default-gateway status.domain"
+            )
+            if changed:
+                _LOG.info("Resolved log gateway %s from %s", resolved.gateway_url, source)
+            return resolved
+        finally:
+            with self._condition:
+                self._refreshing = False
+                self._condition.notify_all()
 
 
 @dataclass(frozen=True)

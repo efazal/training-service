@@ -53,6 +53,11 @@ make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-serv
 
 This keeps PR #10's baseline `lora_sft` lifecycle. To run the **four-algorithm
 matrix** on the same isolated deployment, add `--algorithm-matrix` to `E2E_ARGS`.
+Both modes also submit two isolated LoRA jobs and delete them while `PENDING`
+and `RUNNING`, verifying RayCluster/pod cleanup and a final `404`. The deploy
+runner always enables `--check-active-delete` and requires evidence for both
+states; skipped cancellation tests cannot produce a passing run. Against an
+existing deployment, add `--check-active-delete` to `make test-e2e`'s arguments.
 It submits separate `sft`, `osft`, `lora_sft` and `lora_grpo` jobs, checks
 accepted requests and preserved parameters, waits for `SUCCEEDED`, reads log snapshots,
 checks output files and verifies owner-scoped cleanup. The fixture prepares chat

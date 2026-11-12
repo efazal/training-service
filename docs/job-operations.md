@@ -74,9 +74,13 @@ address for 60 seconds. The default chart also reads the public ingress CA from
 ConfigMap read permission. Customers do not need to create a CA ConfigMap.
 The next log request after expiry refreshes platform metadata and certificates;
 existing streams keep their original address and TLS context. Address changes
-and their configuration source are logged. Failed discovery or invalid trust
-returns `503 logs_unavailable` from log endpoints and is retried on subsequent
-log requests. Job operations and `/readyz` do not depend on logging availability.
+and their configuration source are logged. Failed refreshes log a warning and
+keep the last validated gateway and CA available, retrying after five seconds.
+Concurrent connections use that cache while one refresh is in progress. Without
+a validated configuration, discovery failures return `503 logs_unavailable`
+and retry after the same delay. Invalid local trust files still return `503`;
+TLS certificate and hostname verification remain enabled. Job operations and
+`/readyz` do not depend on logging availability.
 Offline Helm rendering requires no cluster lookup.
 
 For custom platforms, set an explicit HTTPS origin to bypass discovery:
