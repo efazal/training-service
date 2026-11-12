@@ -21,6 +21,11 @@ Create a default fully qualified app name.
 {{- end }}
 {{- end }}
 
+{{/* Cluster-wide RBAC must coexist with the same release in another namespace. */}}
+{{- define "training-service.rbacName" -}}
+{{- printf "%s-%s" (include "training-service.fullname" .) .Release.Namespace -}}
+{{- end -}}
+
 {{/* Use the same runtime image for catalog export and training, including legacy values. */}}
 {{- define "training-service.runtimeImage" -}}
 {{- $runtime := (.Values.trainingRuntime | default dict).image | default "" -}}

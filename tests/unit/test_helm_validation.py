@@ -12,11 +12,11 @@ CHART = Path(__file__).parents[2] / "charts/training-service"
 pytestmark = pytest.mark.skipif(not shutil.which("helm"), reason="helm is not installed")
 
 
-def render(tmp_path, values):
+def render(tmp_path, values, namespace="default"):
     path = tmp_path / "values.yaml"
     path.write_text(yaml.safe_dump(values))
     return subprocess.run(
-        ["helm", "template", "validation", str(CHART), "-f", str(path)],
+        ["helm", "template", "validation", str(CHART), "--namespace", namespace, "-f", str(path)],
         capture_output=True,
         text=True,
         check=False,
@@ -187,6 +187,24 @@ def test_default_chart_discovers_gateway_with_only_named_read_access(tmp_path, t
         e["name"] for e in pod["containers"][0]["env"]
     }
     assert pod["containers"][0]["readinessProbe"]["timeoutSeconds"] > 5
+
+
+def test_same_release_in_different_namespaces_has_independent_cluster_rbac(tmp_path):
+    names = []
+    for namespace in ("team-a", "team-b"):
+        result = render(tmp_path, {}, namespace=namespace)
+        assert result.returncode == 0, result.stderr
+        resources = [
+            d
+            for d in yaml.safe_load_all(result.stdout)
+            if d["kind"] in {"ClusterRole", "ClusterRoleBinding"}
+        ]
+        names.append({(d["kind"], d["metadata"]["name"]) for d in resources})
+        for resource in resources:
+            if resource["kind"] == "ClusterRoleBinding":
+                assert resource["subjects"][0]["namespace"] == namespace
+                assert ("ClusterRole", resource["roleRef"]["name"]) in names[-1]
+    assert names[0].isdisjoint(names[1])
 
 
 @pytest.mark.parametrize("legacy", [True, False])

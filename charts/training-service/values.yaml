@@ -1,8 +1,7 @@
 replicaCount: 1
 
 image:
-  # Intended public release repository; requires publication by a modh maintainer.
-  # Until published, override repository/tag with an available service image.
+  # Public API service image. No registry credentials are needed for the default.
   repository: quay.io/modh/training-service
   pullPolicy: IfNotPresent
   tag: "0.1.0"

@@ -1,6 +1,9 @@
 apiVersion: v2
 name: training-service
 description: OpenDataHub Training Service
+home: https://github.com/opendatahub-io/training-service
+sources:
+  - https://github.com/opendatahub-io/training-service
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

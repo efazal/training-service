@@ -83,20 +83,30 @@ make helm-template
 `make helm-template` validates the default chart and an explicit OpenShift
 Route/TLS hostname override. It does not install anything on a cluster.
 
-## Install or upgrade from a checkout
+## Install the published chart
 
 On a prepared RHOAI/ODH cluster, install using the chart's defaults:
 
 ```bash
-helm upgrade --install training-service ./charts/training-service \
+helm repo add training-service https://raw.githubusercontent.com/opendatahub-io/training-service/helm-charts/
+helm repo update training-service
+helm install training-service training-service/training-service \
   --namespace training-service \
   --create-namespace \
   --wait --timeout 15m
 ```
 
-Optional customization goes directly in `charts/training-service/values.yaml`.
+No checkout, separate values file or registry login is needed. The Helm output
+shows how to get the Route URL; open `/docs` there for the API reference.
+
+To customize, run `helm pull training-service/training-service --untar`, edit
+`training-service/values.yaml`, then install `./training-service` instead.
+When developing from a checkout, customization goes directly in
+`charts/training-service/values.yaml` and the chart path is `./charts/training-service`.
 For a development build, change `image.repository` and `image.tag` there to the
-image you built and pushed, then run the same install command. No `-f` is needed;
+image you built and pushed, then run `helm upgrade --install training-service
+./charts/training-service --namespace training-service --create-namespace --wait
+--timeout 15m`. No `-f` is needed;
 Helm reads the chart's own `values.yaml` automatically.
 
 The service image and training image are separate settings. The chart defaults
@@ -107,10 +117,7 @@ service internally. No `TRAINING_RAY_IMAGE` entry under `env` is needed. Legacy
 entries still override the chart default; combining one with a non-default
 `trainingRuntime.image` is rejected.
 
-The intended public API image default is `quay.io/modh/training-service:0.1.0`.
-This image has not been verified publicly accessible: a `modh` maintainer must
-create or configure the repository as public and publish the tag before a
-default installation can pull it. Until then, use the image overrides above.
+The public API image default is `quay.io/modh/training-service:0.1.0`.
 
 For a private registry, create the pull secret first and pass it through chart
 values:
