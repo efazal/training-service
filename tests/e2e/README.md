@@ -265,7 +265,8 @@ run-owned namespace, LocalQueue, verifier, temporary credentials, test PVC and
 remaining Ray resources. Namespace ownership/run label and UID are verified;
 deletion uses a UID precondition and bounded polling, never forced finalizer removal.
 Partial setup failures also trigger cleanup. This may cancel a still-running test
-job in this isolated namespace. The API also supports deleting active jobs. Cleanup failure makes the run fail and reports manual recovery guidance.
+job in this isolated namespace; it does not change the API's terminal-only DELETE
+contract. Cleanup failure makes the run fail and reports manual recovery guidance.
 If Helm uninstall fails, the namespace/release history is retained for safe recovery.
 PVC deletion follows the StorageClass reclaim policy; the runner never directly
 deletes PVs or changes shared storage policy.
@@ -364,6 +365,28 @@ POST is **never automatically retried**. For complete training checks:
 make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile with-kueue --observe-cluster --artifact-pod e2e-output-verifier --check-logs --check-stream -s"
 ```
 
+With `--check-stream`, timeout verification opens a one-second SSE connection,
+checks the parsed `stream_expired` error event and measured lifetime, then reconnects
+with a three-second request and requires nonempty log events. It checks that the
+job remains `RUNNING` after each expiry and that a subsequent snapshot still works.
+Timing allows 0.25 seconds early and 0.5 seconds late after response headers;
+connection closure must follow the expiry event within 0.5 seconds. A separate
+total client deadline bounds stalled headers and quiet or continuously active streams.
+Use a workload that remains running throughout these checks; an early completion
+fails rather than silently skipping timeout verification. Per-connection measurements
+are printed with `-s` and saved in `lifecycle.json` under `log_timeouts` when an evidence
+directory is configured.
+
+For default-lifetime and server-cap checks, configure a **separate test deployment**
+with `TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS=3`, then add
+`--log-stream-max-seconds 3` to the existing-deployment command above. The test also
+measures a connection with the parameter omitted and one requesting `2147483647`
+seconds; both must expire at the configured three-second maximum. This flag states
+an expected existing configuration; it does not modify the deployment. Allow at
+least twelve seconds of running-job time for the four connections. Omitting the
+flag measures only the one- and three-second requests and does not certify the
+deployment maximum. Keep the normal service default at five minutes.
+
 The default HTTP suite pairs invalid parameters with valid representative/default
 requests for all four execution profiles. Valid requests must reach a deliberately
 missing PVC and return a contextual `404`; invalid requests must return a targeted
@@ -380,6 +403,7 @@ training fixture described above. Constraints absent from a runtime skip visibly
 | --- | --- |
 | `--job-timeout 1800` | Training deadline, seconds |
 | `--stream-timeout 60` | SSE deadline; socket reads bounded too |
+| `--log-stream-max-seconds N` | Expected deployed limit; with `--check-stream`, also measure omitted-timeout and above-limit requests |
 | `--cleanup-timeout 180` | Terminal/resource cleanup deadline |
 | `--request-timeout 30` | Per HTTP timeout, existing-deployment command |
 | `--build-timeout 1800`, `--deploy-timeout 300` | Build/push and rollout/Route deadlines, deployment runner |
@@ -415,27 +439,14 @@ results directory; `run.json` records trust sources and the ingress bundle check
 Names are short UUIDs; output prefixes gain that name. Existing-deployment input
 fixtures are never modified; the deployment runner writes only its new namespace/PVC.
 Cleanup registered before POST reconciles lost responses by name without replay.
-It refuses mismatched stored submissions and uses only API DELETE, including
-cancelling this run's uniquely named active jobs. Timeouts/token expiry/interruption
-report resources needing inspection. Never cancel unrelated running jobs,
-force-remove pods/finalizers, delete customer PVCs/Secrets/CRDs, or change queue
-quota to manufacture a pass.
+It refuses mismatched stored submissions, waits for terminal status and uses only
+API DELETE. Timeouts/token expiry/interruption report resources needing inspection.
+Never cancel running jobs, force-remove pods/finalizers, delete PVCs/Secrets/CRDs
+or change queue quota to manufacture a pass.
 
-Inspect the printed job ID using GET/logs, DELETE through the API, then verify owned pods/clusters disappear before uninstalling the test service.
+Inspect the printed job ID using GET/logs, wait for terminal, DELETE through the
+API, then verify owned pods/clusters disappear before uninstalling the test service.
 Repeat twice with identical fixtures to check independent job/output identities.
 No `set -x`, pytest `--showlocals`, HTTP debug logging, sensitive fixtures or token
 CLI arguments. Raw build/Helm/cluster output is withheld; stages/exit status are
 reported. Unset any explicit `TRAINING_SERVICE_TOKEN` override when finished.
-
-
-## Active deletion and per-request log lifetime
-
-With a prepared job fixture, add `--check-active-delete` to submit isolated
-pending/running jobs, delete each through the API, and verify owned cleanup.
-Use `--observe-cluster` for independent resource/GPU checks. The default lifecycle
-still verifies successful training and terminal cleanup. `--check-stream` also
-checks a one-second `timeout_seconds` expiry and a subsequent log read.
-
-The deployment runner accepts the structured values generated by
-`uv run python scripts/platform_values.py`, including a public CA bundle;
-the older environment/volume example remains supported.

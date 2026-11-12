@@ -1,5 +1,6 @@
 """One isolated, real training run from submission through terminal deletion."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import pytest
 from tests.e2e.algorithms import ALGORITHMS
 
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
+TIMEOUT_VERIFICATION_SECONDS = 10
 
 
 def follow_logs(api, path, timeout):
@@ -50,6 +52,7 @@ def follow_logs(api, path, timeout):
                             if body["message"].strip():
                                 chunks.add(hashlib.sha256(body["message"].encode()).hexdigest())
                             if len(chunks) >= 2:
+                                verify_stream_timeout(api, path)
                                 return len(chunks)
                             event, data = None, []
                     pytest.fail(
@@ -63,6 +66,106 @@ def follow_logs(api, path, timeout):
             )
         time.sleep(min(2, max(0, deadline - time.monotonic())))
     pytest.fail("SSE deadline exceeded before incremental log events arrived", pytrace=False)
+
+
+async def _verify_expiring_connection(client, path, requested, expected, require_logs):
+    params = {"follow": "true"}
+    if requested is not None:
+        params["timeout_seconds"] = requested
+    deadline = max(TIMEOUT_VERIFICATION_SECONDS, expected + 5)
+    async with asyncio.timeout(deadline):
+        async with client.stream(
+            "GET", path + "/logs", params=params, timeout=deadline
+        ) as response:
+            assert response.status_code == 200, "Timeout verification did not open an SSE stream"
+            assert response.headers.get("content-type", "").startswith("text/event-stream")
+            started = time.monotonic()
+            expired_at = None
+            event, data, log_events = None, [], 0
+            token = client.headers.get("Authorization", "").partition(" ")[2]
+            async for line in response.aiter_lines():
+                assert not token or token not in line, "Log stream exposed caller credential"
+                field, _, value = line.partition(":")
+                if value.startswith(" "):
+                    value = value[1:]
+                if field == "event":
+                    event = value
+                elif field == "data":
+                    data.append(value)
+                elif not line and data:
+                    assert expired_at is None, "SSE event arrived after stream_expired"
+                    body = json.loads("\n".join(data))
+                    if event == "error":
+                        assert body == {
+                            "code": "stream_expired",
+                            "message": "Reconnect to continue.",
+                        }, "Expected a stream_expired SSE error event"
+                        expired_at = time.monotonic()
+                    else:
+                        assert event == "log" and isinstance(body.get("message"), str)
+                        log_events += bool(body["message"].strip())
+                    event, data = None, []
+            closed_at = time.monotonic()
+    assert not data, "Timeout verification received an incomplete SSE frame"
+    assert expired_at is not None, "Log stream ended without a stream_expired SSE error event"
+    elapsed = expired_at - started
+    assert expected - 0.25 <= elapsed <= expected + 0.5, (
+        f"Expected expiry after {expected}s, observed {elapsed:.3f}s "
+        "(allowed: 0.25s early, 0.5s late)"
+    )
+    assert closed_at - expired_at <= 0.5, "Stream did not close promptly after stream_expired"
+    assert not require_logs or log_events, "Reconnected SSE stream delivered no nonempty log events"
+    return {
+        "requested_seconds": requested,
+        "expected_seconds": expected,
+        "elapsed_seconds": round(elapsed, 3),
+        "log_events": log_events,
+    }
+
+
+def verify_stream_timeout(api, path):
+    """Measure expiry, reconnect with another lifetime, and require training to continue."""
+    limit = api.log_stream_max_seconds
+
+    def require_running():
+        status = api.object(api.request("GET", path))["status"]
+        assert status == "RUNNING", (
+            f"Timeout verification requires the job to remain RUNNING, observed {status}; "
+            "use a longer training fixture"
+        )
+
+    require_running()
+
+    async def verify():
+        requests = [1, 3] + ([None, 2147483647] if limit is not None else [])
+        results = []
+        async with api.async_client() as client:
+            for index, requested in enumerate(requests):
+                expected = requested
+                if limit is not None:
+                    expected = limit if requested is None else min(requested, limit)
+                result = await _verify_expiring_connection(
+                    client, path, requested, expected, index > 0
+                )
+                require_running()
+                results.append(result)
+                print(
+                    f"Log timeout: requested={requested}, expected={result['expected_seconds']}s, "
+                    f"observed={result['elapsed_seconds']}s; job remains RUNNING"
+                )
+        return results
+
+    try:
+        results = asyncio.run(verify())
+    except (TimeoutError, httpx.TimeoutException):
+        pytest.fail("Timeout verification exceeded its client deadline", pytrace=False)
+    except httpx.HTTPError as error:
+        pytest.fail(f"Timeout verification failed: {type(error).__name__}", pytrace=False)
+    snapshot = api.request("GET", path + "/logs", params={"follow": "false", "timeout_seconds": 1})
+    assert snapshot.headers.get("content-type", "").startswith("text/plain")
+    assert snapshot.text.strip(), "Snapshot after stream expiry returned no logs"
+    api.log_timeout_checks[path] = results
+    return results
 
 
 def observe(observer, job_id):
@@ -248,6 +351,7 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             "succeeded": True,
             "snapshot_logs": saw_logs,
             "sse": stream is not None,
+            "log_timeouts": api.log_timeout_checks.get(path, []),
             "gpu_cleanup": bool(observer and observer.saw_gpu),
             "queue_admitted": bool(observer and observer.admitted),
             "artifacts": artifact_result or "not verified: no --artifact-pod selected",

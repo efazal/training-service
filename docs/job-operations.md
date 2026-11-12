@@ -45,11 +45,15 @@ data: {"message":"Epoch 1 complete\n"}
 Following uses Ray's `tail_job_logs`; `tail_lines` applies only to snapshots.
 Following checks backend status before sending HTTP 200 without first
 downloading the full log. Later failures produce a
-sanitized SSE `error` event. A stream lasts five minutes by default. A positive `timeout_seconds` query
-parameter overrides one follow connection; omitting it uses the administrator's
-configured lifetime. At expiry, `stream_expired` asks the client to reconnect,
-which revalidates authentication and authorization. Disconnection closes the SDK
-iterator. Logs are not persisted or aggregated across workers.
+sanitized SSE `error` event. A stream lasts at most the deployment's configured
+maximum (five minutes by default). Add `timeout_seconds=60` to request a shorter
+connection; larger values are capped at that maximum. The parameter must use
+ASCII digits without signs, leading zeros, whitespace, or a decimal point, in
+the range 1 to 2147483647. Invalid values return 400 for both follow and snapshot
+requests; valid values have no effect on snapshots. Expiry emits `stream_expired`
+and closes the connection. Reconnecting revalidates authentication and
+authorization. Disconnection closes the SDK iterator. Logs are not persisted
+or aggregated across workers.
 
 Before Ray submission, logs return `409 logs_not_ready`; KubeRay may already
 have allocated a job ID at this point. If Ray reports that the submission is
@@ -60,16 +64,13 @@ opening an SSE stream.
 
 The administrator must configure a trusted RHOAI HTTPS gateway serving
 authenticated Ray endpoints at `/ray/{project}/{rayClusterName}`. Use the
-structured Helm settings, for example:
+chart's existing `env` values, for example:
 
 ```yaml
-logBackend:
-  gatewayURL: https://gateway.example.com
+env:
+  - name: TRAINING_SERVICE_RAY_GATEWAY_URL
+    value: https://ray-gateway.example.com
 ```
-
-The read-only [platform helper](../scripts/platform_values.py) discovers the
-OpenShift gateway and public CA automatically. See [installation](installation.md)
-for optional CA settings; backend configuration belongs to the administrator.
 
 TLS verification is always enabled. The gateway certificate must be trusted
 by the container. `TRAINING_SERVICE_RAY_CA_FILE` can select a CA bundle that
@@ -92,12 +93,12 @@ after the GPU pods terminate. The response does not mean GPU release has
 already completed: finalizers, controllers, and pod termination are asynchronous.
 Stalled finalizers must be investigated; the API does not force-remove them.
 
-Pending, running, and terminal jobs can all be deleted through CodeFlare's
-`RayJob.delete()`. Deleting an active job stops its execution as its owned
-resources terminate. Shared or unowned clusters return **409** without cleanup.
-UID and resource-version preconditions reject a concurrent change with 409;
-refresh before retrying. Already-cleaned-up clusters do not prevent deletion
-of their job record.
+Only execution states `SUCCEEDED`, `FAILED`, and `STOPPED` are eligible.
+Pending/running jobs, unknown execution states, retrying deployments, and
+shared or unowned clusters return **409** without cleanup. This is not a
+cancel endpoint. UID and resource-version preconditions reject a concurrent
+change with 409 rather than deleting a different or restarted job.
+Already-cleaned-up clusters do not prevent deletion of their terminal job.
 Existing input/output PVCs, checkpoints, model outputs, and referenced
 Secrets are not explicitly deleted. Normal Kubernetes ownership rules still
 apply to anything a job owner has configured as a dependent.

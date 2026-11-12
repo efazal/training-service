@@ -34,6 +34,9 @@ SFT, OSFT, and LoRA SFT require `num_nodes=1`; unsupported multi-node
 requests return `422` before resource lookup or submission. SFT/OSFT derive
 local torchrun process counts from `gpus_per_node`. Multi-GPU LoRA requires
 explicit `enable_model_splitting=true`; no distributed workers are launched.
+LoRA SFT defaults to bf16, which needs an Ampere or newer GPU. On older GPUs
+such as the T4 (AWS g4dn), set `bf16: false` and `fp16: true`; otherwise the job
+fails with `Your setup doesn't support bf16/gpu`.
 GRPO requires a shared ReadWriteMany PVC output and either shared PVC or HF
 inputs; S3 inputs/output are not supported for this topology. HF inputs must
 reference an existing project Secret, even for public repos. GRPO uses one

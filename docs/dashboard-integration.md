@@ -22,7 +22,8 @@ curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/api/v1/alg
 ```
 
 Use discovery's parameter types, defaults, and required fields to build your form;
-POST validates against that same catalog. Prepare model/data storage and any
+POST validates against that same catalog. Discovery can list more algorithms than
+POST accepts; offer only `sft`, `osft`, `lora_sft`, and `lora_grpo` for submission. Prepare model/data storage and any
 connection Secrets in the target project. Example `job.json`:
 
 ```json
@@ -37,7 +38,9 @@ connection Secrets in the target project. Example `job.json`:
 ```
 
 Use a unique job name. The project PVC and its files must already exist and be
-accessible to the caller. HF and S3 connection-backed inputs are also supported;
+accessible to the caller. Size `resources` to fit one GPU node; a job that cannot
+be scheduled stays `PENDING` with no status message, and pending jobs cannot be
+deleted through the API (remove it with `oc delete rayjob <name> -n <project>`). HF and S3 connection-backed inputs are also supported;
 see the [request examples](api/openapi.yaml).
 
 ```bash
@@ -48,7 +51,8 @@ curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$JOBS/$JOB"
 ```
 
 POST returns `202` with the job ID and a project-scoped `Location`. Poll GET for
-`PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`, or `STOPPED`. List jobs with GET
+`PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`, or `STOPPED`. A `FAILED` job may
+not include a reason; read its driver logs before deleting it. List jobs with GET
 `$JOBS`; optional filters are `status`, `queue_name`, `limit`, and `page_token`.
 
 ## Logs and deletion
@@ -59,14 +63,15 @@ curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$JOBS/$JOB/logs?tail_li
 # Follow; timeout_seconds is optional and defaults to five minutes.
 curl --no-buffer --fail-with-body -H "Authorization: Bearer $TOKEN" \
   "$JOBS/$JOB/logs?follow=true&timeout_seconds=300"
-# Delete pending, running, or completed jobs. Active training stops.
+# Delete a finished job (SUCCEEDED, FAILED, or STOPPED).
 curl --fail-with-body -X DELETE -H "Authorization: Bearer $TOKEN" "$JOBS/$JOB"
 ```
 
 Following returns Server-Sent Events: `event: log` contains JSON with `message`;
 `event: error` contains `code` and `message`. On `stream_expired`, reconnect with
 a current token. If omitted, the timeout uses the administrator's default
-(300 seconds initially); a positive `timeout_seconds` overrides one connection.
+(300 seconds initially); a smaller `timeout_seconds` shortens one connection,
+and larger values are capped at that default.
 Ingress timeouts can close a connection earlier. Disconnection does not stop
 training. Logs are transient driver logs and can disappear after job cleanup.
 
@@ -76,7 +81,8 @@ and cancel the fetch when leaving the log view. A 200 means the stream opened;
 handle subsequent SSE errors as well as HTTP errors.
 
 DELETE returns `204` when cleanup starts. Poll GET until `404` before showing
-cleanup complete. Stored inputs and outputs are preserved. A `409 conflict`
+cleanup complete. Stored inputs and outputs are preserved. Pending and running
+jobs return `409 job_not_terminal`; wait for a finished status first. A `409 conflict`
 means refresh and retry; shared or unverified ownership is also rejected with
 409 and must not be retried blindly.
 

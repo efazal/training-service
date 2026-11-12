@@ -27,8 +27,8 @@ make check helm-lint helm-template
 make run
 ```
 
-`/healthz` checks the process; `/readyz` also checks its runtime catalog and log
-configuration. Use the Helm quickstart for a configured deployment.
+`/healthz` checks the process; `/readyz` also checks its runtime catalog. Use the
+Helm quickstart for a configured deployment.
 
 Edit the contract/templates, run `make generate-server CONTAINER_RUNTIME=podman`,
 and commit the generated `src/training_service_api/` changes. Handwritten behavior

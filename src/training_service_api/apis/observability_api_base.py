@@ -67,6 +67,22 @@ class BaseObservabilityApi:
                 )
             ),
         ],
+        timeout_seconds: Annotated[
+            Annotated[int, Field(le=2147483647, strict=True, ge=1)] | None,
+            Field(
+                description=(
+                    "Requested total lifetime of this follow connection in seconds (1 to "
+                    "2147483647), written with ASCII digits and no signs, leading zeros, "
+                    "whitespace, or decimal point. The numeric upper bound keeps deadline "
+                    "arithmetic representable. The effective lifetime is the smaller of "
+                    "this value and TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS (300 "
+                    "seconds by default); omission uses that configured maximum. Validated "
+                    "for every request: invalid values return 400 even when follow=false; "
+                    "valid values have no effect on snapshots. Expiry closes the stream "
+                    "with a stream_expired event; reconnect to continue reading logs. "
+                )
+            ),
+        ],
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> str:

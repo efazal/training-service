@@ -11,8 +11,11 @@ the platform or grant workload permissions to API callers.
 From the repository checkout, while logged into the target cluster:
 
 ```bash
-uv sync --locked
-uv run python scripts/platform_values.py > /tmp/training-service-values.yaml
+cat > /tmp/training-service-values.yaml <<EOF
+env:
+  - name: TRAINING_SERVICE_RAY_GATEWAY_URL
+    value: https://$(oc get gatewayconfig default-gateway -o jsonpath='{.status.domain}')
+EOF
 
 helm upgrade --install training-service ./charts/training-service \
   --namespace training-service \
@@ -24,52 +27,58 @@ export TRAINING_SERVICE_URL="https://$(oc -n training-service get route training
 ```
 
 For a shared chart archive, use `./training-service-0.1.1.tgz` in place of the
-chart directory and the values supplied by your administrator; skip the `uv`
-commands above.
+chart directory.
 
-The helper reads the platform gateway and **public** ingress CA and generates
-values; it makes no cluster changes. Helm mounts the CA and discovers algorithms
-from the training image automatically. Share `TRAINING_SERVICE_URL` and the
+The values file points the service at the platform gateway. Helm discovers
+algorithms from the training image automatically. The first install pulls that
+image (over 10 GB); on a fresh node Helm can report `Progress deadline exceeded`
+while the pull continues. Wait for the pod to become ready and rerun the same
+`helm upgrade --install` command. Share `TRAINING_SERVICE_URL` and the
 [dashboard quickstart](dashboard-integration.md) with the integration team.
 Swagger UI is at `$TRAINING_SERVICE_URL/docs`.
 
 The default API image is the public amd64 developer preview
-`quay.io/modh/training-service:preview-83a2a358fa0c`. It contains the log-timeout and active-job
-deletion changes. This is a preview build, not a stable release. Keep the API
+`quay.io/modh/training-service:preview-83a2a358fa0c`. This is a preview build, not a stable release. Keep the API
 image and chart from the same handoff. The separate `trainingRuntime.image`
 selects the training image; see [compatibility](training-runtime.md).
 
 ## Platform settings
 
-For platforms without automatic discovery, create a values override:
+For a gateway whose certificate is not publicly trusted, or to change the log
+stream limit, extend the values file:
 
 ```yaml
-logBackend:
-  gatewayURL: https://gateway.apps.example.com
-  streamTimeoutSeconds: 300
+env:
+  - name: TRAINING_SERVICE_RAY_GATEWAY_URL
+    value: https://gateway.apps.example.com
+  - name: TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS
+    value: "300"
   # Optional when normal container trust already verifies the gateway:
-  trustedCA:
-    configMapName: platform-gateway-ca
-    key: ca-bundle.crt
+  - name: TRAINING_SERVICE_RAY_CA_FILE
+    value: /var/run/training-service/ray-ca/ca.crt
+volumes:
+  - name: ray-gateway-ca
+    configMap:
+      name: platform-gateway-ca
+volumeMounts:
+  - name: ray-gateway-ca
+    mountPath: /var/run/training-service/ray-ca
+    readOnly: true
 ```
 
 The gateway is the platform's authenticated backend entry point, **not** the
 Training Service URL shared with API callers. A custom CA is needed only when
-its issuer is absent from the container trust store. `trustedCA.configMapName`
-references a ConfigMap in the service namespace. Alternatively, `trustedCA.bundle`
-accepts public PEM certificates, as produced by the helper. TLS verification
-stays enabled. Use the helper's `--system-trust` option to omit custom trust.
+its issuer is absent from the container trust store. `platform-gateway-ca` is a
+ConfigMap in the service namespace with key `ca.crt`, for example copied from
+`openshift-config-managed/default-ingress-cert`. TLS verification stays enabled.
 
-For a platform-managed ConfigMap, new connections read mounted CA updates.
-For the helper's Helm-managed bundle, rerun the helper and Helm upgrade after
-certificate rotation. API clients must also trust the platform's Route issuer;
-provide the normal platform CA through your organization's trust setup.
+New connections read mounted CA updates; refresh the ConfigMap after certificate
+rotation. API clients must also trust the platform's Route issuer; provide the
+normal platform CA through your organization's trust setup.
 
-Helm rejects missing or conflicting settings before installation. `/readyz`
-checks the catalog and resolved gateway/CA configuration without needing a job;
-`/healthz` checks only the process. Readiness does not probe backend reachability.
-Legacy gateway/CA environment settings still work; remove them when adopting
-structured settings. Keep checked-in defaults free of credentials and cluster-specific
+`/readyz` checks the runtime catalog; `/healthz` checks only the process.
+Neither probes the gateway: a wrong gateway URL or untrusted certificate returns
+`503 logs_unavailable` on log requests. Keep checked-in defaults free of credentials and cluster-specific
 URLs. Set `route.enabled=false` when exposing the internal Service through your
 platform's own proxy.
 
