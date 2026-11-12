@@ -30,7 +30,8 @@ class AlgorithmDetails(ContractModel):
     parameters: dict[str, AlgorithmParameter]
     parameter_schema_url: StrictStr
     parameter_schema: dict[str, Any] | None = Field(
-        default=None, description="Exact native schema; present only with include=parameter_schema."
+        default=None,
+        description=("Parameter validation schema, included only with include=parameter_schema."),
     )
     runtime: AlgorithmRuntime | None = None
     notes: list[StrictStr]

@@ -20,18 +20,17 @@ class AlgorithmSpec(ContractModel):
 
     name: StrictStr = Field(
         description=(
-            "Training algorithm identifier. Support depends on the selected "
-            "backend and runtime and is validated at submission. "
+            "Algorithm identifier from the training catalog. Availability depends "
+            "on the configured training environment."
         ),
         json_schema_extra={"examples": ["lora_sft"]},
     )
     parameters: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Backend-specific training overrides. Accepted keys and constraints "
-            "are validated by the service rather than enumerated in this API "
-            "contract. Omitted overrides use backend defaults. Worker and GPU "
-            "topology belongs in resources, not algorithm parameters. "
+            "Algorithm-specific settings. Use the algorithm detail endpoint for "
+            "accepted parameters and defaults. Configure node and GPU counts in "
+            "resources."
         ),
     )
 

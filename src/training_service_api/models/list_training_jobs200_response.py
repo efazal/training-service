@@ -22,15 +22,13 @@ class ListTrainingJobs200Response(ContractModel):
     items: list[TrainingJobSummary]
     total_count: Annotated[int, Field(strict=True, ge=0)] = Field(
         description=(
-            "Exact number of caller-readable jobs matching the supplied filters "
-            "across all pages before pagination, not the page length or the number "
-            "of remaining jobs. With no filters, counts all caller-readable jobs "
-            "in the project. Reflects the current request and may change between "
-            "requests. "
+            "Total accessible jobs matching the filters, before pagination. This "
+            "count may change between requests."
         )
     )
     next_page_token: StrictStr | None = Field(
-        default=None, description="Omitted when no further results are available."
+        default=None,
+        description="Token for the next page. Omitted when there are no further results.",
     )
 
     model_config = ConfigDict(

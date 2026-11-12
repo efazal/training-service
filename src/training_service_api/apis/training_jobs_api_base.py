@@ -38,44 +38,31 @@ class BaseTrainingJobsApi:
             StrictStr,
             Field(
                 description=(
-                    "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                    "resource references are scoped to it. Provision the project through "
-                    "normal OpenShift self-service or administrator workflows before using "
-                    "this API. The Training API does not create projects or namespaces and "
-                    "never falls back to a default namespace or an elevated service "
-                    "identity. A missing project returns 404; insufficient caller "
-                    "permissions return 403. "
+                    "Existing OpenShift project containing the job and its referenced "
+                    "storage and queues."
                 )
             ),
         ],
         status: Annotated[
             JobStatus | None,
-            Field(
-                description=(
-                    "Optional exact-status filter. When omitted, includes jobs in all "
-                    "statuses, subject to caller access, other filters, and pagination. "
-                    "There is no default status filter or ALL status value. "
-                )
-            ),
+            Field(description="Filter by an exact job state. Omit to include all states."),
         ],
         queue_name: Annotated[
-            StrictStr | None,
-            Field(description="Filter by queue name recorded in training submission metadata."),
+            StrictStr | None, Field(description="Filter by the queue name recorded for the job.")
         ],
         limit: Annotated[int, Field(strict=True, ge=1)] | None,
         page_token: Annotated[
             StrictStr | None,
             Field(
                 description=(
-                    "Opaque continuation token for the same project and filters. The token "
-                    "never grants access; every request rechecks caller permissions. "
+                    "Continuation token from the previous page. Use the same project and filters."
                 )
             ),
         ],
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> ListTrainingJobs200Response:
-        """List training jobs in an OpenShift Project"""
+        """List training jobs"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def create_training_job(
@@ -84,13 +71,8 @@ class BaseTrainingJobsApi:
             StrictStr,
             Field(
                 description=(
-                    "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                    "resource references are scoped to it. Provision the project through "
-                    "normal OpenShift self-service or administrator workflows before using "
-                    "this API. The Training API does not create projects or namespaces and "
-                    "never falls back to a default namespace or an elevated service "
-                    "identity. A missing project returns 404; insufficient caller "
-                    "permissions return 403. "
+                    "Existing OpenShift project containing the job and its referenced "
+                    "storage and queues."
                 )
             ),
         ],
@@ -98,7 +80,7 @@ class BaseTrainingJobsApi:
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> TrainingJobSubmission:
-        """Submit a Ray training job in an OpenShift Project"""
+        """Submit a training job"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def get_training_job(
@@ -107,30 +89,19 @@ class BaseTrainingJobsApi:
             StrictStr,
             Field(
                 description=(
-                    "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                    "resource references are scoped to it. Provision the project through "
-                    "normal OpenShift self-service or administrator workflows before using "
-                    "this API. The Training API does not create projects or namespaces and "
-                    "never falls back to a default namespace or an elevated service "
-                    "identity. A missing project returns 404; insufficient caller "
-                    "permissions return 403. "
+                    "Existing OpenShift project containing the job and its referenced "
+                    "storage and queues."
                 )
             ),
         ],
         job_id: Annotated[
             StrictStr,
-            Field(
-                description=(
-                    "Name of the RayJob custom resource, scoped to the target project. "
-                    "Resolve it only through caller-authorized Kubernetes APIs in that "
-                    "project. "
-                )
-            ),
+            Field(description="Job ID returned at submission, scoped to the specified project."),
         ],
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> TrainingJob:
-        """Get training job status and available details"""
+        """Get a training job"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def delete_training_job(
@@ -139,25 +110,14 @@ class BaseTrainingJobsApi:
             StrictStr,
             Field(
                 description=(
-                    "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                    "resource references are scoped to it. Provision the project through "
-                    "normal OpenShift self-service or administrator workflows before using "
-                    "this API. The Training API does not create projects or namespaces and "
-                    "never falls back to a default namespace or an elevated service "
-                    "identity. A missing project returns 404; insufficient caller "
-                    "permissions return 403. "
+                    "Existing OpenShift project containing the job and its referenced "
+                    "storage and queues."
                 )
             ),
         ],
         job_id: Annotated[
             StrictStr,
-            Field(
-                description=(
-                    "Name of the RayJob custom resource, scoped to the target project. "
-                    "Resolve it only through caller-authorized Kubernetes APIs in that "
-                    "project. "
-                )
-            ),
+            Field(description="Job ID returned at submission, scoped to the specified project."),
         ],
         token_OpenShiftBearer: TokenModel,
         request: Request,

@@ -37,7 +37,7 @@ class BaseInfrastructureDiscoveryApi:
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> ListAlgorithms200Response:
-        """List algorithms in the configured runtime catalog"""
+        """List training algorithms"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def get_algorithm(
@@ -45,12 +45,16 @@ class BaseInfrastructureDiscoveryApi:
         name: StrictStr,
         include: Annotated[
             StrictStr | None,
-            Field(description="Opt into the complete native parameter validation schema."),
+            Field(
+                description=(
+                    "Set to parameter_schema to include the complete parameter validation schema."
+                )
+            ),
         ],
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> AlgorithmDetails:
-        """Get readable algorithm parameters and an optional native schema"""
+        """Get algorithm details"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
 
     async def list_queues(
@@ -59,17 +63,12 @@ class BaseInfrastructureDiscoveryApi:
             StrictStr,
             Field(
                 description=(
-                    "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                    "resource references are scoped to it. Provision the project through "
-                    "normal OpenShift self-service or administrator workflows before using "
-                    "this API. The Training API does not create projects or namespaces and "
-                    "never falls back to a default namespace or an elevated service "
-                    "identity. A missing project returns 404; insufficient caller "
-                    "permissions return 403. "
+                    "Existing OpenShift project containing the job and its referenced "
+                    "storage and queues."
                 )
             ),
         ],
         token_OpenShiftBearer: TokenModel,
     ) -> QueueInfoResponse:
-        """List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)"""
+        """List training queues"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")

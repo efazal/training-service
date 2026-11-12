@@ -27,18 +27,16 @@ class CreateJobRequest(ContractModel):
 
     name: Annotated[str, Field(min_length=1, strict=True, max_length=47)] = Field(
         description=(
-            "DNS-1035-compatible RayJob name; limited to 47 characters by the submission path."
+            "Job name: 1-47 lowercase letters, digits, or hyphens; start with a "
+            "letter and end with a letter or digit."
         ),
         json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]},
     )
     queue_name: StrictStr | None = Field(
         default=None,
         description=(
-            "Optional Kueue LocalQueue in the target project. When omitted, "
-            "CodeFlare uses a configured default LocalQueue if one exists; "
-            "otherwise the job is submitted without a queue. Subject to caller "
-            "permissions and platform admission policy; this does not grant "
-            "access. "
+            "Queue in the target project. If omitted, a configured default queue "
+            "is used; otherwise submission is unqueued."
         ),
         json_schema_extra={"examples": ["team-alpha-local-queue"]},
     )

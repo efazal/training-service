@@ -39,27 +39,20 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
     responses={
         200: {
             "model": ListAlgorithms200Response,
-            "description": (
-                "Compact algorithm summaries; an empty catalog returns an empty algorithms array"
-            ),
+            "description": "Training algorithms and links to their details.",
         },
-        401: {
-            "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
-        },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": "The service or a required dependency is temporarily unavailable.",
         },
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
     },
     tags=["Infrastructure &amp; Discovery"],
-    summary="List algorithms in the configured runtime catalog",
+    summary="List training algorithms",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -67,7 +60,7 @@ async def list_algorithms(
     request: Request,
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> ListAlgorithms200Response:
-    """List algorithms in the configured runtime catalog"""
+    """List training algorithms"""
     implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.list_algorithms(
         token_OpenShiftBearer=token_OpenShiftBearer, request=request
@@ -77,35 +70,30 @@ async def list_algorithms(
 @router.get(
     "/algorithms/{name}",
     responses={
-        200: {"model": AlgorithmDetails, "description": "Readable algorithm details"},
+        200: {
+            "model": AlgorithmDetails,
+            "description": "Algorithm details and parameter definitions.",
+        },
         400: {
             "model": ErrorResponse,
-            "description": "Malformed JSON or invalid query/path parameter syntax",
+            "description": "Malformed JSON or invalid path or query parameters.",
         },
-        401: {
-            "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
-        },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
         404: {
             "model": ErrorResponse,
-            "description": (
-                "Target project, RayJob, or referenced project resource does not exist "
-                "in the requested scope"
-            ),
+            "description": "The project, job, or referenced resource was not found.",
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": "The service or a required dependency is temporarily unavailable.",
         },
     },
     tags=["Infrastructure &amp; Discovery"],
-    summary="Get readable algorithm parameters and an optional native schema",
+    summary="Get algorithm details",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -114,15 +102,21 @@ async def get_algorithm(
     name: StrictStr = Path(..., description=""),
     include: Annotated[
         StrictStr | None,
-        Field(description="Opt into the complete native parameter validation schema."),
+        Field(
+            description=(
+                "Set to parameter_schema to include the complete parameter validation schema."
+            )
+        ),
     ] = Query(
         None,
-        description="Opt into the complete native parameter validation schema.",
+        description=(
+            "Set to parameter_schema to include the complete parameter validation schema."
+        ),
         alias="include",
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> AlgorithmDetails:
-    """Get readable algorithm parameters and an optional native schema"""
+    """Get algorithm details"""
     implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.get_algorithm(
         name, include, token_OpenShiftBearer=token_OpenShiftBearer, request=request
@@ -132,34 +126,27 @@ async def get_algorithm(
 @router.get(
     "/projects/{project}/queues",
     responses={
-        200: {
-            "model": QueueInfoResponse,
-            "description": "List of LocalQueues accessible in the specified OpenShift Project",
-        },
-        401: {
+        200: {"model": QueueInfoResponse, "description": "Training queues in the project."},
+        501: {
             "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
+            "description": "The requested operation or training backend is not available.",
         },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": "The service or a required dependency is temporarily unavailable.",
         },
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
         404: {
             "model": ErrorResponse,
-            "description": (
-                "Target project, RayJob, or referenced project resource does not exist "
-                "in the requested scope"
-            ),
+            "description": "The project, job, or referenced resource was not found.",
         },
     },
     tags=["Infrastructure &amp; Discovery"],
-    summary="List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)",
+    summary="List training queues",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -169,31 +156,20 @@ async def list_queues(
         StrictStr,
         Field(
             description=(
-                "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                "resource references are scoped to it. Provision the project through "
-                "normal OpenShift self-service or administrator workflows before using "
-                "this API. The Training API does not create projects or namespaces and "
-                "never falls back to a default namespace or an elevated service "
-                "identity. A missing project returns 404; insufficient caller "
-                "permissions return 403. "
+                "Existing OpenShift project containing the job and its referenced "
+                "storage and queues."
             )
         ),
     ] = Path(
         ...,
         description=(
-            "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-            "resource references are scoped to it. Provision the project through "
-            "normal OpenShift self-service or administrator workflows before using "
-            "this API. The Training API does not create projects or namespaces and "
-            "never falls back to a default namespace or an elevated service "
-            "identity. A missing project returns 404; insufficient caller "
-            "permissions return 403. "
+            "Existing OpenShift project containing the job and its referenced storage and queues."
         ),
         examples=["team-alpha-ml"],
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> QueueInfoResponse:
-    """List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)"""
+    """List training queues"""
     await authorize_project_request(
         request,
         project,

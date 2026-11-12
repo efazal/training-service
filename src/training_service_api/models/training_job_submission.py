@@ -19,7 +19,7 @@ class TrainingJobSubmission(ContractModel):
     """
 
     id: StrictStr = Field(
-        description="Name of the created RayJob custom resource.",
+        description="Job ID for status, logs, and deletion requests.",
         json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]},
     )
     name: StrictStr = Field(json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]})
@@ -28,7 +28,9 @@ class TrainingJobSubmission(ContractModel):
         default=None, json_schema_extra={"examples": ["team-alpha-local-queue"]}
     )
     status: StrictStr = Field(
-        description="Submission acknowledgement only; not a lifecycle status."
+        description=(
+            "Submission acknowledgement; check job details for the current execution state."
+        )
     )
     selected_backend: StrictStr
 

@@ -14,8 +14,8 @@ Supported submission profiles are `sft`, `osft`, `lora_sft`, and `lora_grpo`.
 Algorithm discovery and submission validation use the same catalog, discovered
 from the configured training image. Check
 [runtime compatibility](docs/training-runtime.md) before selecting an image;
-GRPO still requires a compatible verl/TRL runtime. Queue discovery and estimation
-return `501`.
+GRPO still requires a compatible verl/TRL runtime. Queue discovery returns `501`
+until implemented.
 
 ## Development
 

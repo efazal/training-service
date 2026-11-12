@@ -30,6 +30,8 @@ def test_swagger_and_openapi(api):
     canonical = yaml.safe_load(
         (Path(__file__).resolve().parents[2] / "docs/api/openapi.yaml").read_text()
     )
+    assert document["info"] == canonical["info"]
+    assert "/training-jobs/estimate" not in paths
     assert document["components"]["schemas"] == canonical["components"]["schemas"]
     if directory := os.getenv("TRAINING_SERVICE_EVIDENCE_DIR"):
         (Path(directory) / "contract.json").write_text(

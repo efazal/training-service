@@ -20,7 +20,7 @@ class QueueInfoResponse(ContractModel):
     """
 
     kueue_enabled: StrictBool = Field(
-        description="False when Kueue is absent or disabled in the target deployment."
+        description="Whether training queues are enabled for the deployment."
     )
     queues: list[QueueInfo]
 

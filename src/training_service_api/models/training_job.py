@@ -31,7 +31,7 @@ class TrainingJob(ContractModel):
     """
 
     id: StrictStr = Field(
-        description="Name of the RayJob custom resource in the project.",
+        description="Job ID within the project.",
         json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]},
     )
     name: StrictStr | None = Field(
@@ -41,30 +41,16 @@ class TrainingJob(ContractModel):
     submitted_by: StrictStr | None = Field(
         default=None,
         description=(
-            "Original submitter's OpenShift username, resolved from the "
-            "authenticated submission token and recorded in the RayJob annotation "
-            "training.rhoai.io/submitted-by. May be a human username or a service "
-            "account identity such as "
-            "system:serviceaccount:team-alpha-ml:training-client. Never supplied "
-            "by a client or inferred from the caller reading the job. Omitted when "
-            "the annotation is absent. Informational attribution only, not "
-            "tamper-proof audit evidence and never used for authorization. "
+            "Username of the original submitter, when recorded. This informational "
+            "field does not determine access permissions."
         ),
         json_schema_extra={"examples": ["alice"]},
     )
     submission: CreateJobRequest | None = Field(
         default=None,
         description=(
-            "Accepted POST payload retained for API-created jobs in "
-            "caller-authorized RayJob metadata. Preserves submitted values, "
-            "including model, dataset, algorithm parameters, and any supplied "
-            "queue, backend, resources, or output settings. Optional fields and "
-            "nested defaults that were not supplied remain absent; this is not the "
-            "effective runtime configuration. Omitted for external or older jobs "
-            "without recorded submission metadata; never reconstructed from "
-            "command-line arguments or raw runtime environments. Storage URIs "
-            "contain project-local Secret, connection, or PVC names only, never "
-            "credentials or Secret contents. "
+            "Original accepted request, preserving supplied values. Omitted for "
+            "jobs without recorded submission details."
         ),
     )
     queue_name: StrictStr | None = Field(
@@ -75,7 +61,7 @@ class TrainingJob(ContractModel):
     progress: TrainingJobProgress | None = None
     metrics: dict[str, StrictFloat | StrictInt] | None = Field(
         default=None,
-        description="Optional training metrics, only when reported by an authorized source.",
+        description="Training metrics, when available.",
         json_schema_extra={
             "examples": [
                 {
@@ -90,35 +76,25 @@ class TrainingJob(ContractModel):
     resources: ResourceSpec | None = Field(
         default=None,
         description=(
-            "Runtime resource configuration from an authorized source, when "
-            "available. Do not infer it solely from requested resources; "
-            "submission.resources preserves the submitted settings separately. "
+            "Observed runtime resources, when available. Requested resources are "
+            "retained separately in submission.resources."
         ),
     )
     created_at: datetime | None = Field(
-        default=None,
-        description=(
-            "RayJob resource creation timestamp from Kubernetes "
-            "metadata.creationTimestamp, in RFC 3339 format, including for "
-            "externally created jobs. Distinct from the training start time "
-            "reported in started_at. "
-        ),
+        default=None, description="Job creation time in RFC 3339 format."
     )
     started_at: datetime | None = Field(
-        default=None,
-        description="Ray start timestamp converted from Unix milliseconds to RFC 3339.",
+        default=None, description="Training start time in RFC 3339 format, when available."
     )
     finished_at: datetime | None = Field(
         default=None,
         description=(
-            "Ray execution end timestamp in RFC 3339 format, when reported for a "
-            "terminal SUCCEEDED, FAILED, or STOPPED job. Omitted while pending or "
-            "running, or when Ray has not reported an end time. Never inferred "
-            "from the current time or resource creation time. "
+            "Training completion time in RFC 3339 format. Omitted until a terminal "
+            "job reports its end time."
         ),
     )
     failure_reason: StrictStr | None = Field(
-        default=None, description="Ray failure message when status is FAILED, if available."
+        default=None, description="Failure message for a failed job, when available."
     )
 
     @field_validator("selected_backend")

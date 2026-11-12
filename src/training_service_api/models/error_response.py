@@ -27,10 +27,7 @@ class ErrorResponse(ContractModel):
         }
     )
     details: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Optional structured context, such as invalid fields; never includes credentials."
-        ),
+        default=None, description="Additional error context, such as invalid fields."
     )
 
     @field_validator("code")
@@ -42,7 +39,6 @@ class ErrorResponse(ContractModel):
             "forbidden",
             "not_found",
             "already_exists",
-            "job_not_terminal",
             "logs_not_ready",
             "ray_cluster_gone",
             "unsupported_media_type",
@@ -61,13 +57,12 @@ class ErrorResponse(ContractModel):
         ):
             raise ValueError(
                 "must be one of enum values ('bad_request', 'unauthorized', "
-                "'forbidden', 'not_found', 'already_exists', 'job_not_terminal', "
-                "'logs_not_ready', 'ray_cluster_gone', 'unsupported_media_type', "
-                "'validation_error', 'authentication_unavailable', "
-                "'authorization_unavailable', 'submission_unavailable', "
-                "'not_implemented', 'backend_unavailable', 'conflict', "
-                "'invalid_page_token', 'unowned_cluster', 'shared_cluster', "
-                "'logs_unavailable', 'stream_expired')"
+                "'forbidden', 'not_found', 'already_exists', 'logs_not_ready', "
+                "'ray_cluster_gone', 'unsupported_media_type', 'validation_error', "
+                "'authentication_unavailable', 'authorization_unavailable', "
+                "'submission_unavailable', 'not_implemented', 'backend_unavailable', "
+                "'conflict', 'invalid_page_token', 'unowned_cluster', "
+                "'shared_cluster', 'logs_unavailable', 'stream_expired')"
             )
         return value
 

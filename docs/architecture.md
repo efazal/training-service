@@ -38,7 +38,7 @@ Pending, running and terminal jobs can be deleted. Deleting an active job cancel
 execution through foreground Kubernetes garbage collection, guarded by ownership
 and resource-version checks. There is no service job database or
 elevated workload identity. See [job operations](job-operations.md).
-Algorithm/queue discovery and estimation remain fail-closed with `501`.
+Algorithm discovery is implemented; queue discovery returns `501` until implemented.
 `/healthz`, `/readyz`, `/docs`, and `/openapi.json` are available without a
 cluster.
 

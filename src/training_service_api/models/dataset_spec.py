@@ -21,10 +21,10 @@ class DatasetSpec(ContractModel):
 
     uri: TrainingInputURI
     config: Annotated[str, Field(min_length=1, strict=True)] | None = Field(
-        default=None, description="Optional Hugging Face dataset configuration name, such as All."
+        default=None, description="Hugging Face dataset configuration name."
     )
     split: Annotated[str, Field(min_length=1, strict=True)] | None = Field(
-        default=None, description="Optional Hugging Face split name; defaults to train."
+        default=None, description="Hugging Face dataset split. Defaults to train."
     )
 
     model_config = ConfigDict(

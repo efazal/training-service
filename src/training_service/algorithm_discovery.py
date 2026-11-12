@@ -19,7 +19,7 @@ _SUMMARIES = {
     "grpo": "Full-parameter fine-tuning using Group Relative Policy Optimization.",
 }
 _PARAMETER_DESCRIPTIONS = {
-    "backend": "Training Hub engine; distinct from the job execution backend.",
+    "backend": "Training engine for this algorithm, distinct from the job backend.",
     "learning_rate": "Learning rate used during training.",
     "num_epochs": "Number of passes over the training dataset.",
     "effective_batch_size": (
@@ -139,11 +139,10 @@ def get_algorithm(request: Request, name: str, include: str | None = None) -> di
         parameter_schema_url=result["details_url"] + "?include=parameter_schema",
     )
     notes = [
-        "Omitted parameters use runtime/backend defaults. Parameter examples, when supplied "
-        "by the runtime schema, are illustrative and are not defaults.",
-        "Submission validates algorithms and parameters against this runtime catalog. "
-        "A supported execution profile is also required; runtime availability alone does "
-        "not enable submission. Python-only interfaces and non-JSON parameters are not supported.",
+        "Omitted parameters use the algorithm's defaults. Examples illustrate accepted values "
+        "and are not defaults.",
+        "Submission validates algorithms and parameters against the configured catalog. "
+        "Some algorithms or training modes cannot be submitted through this API.",
     ]
     metadata = schema.get("x-training-hub", {})
     if metadata.get("unavailable_required_parameters") or metadata.get("api_callable") is False:
@@ -154,8 +153,7 @@ def get_algorithm(request: Request, name: str, include: str | None = None) -> di
         "unavailable_required_parameters"
     ):
         notes.append(
-            "Python callbacks and custom rollout functions cannot be supplied as JSON. "
-            "Only JSON-configurable training modes are available through this API."
+            "Python callbacks and custom rollout functions are not supported through this API."
         )
     result["notes"] = notes
     if "runtime" in payload:

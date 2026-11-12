@@ -29,20 +29,6 @@ def contract_document() -> dict[str, Any]:
     """Preserve reviewed schemas/examples while targeting this deployment."""
     document = deepcopy(load_contract())
     document["servers"] = [{"url": "/api/v1"}]
-    for path in document["paths"].values():
-        for operation in path.values():
-            if isinstance(operation, dict) and operation.get("operationId") in {
-                "estimateTrainingJob",
-                "listQueues",
-            }:
-                operation["responses"]["501"] = {
-                    "description": "Not implemented in this local scaffold.",
-                    "content": {
-                        "application/json": {
-                            "schema": {"$ref": "#/components/schemas/ErrorResponse"}
-                        }
-                    },
-                }
     return document
 
 
