@@ -39,8 +39,8 @@ connection Secrets in the target project. Example `job.json`:
 
 Use a unique job name. The project PVC and its files must already exist and be
 accessible to the caller. Size `resources` to fit one GPU node; a job that cannot
-be scheduled stays `PENDING` with no status message, and pending jobs cannot be
-deleted through the API (remove it with `oc delete rayjob <name> -n <project>`). HF and S3 connection-backed inputs are also supported;
+be scheduled stays `PENDING` with no status message; delete it and resubmit
+with smaller resources. HF and S3 connection-backed inputs are also supported;
 see the [request examples](api/openapi.yaml).
 
 ```bash
@@ -63,7 +63,7 @@ curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$JOBS/$JOB/logs?tail_li
 # Follow; timeout_seconds is optional and defaults to five minutes.
 curl --no-buffer --fail-with-body -H "Authorization: Bearer $TOKEN" \
   "$JOBS/$JOB/logs?follow=true&timeout_seconds=300"
-# Delete a finished job (SUCCEEDED, FAILED, or STOPPED).
+# Delete pending, running, or completed jobs. Active training stops.
 curl --fail-with-body -X DELETE -H "Authorization: Bearer $TOKEN" "$JOBS/$JOB"
 ```
 
@@ -81,8 +81,7 @@ and cancel the fetch when leaving the log view. A 200 means the stream opened;
 handle subsequent SSE errors as well as HTTP errors.
 
 DELETE returns `204` when cleanup starts. Poll GET until `404` before showing
-cleanup complete. Stored inputs and outputs are preserved. Pending and running
-jobs return `409 job_not_terminal`; wait for a finished status first. A `409 conflict`
+cleanup complete. Stored inputs and outputs are preserved. A `409 conflict`
 means refresh and retry; shared or unverified ownership is also rejected with
 409 and must not be retried blindly.
 
