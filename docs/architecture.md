@@ -34,8 +34,9 @@ creates a caller-scoped CodeFlare RayJob and returns 202. Reads remain
 available from caller-authorized RayJob resources after RayCluster cleanup.
 Driver logs use CodeFlare's log API with a hardened Ray transport through a
 trusted, authenticated gateway.
-Terminal deletion uses foreground Kubernetes garbage collection, guarded by
-ownership and resource-version checks. There is no service job database or
+Pending, running and terminal jobs can be deleted. Deleting an active job cancels
+execution through foreground Kubernetes garbage collection, guarded by ownership
+and resource-version checks. There is no service job database or
 elevated workload identity. See [job operations](job-operations.md).
 Algorithm/queue discovery and estimation remain fail-closed with `501`.
 `/healthz`, `/readyz`, `/docs`, and `/openapi.json` are available without a

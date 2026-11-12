@@ -9,10 +9,12 @@ the platform or grant workload permissions to API callers.
 
 ## Install
 
-From the repository checkout, while logged into the target cluster:
+While logged into the target cluster, install the published chart:
 
 ```bash
-helm upgrade --install training-service ./charts/training-service \
+helm repo add training-service https://raw.githubusercontent.com/opendatahub-io/training-service/helm-charts/
+helm repo update training-service
+helm upgrade --install training-service training-service/training-service \
   --namespace training-service \
   --create-namespace \
   --wait --timeout 15m
@@ -20,8 +22,8 @@ helm upgrade --install training-service ./charts/training-service \
 export TRAINING_SERVICE_URL="https://$(oc -n training-service get route training-service -o jsonpath='{.spec.host}')"
 ```
 
-For a shared chart archive, use `./training-service-0.1.1.tgz` in place of the
-chart directory.
+To customize, run `helm pull training-service/training-service --untar`, edit
+`training-service/values.yaml`, then install `./training-service` instead.
 
 The service discovers the platform gateway and **public** ingress CA
 automatically; no values file is needed. Helm discovers algorithms from the
@@ -32,8 +34,7 @@ continues. Wait for the pod to become ready and rerun the same
 [dashboard quickstart](dashboard-integration.md) with the integration team.
 Swagger UI is at `$TRAINING_SERVICE_URL/docs`.
 
-The default API image is the public amd64 developer preview
-`quay.io/modh/training-service:preview-83a2a358fa0c`. This is a preview build, not a stable release. Keep the API
+The default API image is public `quay.io/modh/training-service:0.1.0`. Keep the API
 image and chart from the same handoff. The separate `trainingRuntime.image`
 selects the training image; see [compatibility](training-runtime.md).
 
@@ -92,7 +93,7 @@ make helm-package
 These targets use the existing `Containerfile` and `quay.io/modh/training-service`.
 For amd64 images built on an ARM workstation, verify startup on amd64 OpenShift
 nodes. To deploy your new tag, add `--set-string image.tag="$IMAGE_TAG"` to the
-install. Packaging preserves the checked-in preview defaults; include any custom
+install. Packaging preserves the checked-in defaults; include any custom
 `image.tag` in your handoff values. Share the chart archive in `dist/`, image
 tag/digest, this guide, and platform values through your team's normal handoff channel.
 Private image overrides can use `imagePullSecrets`; the default image is public.

@@ -1,18 +1,18 @@
-The Training Service is available inside the cluster at:
+Training Service is installed in namespace {{ .Release.Namespace }}.
 
-  http://{{ include "training-service.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
-
-Health check:
-
-  kubectl -n {{ .Release.Namespace }} get deployment {{ include "training-service.fullname" . }}
-
-  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "training-service.fullname" . }} 8080:{{ .Values.service.port }}
-
-  curl --fail http://127.0.0.1:8080/healthz
-  curl --fail http://127.0.0.1:8080/readyz
 {{- if .Values.route.enabled }}
 
-OpenShift Route:
+Get the API URL:
+  oc -n {{ .Release.Namespace }} get route {{ include "training-service.fullname" . }} -o jsonpath='https://{.spec.host}{"\n"}'
 
-  oc -n {{ .Release.Namespace }} get route {{ include "training-service.fullname" . }}
+Open /docs on that URL for the API reference. API calls use an OpenShift bearer token.
+{{- else }}
+
+Access the API locally:
+  oc -n {{ .Release.Namespace }} port-forward service/{{ include "training-service.fullname" . }} 8080:{{ .Values.service.port }}
+
+Open http://localhost:8080/docs for the API reference.
 {{- end }}
+
+The runtime catalog is discovered automatically. Ray/Kueue and training inputs
+must already be available on the cluster before submitting a training job.

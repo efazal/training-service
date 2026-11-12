@@ -255,7 +255,7 @@ class Observer:
                     )
         return inventory
 
-    def verify_cleanup(self, job_id, timeout):
+    def verify_cleanup(self, job_id, timeout, *, require_running=True):
         deadline = time.monotonic() + timeout
         while True:
             inventory = self.observe(job_id)
@@ -280,11 +280,13 @@ class Observer:
                     "Test-owned RayJob/cluster/pods/Workload remain after cleanup deadline"
                 )
             time.sleep(2)
-        if not self.job_uid or not self.saw_gpu:
+        if not self.job_uid:
+            raise ValueError("No test-owned job UID was observed; cleanup proof is incomplete")
+        if require_running and not self.saw_gpu:
             raise ValueError(
                 "No running owned GPU pod was observed; GPU-release proof is incomplete"
             )
-        if self.queue and not self.admitted:
+        if require_running and self.queue and not self.admitted:
             raise ValueError("No owned admitted Kueue Workload was observed")
         for name, uid in self.preserved:
             pvc = self.core.read_namespaced_persistent_volume_claim(

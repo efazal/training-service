@@ -43,6 +43,11 @@ def pytest_addoption(parser):
     )
     group.addoption("--stream-timeout", type=int, default=60)
     group.addoption(
+        "--check-active-delete",
+        action="store_true",
+        help="Submit isolated jobs and verify pending/running deletion and resource cleanup.",
+    )
+    group.addoption(
         "--log-stream-max-seconds",
         type=int,
         help="Expected deployed log-stream limit; also verify default lifetime and server cap.",
@@ -98,6 +103,7 @@ def pytest_configure(config):
     for option in (
         "check_logs",
         "check_stream",
+        "check_active_delete",
         "observe_cluster",
         "artifact_pod",
         "queue_profile",
@@ -270,7 +276,7 @@ class LiveAPI:
         pytest.fail("Created job not found within 100 list pages")
 
     def cleanup(self, job_id, timeout, expected_submission):
-        """Delete only this run's terminal job; never cancel active training."""
+        """Delete only this run's unique job after checking its exact submission."""
         path = f"{self.jobs}/{job_id}"
         deadline = time.monotonic() + timeout
         deleting = False
@@ -285,14 +291,19 @@ class LiveAPI:
                     pytrace=False,
                 )
             status = detail.get("status")
-            if not deleting and status in TERMINAL:
+            if not deleting:
                 deleted = self.request("DELETE", path, expected=(204, 404, 409))
+                if deleted.status_code == 409 and self.object(deleted).get("code") != "conflict":
+                    pytest.fail(
+                        "Cleanup refused: DELETE rejected for a non-retryable reason",
+                        pytrace=False,
+                    )
                 deleting = deleted.status_code in {204, 404}
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 pytest.fail(
                     f"Cleanup incomplete for {self.project}/{job_id} (status={status}). "
-                    "Only terminal jobs can be deleted; inspect this job manually.",
+                    "Inspect this test-owned job manually.",
                     pytrace=False,
                 )
             time.sleep(min(POLL_SECONDS, remaining))

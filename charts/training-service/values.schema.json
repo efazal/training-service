@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": [
+        "repository",
+        "tag"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "logBackend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gatewayURL",
+        "streamTimeoutSeconds",
+        "trustedCA"
+      ],
+      "properties": {
+        "gatewayURL": {
+          "type": "string"
+        },
+        "streamTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "trustedCA": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "autoDiscover",
+            "configMapName",
+            "key",
+            "bundle"
+          ],
+          "properties": {
+            "autoDiscover": {
+              "type": "boolean"
+            },
+            "configMapName": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+            },
+            "key": {
+              "type": "string",
+              "pattern": "^$|^[A-Za-z0-9._-]+$"
+            },
+            "bundle": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "trainingRuntime": {
+      "type": "object",
+      "required": [
+        "image"
+      ],
+      "properties": {
+        "image": {
+          "type": "string"
+        }
+      }
+    },
+    "env": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "image",
+    "trainingRuntime",
+    "logBackend"
+  ]
+}

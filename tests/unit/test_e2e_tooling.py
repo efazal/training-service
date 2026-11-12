@@ -163,6 +163,22 @@ def test_observer_does_not_claim_gpu_cleanup_without_observation():
         observer.verify_cleanup("test-job", 1)
 
 
+def test_pending_deletion_proves_resource_cleanup_without_claiming_gpu_use():
+    observer = object.__new__(Observer)
+    observer.project = "test-project"
+    observer.queue = "test-queue"
+    observer.job_uid = "test-uid"
+    observer.saw_gpu = False
+    observer.admitted = False
+    observer.preserved = []
+    observer.uids = {"test-uid"}
+    observer.custom = Mock()
+    observer.custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    observer.observe = Mock(return_value=[])
+    observer.listing = Mock(return_value=[])
+    observer.verify_cleanup("test-job", 1, require_running=False)
+
+
 @pytest.mark.parametrize(
     "cmd", [["helm", "install", "test"], [sys.executable, "-m", "pytest", "tests/e2e"]]
 )
@@ -333,7 +349,13 @@ def test_partial_setup_failure_or_interruption_still_cleans_owned_namespace(
 
 @pytest.mark.parametrize(
     "failure,keep,missing_evidence",
-    [(False, False, False), (False, True, False), (True, False, False), (False, False, True)],
+    [
+        (False, False, False),
+        (False, True, False),
+        (True, False, False),
+        (False, False, True),
+        (False, False, "active-delete"),
+    ],
 )
 @pytest.mark.parametrize("reuse", [False, True])
 @pytest.mark.parametrize("private", [False, True])
@@ -415,11 +437,13 @@ def test_runner_build_push_digest_install_test_cleanup(
             return "{}"
         if "pytest" in command:
             assert kwargs["cleanup_timeout"] == args.cleanup_timeout
+            job_count = (len(ALGORITHMS) if matrix else 1) + 2
+            assert kwargs["timeout"] == job_count * (args.job_timeout + args.cleanup_timeout) + 600
             assert kwargs["env"]["TRAINING_SERVICE_CA_BUNDLE"] == str(args.ingress_ca_bundle)
             assert ("--algorithm-matrix" in command) == matrix
             if failure:
                 raise RuntimeError("live tests failed")
-            if missing_evidence:
+            if missing_evidence is True:
                 return ""
             results = Path(kwargs["env"]["TRAINING_SERVICE_EVIDENCE_DIR"])
             names = ALGORITHMS if matrix else (None,)
@@ -437,6 +461,18 @@ def test_runner_build_push_digest_install_test_cleanup(
                         }
                     )
                 )
+            if not missing_evidence:
+                for state in ("PENDING", "RUNNING"):
+                    (results / f"active-delete-{state}.json").write_text(
+                        json.dumps(
+                            {
+                                "job": "e2e-owned-job",
+                                "deleted_at": state,
+                                "resource_cleanup": True,
+                                "not_found": True,
+                            }
+                        )
+                    )
         return ""
 
     monkeypatch.setattr(deploy, "command", run)
@@ -474,6 +510,7 @@ def test_runner_build_push_digest_install_test_cleanup(
     assert "--maxfail=0" in invocation
     assert {"--job-file", "--artifact-pod", "--observe-cluster"} <= set(invocation)
     assert ("--check-stream" in invocation) != matrix
+    assert "--check-active-delete" in invocation
     environment.provision.assert_called_once()
     assert environment.cleanup.called == (not keep)
     report = json.loads(next((tmp_path / "results").glob("*/run.json")).read_text())
@@ -592,6 +629,42 @@ def test_cluster_preflight_validates_queued_environment_read_only(prepared_clust
     assert args.cluster_queue == "default"
     assert args.runtime_image == "quay.io/test/ray:tested"
     assert all(call.args[0][1] in {"get", "auth"} for call in command.call_args_list)
+
+
+def test_deploy_preflight_accepts_chart_defaults_without_a_values_file(monkeypatch):
+    args = deploy.arguments(
+        [
+            "--image-repository",
+            "quay.io/test/training-service",
+            "--reuse-image",
+            "quay.io/test/training-service@sha256:" + "a" * 64,
+        ]
+    )
+    assert args.values is None
+    monkeypatch.setattr(deploy, "api_token", lambda: "unit-caller-placeholder")
+    monkeypatch.setattr(deploy.shutil, "which", lambda _: "/unit/tool")
+    monkeypatch.setattr(deploy, "cluster_preflight", Mock())
+
+    def query(argv, **kwargs):
+        if argv[:3] == ["oc", "get", "nodes"]:
+            return json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {"labels": {"kubernetes.io/arch": "amd64"}},
+                            "status": {"allocatable": {"nvidia.com/gpu": "1"}},
+                        }
+                    ]
+                }
+            )
+        return "yes"
+
+    command = Mock(side_effect=query)
+    monkeypatch.setattr(deploy, "command", command)
+    values = deploy.preflight(args)
+    assert values["logBackend"]["trustedCA"]["autoDiscover"] is True
+    assert values["logBackend"]["trustedCA"]["configMapName"] == ""
+    command.assert_any_call(["helm", "lint", deploy.CHART])
 
 
 def test_cluster_preflight_uses_chart_runtime_default(prepared_cluster):
@@ -1333,14 +1406,21 @@ def test_chart_organization_image_and_route_defaults(route_enabled):
 
     if not shutil.which("helm"):
         pytest.skip("helm is not installed")
-    command = ["helm", "template", "e2e", deploy.CHART]
+    command = [
+        "helm",
+        "template",
+        "e2e",
+        deploy.CHART,
+        "--set-string",
+        "logBackend.gatewayURL=https://gateway.example.test",
+    ]
     if not route_enabled:
         command.extend(["--set", "route.enabled=false"])
     documents = list(yaml.safe_load_all(deploy.command(command)))
     deployment = next(d for d in documents if d["kind"] == "Deployment")
     pod = deployment["spec"]["template"]["spec"]
     api = pod["containers"][0]
-    assert api["image"] == "quay.io/modh/training-service:preview-83a2a358fa0c"
+    assert api["image"] == "quay.io/modh/training-service:0.1.0"
     runtime = "quay.io/modh/ray:2.58.0-py312-cu130-th0112"
     assert pod["initContainers"][0]["image"] == runtime
     assert [e for e in api["env"] if e["name"] == "TRAINING_RAY_IMAGE"] == [
@@ -1363,7 +1443,16 @@ def test_chart_mounts_ca_only_when_configured():
 
     if not shutil.which("helm"):
         pytest.skip("helm is not installed")
-    plain = deploy.command(["helm", "template", "e2e", deploy.CHART])
+    plain = deploy.command(
+        [
+            "helm",
+            "template",
+            "e2e",
+            deploy.CHART,
+            "--set-string",
+            "logBackend.gatewayURL=https://gateway.example.test",
+        ]
+    )
     configured = deploy.command(
         [
             "helm",
@@ -1406,7 +1495,18 @@ def test_chart_wires_training_runtime_image_once(tmp_path, legacy):
         values["trainingRuntime"] = {"image": image}
     path = tmp_path / "values.yaml"
     path.write_text(yaml.safe_dump(values))
-    rendered = deploy.command(["helm", "template", "e2e", deploy.CHART, "-f", path])
+    rendered = deploy.command(
+        [
+            "helm",
+            "template",
+            "e2e",
+            deploy.CHART,
+            "--set-string",
+            "logBackend.gatewayURL=https://gateway.example.test",
+            "-f",
+            path,
+        ]
+    )
     deployment = next(doc for doc in yaml.safe_load_all(rendered) if doc["kind"] == "Deployment")
     env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
     assert [entry for entry in env if entry["name"] == "TRAINING_RAY_IMAGE"] == [
@@ -1451,7 +1551,16 @@ def test_chart_rejects_duplicate_training_runtime_image(tmp_path):
         )
     )
     rendered = subprocess.run(
-        ["helm", "template", "e2e", str(deploy.CHART), "-f", str(path)],
+        [
+            "helm",
+            "template",
+            "e2e",
+            str(deploy.CHART),
+            "--set-string",
+            "logBackend.gatewayURL=https://gateway.example.test",
+            "-f",
+            str(path),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -1461,8 +1570,8 @@ def test_chart_rejects_duplicate_training_runtime_image(tmp_path):
     assert "env" in rendered.stderr
 
 
-@pytest.mark.parametrize("kind", ["foreign", "active"])
-def test_cleanup_never_deletes_foreign_or_active_workloads(kind):
+@pytest.mark.parametrize("state", ["SUCCEEDED", "RUNNING"])
+def test_cleanup_never_deletes_foreign_workloads(state):
     calls = []
     payload = {"name": "e2e-owned"}
 
@@ -1471,8 +1580,8 @@ def test_cleanup_never_deletes_foreign_or_active_workloads(kind):
         return httpx.Response(
             200,
             json={
-                "status": "RUNNING" if kind == "active" else "SUCCEEDED",
-                "submission": payload if kind == "active" else {"name": "foreign"},
+                "status": state,
+                "submission": {"name": "foreign"},
             },
         )
 
@@ -1798,3 +1907,114 @@ def test_all_skipped_live_selection_is_not_a_passing_gate():
     )
     assert result.returncode == 1
     assert "3 skipped" in result.stdout
+
+
+def test_cleanup_can_cancel_this_runs_active_job(monkeypatch):
+    monkeypatch.setattr(deploy.time, "sleep", lambda seconds: None)
+    calls = []
+    payload = {"name": "e2e-owned"}
+
+    def transport(request):
+        calls.append(request.method)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"status": "RUNNING", "submission": payload})
+        return httpx.Response(204 if request.method == "DELETE" else 404)
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        LiveAPI(http, "test-project").cleanup("e2e-owned", 10, payload)
+    assert calls == ["GET", "DELETE", "GET"]
+
+
+def test_runner_supports_structured_gateway(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    legacy = next(e for e in values["env"] if e["name"] == "TRAINING_SERVICE_RAY_GATEWAY_URL")
+    values["env"].remove(legacy)
+    values["logBackend"] = {"gatewayURL": legacy["value"]}
+    cluster_preflight(args, command, values)
+
+
+def test_runner_rejects_duplicate_gateway(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    values["logBackend"] = {"gatewayURL": "https://gateway.example.test"}
+    with pytest.raises(ValueError, match="not both"):
+        cluster_preflight(args, command, values)
+
+
+def test_runner_allows_service_gateway_discovery(prepared_cluster):
+    args, values, _, _, command = prepared_cluster
+    values["env"] = []
+    cluster_preflight(args, command, values)
+    assert all(call.args[0][1] in {"get", "auth"} for call in command.call_args_list)
+
+
+@pytest.mark.parametrize("code", ["shared_cluster", "unowned_cluster", "other", None])
+def test_cleanup_refuses_non_retryable_conflicts_immediately(monkeypatch, code):
+    sleep = Mock()
+    monkeypatch.setattr(live_config.time, "sleep", sleep)
+    calls = []
+    payload = {"name": "e2e-owned"}
+
+    def transport(request):
+        calls.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "RUNNING", "submission": payload})
+        return httpx.Response(409, json={"code": code, "message": "Deletion refused"})
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        with pytest.raises(pytest.fail.Exception, match="Cleanup refused: DELETE"):
+            LiveAPI(http, "test-project").cleanup("e2e-owned", 0, payload)
+    assert calls == ["GET", "DELETE"]
+    sleep.assert_not_called()
+
+
+def test_cleanup_retries_only_concurrent_change_conflicts(monkeypatch):
+    monkeypatch.setattr(live_config.time, "sleep", lambda _: None)
+    calls = []
+    payload = {"name": "e2e-owned"}
+
+    def transport(request):
+        calls.append(request.method)
+        if len(calls) == 2:
+            return httpx.Response(409, json={"code": "conflict", "message": "Refresh and retry"})
+        if len(calls) == 5:
+            return httpx.Response(404)
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"status": "RUNNING", "submission": payload})
+
+    with httpx.Client(
+        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+    ) as http:
+        LiveAPI(http, "test-project").cleanup("e2e-owned", 10, payload)
+    assert calls == ["GET", "DELETE", "GET", "DELETE", "GET"]
+
+
+@pytest.mark.parametrize("legacy", [{"value": ""}, {}])
+def test_runner_rejects_structured_gateway_with_empty_legacy_entry(prepared_cluster, legacy):
+    args, values, _, _, command = prepared_cluster
+    values["env"] = [{"name": "TRAINING_SERVICE_RAY_GATEWAY_URL", **legacy}]
+    values["logBackend"] = {"gatewayURL": "https://gateway.example.test"}
+    with pytest.raises(ValueError, match="not both"):
+        cluster_preflight(args, command, values)
+    assert len(command.call_args_list) == 2
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("suffix", ["/path", "//", ":0", ":65536", ":bad", ":99999", ":1/path"])
+def test_runner_rejects_non_origin_gateway_before_provisioning(
+    prepared_cluster, structured, suffix
+):
+    args, values, _, _, command = prepared_cluster
+    gateway = "https://gateway.example.test" + suffix
+    if structured:
+        values["env"] = []
+        values["logBackend"] = {"gatewayURL": gateway}
+    else:
+        values["env"][0]["value"] = gateway
+    with pytest.raises(ValueError, match="A gateway override must specify"):
+        cluster_preflight(args, command, values)
+    assert len(command.call_args_list) == 2

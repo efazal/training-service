@@ -114,6 +114,7 @@ helm-template: helm-check
 		--namespace $(HELM_NAMESPACE) >/dev/null
 	helm template $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace $(HELM_NAMESPACE) \
+		--set-string logBackend.gatewayURL=https://gateway.example.test \
 		--set route.enabled=true \
 		--set route.host=training-service.example.com \
 		--set route.tls.enabled=true >/dev/null

@@ -1,4 +1,6 @@
+{{- include "training-service.validateLogBackend" . -}}
 {{- $runtimeImage := include "training-service.runtimeImage" . -}}
+{{- $logCA := include "training-service.logCAName" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +15,7 @@ spec:
   template:
     metadata:
       annotations:
+        checksum/log-ca: {{ .Values.logBackend.trustedCA.bundle | sha256sum }}
         checksum/algorithm-exporter: {{ .Files.Get "files/export_algorithm_catalog.py" | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -44,6 +47,14 @@ spec:
             name: {{ include "training-service.fullname" . }}-algorithm-exporter
         - name: training-runtime-tmp
           emptyDir: {}
+        {{- end }}
+        {{- if $logCA }}
+        - name: training-service-log-ca
+          configMap:
+            name: {{ $logCA }}
+            items:
+              - key: {{ .Values.logBackend.trustedCA.key | quote }}
+                path: ca.crt
         {{- end }}
         {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
@@ -91,6 +102,7 @@ spec:
               path: /healthz
               port: http
           readinessProbe:
+            timeoutSeconds: 10
             httpGet:
               path: /readyz
               port: http
@@ -104,6 +116,28 @@ spec:
             {{- if $runtimeImage }}
             - name: TRAINING_RAY_IMAGE
               value: {{ $runtimeImage | quote }}
+            {{- end }}
+            {{- if .Values.logBackend.gatewayURL }}
+            - name: TRAINING_SERVICE_RAY_GATEWAY_URL
+              value: {{ .Values.logBackend.gatewayURL | quote }}
+            {{- end }}
+            {{- if $logCA }}
+            - name: TRAINING_SERVICE_RAY_CA_FILE
+              value: /var/run/training-service/log-ca/ca.crt
+            {{- end }}
+            {{- if include "training-service.discoverLogCA" . }}
+            - name: TRAINING_SERVICE_RAY_CA_DISCOVERY
+              value: "true"
+            {{- end }}
+            {{- $legacyTimeout := false }}
+            {{- range .Values.env }}
+            {{- if eq .name "TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS" }}
+            {{- $legacyTimeout = true }}
+            {{- end }}
+            {{- end }}
+            {{- if not $legacyTimeout }}
+            - name: TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS
+              value: {{ .Values.logBackend.streamTimeoutSeconds | quote }}
             {{- end }}
             {{- range .Values.env }}
             {{- if ne .name "TRAINING_RAY_IMAGE" }}
@@ -124,6 +158,11 @@ spec:
             - name: training-algorithm-catalog
               mountPath: /var/run/training-service/catalog
               readOnly: true
+            {{- if $logCA }}
+            - name: training-service-log-ca
+              mountPath: /var/run/training-service/log-ca
+              readOnly: true
+            {{- end }}
             {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

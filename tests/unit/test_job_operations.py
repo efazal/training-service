@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from kubernetes.client.exceptions import ApiException
 
-from training_service import jobs, kubernetes_client, logs
+from training_service import jobs, kubernetes_client, log_config, logs
 from training_service.auth import CallerIdentity
 from training_service.errors import ApiError
 from training_service.main import create_app
@@ -100,6 +100,51 @@ def backend(monkeypatch):
     return http, custom, core, sdk, record, cluster, authorizer, factory
 
 
+@pytest.mark.parametrize(
+    "deployment", ["Retrying", "Initializing", "Waiting", "Suspending", "Suspended"]
+)
+def test_deletion_cancels_all_deployment_states(backend, deployment):
+    http, custom, _, _, record, *_ = backend
+    record["status"] = {"jobDeploymentStatus": deployment}
+    assert http.delete(BASE + "/example", headers=HEADERS).status_code == 204
+    custom.delete_namespaced_custom_object.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 409, 500])
+def test_delete_preserves_kubernetes_errors(backend, status):
+    http, custom, *_ = backend
+    custom.delete_namespaced_custom_object.side_effect = ApiException(
+        status=status, reason="sensitive-delete-response"
+    )
+    response = http.delete(BASE + "/example", headers=HEADERS)
+    assert response.status_code == (503 if status == 500 else status)
+    assert "sensitive-delete-response" not in response.text
+    custom.delete_namespaced_custom_object.assert_called_once()
+
+
+def test_delete_uses_only_caller_client_without_sdk_or_default_credentials(backend, monkeypatch):
+    from codeflare_sdk import RayJob
+    from kubernetes import client, config
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Delete must not use the SDK or load default credentials")
+
+    before = client.Configuration.get_default_copy().api_key.copy()
+    monkeypatch.setattr(config, "load_kube_config", forbidden)
+    monkeypatch.setattr(config, "load_incluster_config", forbidden)
+    monkeypatch.setattr(RayJob, "delete", forbidden)
+    assert backend[0].delete(BASE + "/example", headers=HEADERS).status_code == 204
+    for call in client.CustomObjectsApi.call_args_list:
+        configuration = call.args[0].configuration
+        assert configuration.api_key["authorization"] == "Bearer unit-test-token"
+        assert configuration.verify_ssl is True
+        assert configuration.retries == 0
+    assert client.Configuration.get_default_copy().api_key == before
+    deletion = backend[1].delete_namespaced_custom_object
+    deletion.assert_called_once()
+    assert deletion.call_args.kwargs["_request_timeout"] == kubernetes_client.TIMEOUT
+
+
 def test_list_is_compact_and_counts_all_kubernetes_pages(backend):
     http, custom, _, _, record, *_ = backend
     queued = job("queued", "PENDING")
@@ -180,25 +225,25 @@ def test_external_and_pending_job_omit_unavailable_details(backend):
     assert "submission" not in http.get(BASE + "/example", headers=HEADERS).json()
 
 
-@pytest.mark.parametrize("state", ["PENDING", "RUNNING", "", "UNKNOWN"])
-def test_active_or_unknown_job_cannot_be_deleted(backend, state):
-    http, custom, _, _, record, *_ = backend
-    record["status"].update(jobStatus=state, jobDeploymentStatus="Failed")
-    response = http.delete(BASE + "/example", headers=HEADERS)
-    assert response.status_code == 409
-    assert response.json()["code"] == "job_not_terminal"
-    custom.delete_namespaced_custom_object.assert_not_called()
-
-
-@pytest.mark.parametrize("state", ["SUCCEEDED", "FAILED", "STOPPED"])
-def test_terminal_delete_uses_foreground_and_race_preconditions(backend, state):
+@pytest.mark.parametrize(
+    "state", ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "STOPPED", "", "UNKNOWN"]
+)
+def test_delete_uses_foreground_and_race_preconditions(backend, state):
     http, custom, _, sdk, record, *_ = backend
     record["status"]["jobStatus"] = state
     response = http.delete(BASE + "/example", headers=HEADERS)
     assert response.status_code == 204
     assert response.content == b""
     call = custom.delete_namespaced_custom_object.call_args
-    assert call.args == ("ray.io", "v1", "team-a", "rayjobs", "example")
+    assert {
+        key: call.kwargs[key] for key in ("group", "version", "namespace", "plural", "name")
+    } == {
+        "group": "ray.io",
+        "version": "v1",
+        "namespace": "team-a",
+        "plural": "rayjobs",
+        "name": "example",
+    }
     options = call.kwargs["body"]
     assert options.propagation_policy == "Foreground"
     assert options.preconditions.uid == "job-uid"
@@ -207,14 +252,12 @@ def test_terminal_delete_uses_foreground_and_race_preconditions(backend, state):
     assert custom.delete_namespaced_custom_object.call_count == 1
 
 
-@pytest.mark.parametrize("case", ["shared", "unowned", "retrying"])
-def test_deletion_never_cleans_shared_unowned_or_retrying_clusters(backend, case):
+@pytest.mark.parametrize("case", ["shared", "unowned"])
+def test_deletion_never_cleans_shared_or_unowned_clusters(backend, case):
     http, custom, _, _, record, cluster, *_ = backend
     record["status"]["jobStatus"] = "SUCCEEDED"
     if case == "shared":
         record["spec"]["clusterSelector"] = {"ray.io/cluster": "shared"}
-    elif case == "retrying":
-        record["status"]["jobDeploymentStatus"] = "Retrying"
     else:
         cluster["metadata"]["ownerReferences"][0]["uid"] = "another-job"
     assert http.delete(BASE + "/example", headers=HEADERS).status_code == 409
@@ -369,7 +412,9 @@ def test_log_snapshot_uses_scoped_gateway_and_caller_token(backend):
     assert response.headers["content-type"].startswith("text/plain")
     assert response.text == "second\nthird\n"
     assert factory.call_args.args == ("https://ray.example.com/ray/team-a/example-cluster",)
-    assert factory.call_args.kwargs == {"headers": HEADERS, "verify": True}
+    from requests.certs import where
+
+    assert factory.call_args.kwargs == {"headers": HEADERS, "verify": where()}
     sdk.get_job_logs.assert_called_once_with("raysubmit_123")
 
 
@@ -499,7 +544,6 @@ def test_logs_fail_before_streaming_when_backend_unavailable(backend, case, expe
         "http://untrusted.example",
         "https://user:password@ray.example.com",
         "https://ray.example.com/other",
-        "",
     ],
 )
 def test_invalid_gateway_never_receives_credentials(backend, monkeypatch, value):
@@ -741,6 +785,27 @@ def test_handlers_use_injected_backend_without_ray_resource_assumptions():
     )
 
 
+@pytest.mark.parametrize("follow", [False, True])
+def test_logs_use_discovered_gateway_and_caller_token(backend, monkeypatch, follow):
+    from training_service import log_config
+
+    http, _, _, _, _, _, _, factory = backend
+    monkeypatch.delenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
+    discover = Mock(return_value="https://published.example.com")
+    monkeypatch.setattr(log_config, "_discover_gateway", discover)
+
+    async def chunks(_):
+        yield "discovered backend log\n"
+
+    backend[3].tail_job_logs = chunks
+    response = http.get(BASE + "/example/logs?follow=" + str(follow).lower(), headers=HEADERS)
+    assert response.status_code == 200
+    assert factory.call_args.args == ("https://published.example.com/ray/team-a/example-cluster",)
+    assert factory.call_args.kwargs["headers"] == HEADERS
+    assert http.get(BASE + "/example/logs", headers=HEADERS).status_code == 200
+    discover.assert_called_once()
+
+
 @pytest.mark.parametrize("configured,requested", [("300", 1), ("1", 2147483647)])
 def test_request_timeout_expires_real_stream_without_stopping_job(
     backend, monkeypatch, configured, requested
@@ -781,3 +846,44 @@ def test_request_timeout_expires_real_stream_without_stopping_job(
     )
     assert denied.status_code == 403
     assert factory.call_count == 2  # Denied reconnection never reaches the log backend.
+
+
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.parametrize("reason", ["missing", "forbidden", "not ready", "invalid CA"])
+def test_log_configuration_failure_keeps_job_operations_available(
+    backend, monkeypatch, tmp_path, follow, reason
+):
+    http, custom, _, _, _, _, _, factory = backend
+    monkeypatch.delenv("TRAINING_SERVICE_RAY_GATEWAY_URL")
+    monkeypatch.setattr(log_config.config, "load_incluster_config", Mock())
+    discovery = custom.get_cluster_custom_object
+    if reason in {"missing", "forbidden"}:
+        discovery.side_effect = ApiException(status=404 if reason == "missing" else 403)
+    elif reason == "not ready":
+        discovery.return_value = {"metadata": {"generation": 2}, "status": {"phase": "Progressing"}}
+    else:
+        monkeypatch.setenv("TRAINING_SERVICE_RAY_GATEWAY_URL", "https://gateway.example.test")
+        monkeypatch.setenv("TRAINING_SERVICE_RAY_CA_FILE", str(tmp_path / "missing-ca.pem"))
+    submit = Mock(return_value="example")
+    monkeypatch.setattr(http.app.state.job_backend, "_submit_sync", submit)
+    with http:
+        assert http.get("/healthz").status_code == 200
+        assert http.get("/readyz").status_code == 200
+        discovery.assert_not_called()
+        assert http.get(BASE, headers=HEADERS).status_code == 200
+        assert http.get(BASE + "/example", headers=HEADERS).status_code == 200
+        assert http.post(BASE, json=PAYLOAD, headers=HEADERS).status_code == 202
+        response = http.get(
+            BASE + "/example/logs", params={"follow": str(follow).lower()}, headers=HEADERS
+        )
+        assert response.status_code == 503
+        assert response.json()["code"] == "logs_unavailable"
+        assert (
+            "CA bundle" if reason == "invalid CA" else "GatewayConfig/default-gateway"
+        ) in response.json()["message"]
+        factory.assert_not_called()
+        assert http.delete(BASE + "/example", headers=HEADERS).status_code == 204
+        custom.delete_namespaced_custom_object.assert_called_once()
+        assert http.get("/readyz").status_code == 200
+    assert discovery.call_count == (0 if reason == "invalid CA" else 1)
+    submit.assert_called_once()
