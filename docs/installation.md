@@ -86,9 +86,27 @@ helm upgrade --install training-service ./training-service \
   --wait --timeout 15m
 ```
 
-The default API image is public `quay.io/modh/training-service:0.1.0`. Keep the API
-image and chart from the same release. `trainingRuntime.image` selects the
-separate training image. Private images can use `imagePullSecrets`.
+### Container images
+
+Training Service images are available in
+[quay.io/modh/training-service](https://quay.io/repository/modh/training-service?tab=tags).
+The chart defaults to `quay.io/modh/training-service:0.1.0`. Keep the API image
+and chart from the same release.
+
+Training runtime images are available in
+[quay.io/modh/ray](https://quay.io/repository/modh/ray?tab=tags), with these three tags:
+
+| Runtime image | Selection |
+| --- | --- |
+| `quay.io/modh/ray:2.58.0-py312-cu130-th0112` | Chart default |
+| `quay.io/modh/ray:2.58.0-py312-cu129-th081` | Alternative |
+| `quay.io/modh/ray:2.55.1-py312-cu129-th081` | Alternative |
+
+To change images, edit `image.repository` and `image.tag` for the API service,
+or `trainingRuntime.image` for training jobs, in the chart's `values.yaml`.
+Check [runtime compatibility](training-runtime.md) before selecting an alternative;
+the runtime must be compatible with the API's Ray and SDK versions.
+Private images can use `imagePullSecrets`.
 
 ### Custom gateway or certificates
 
