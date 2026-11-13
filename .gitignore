@@ -23,7 +23,7 @@ artifacts/e2e/
 .idea/
 .env.*
 !.env.example
-/.kube/
-/kubeconfig
-/kubeconfig.*
-/*.kubeconfig
+.kube/
+kubeconfig
+kubeconfig.*
+*.kubeconfig
