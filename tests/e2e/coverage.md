@@ -1,7 +1,5 @@
 # Coverage and customer-readiness gaps
 
-Source: [RHOAIENG-102547](https://redhat.atlassian.net/browse/RHOAIENG-102547).
-
 This PR is a repeatable baseline, **not a claim that every P0 or configuration
 passes**. Mocked unit tests are not live evidence.
 

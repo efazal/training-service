@@ -1,6 +1,5 @@
 # Live Training Service E2E
 
-Tracking: [RHOAIENG-102547](https://redhat.atlassian.net/browse/RHOAIENG-102547).
 These tests call a real HTTP deployment, not TestClient or a mocked backend.
 Manually invoked automation, not Jenkins/CI; `make test` and `make check` remain
 unit-only. See [coverage/gaps](coverage.md) and [examples](examples/).

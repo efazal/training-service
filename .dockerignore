@@ -14,3 +14,10 @@ charts
 *.md
 !README.md
 .idea
+.env
+.env.*
+!.env.example
+.kube
+kubeconfig
+kubeconfig.*
+*.kubeconfig

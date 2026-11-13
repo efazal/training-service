@@ -18,3 +18,12 @@ artifacts/e2e/
 # Helm/package tooling
 .helmignore
 .DS_Store
+
+# Local IDE state and environment/cluster credentials
+.idea/
+.env.*
+!.env.example
+/.kube/
+/kubeconfig
+/kubeconfig.*
+/*.kubeconfig
