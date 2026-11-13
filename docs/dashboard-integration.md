@@ -1,9 +1,14 @@
-# Dashboard API quickstart
+# Training API integration quickstart
 
-Get the Training Service URL from your platform administrator. All endpoints
+For developers connecting a dashboard, CLI, or other application to Training
+Service. This guide covers the request flow: discover algorithms, submit a job,
+monitor status and logs, and delete the job.
+
+First follow the [installation guide](installation.md) to install the service and
+find its API URL, or get that URL from your platform administrator. All endpoints
 below start with `/api/v1`. Send the signed-in user's OpenShift bearer token on
-every request; project permissions apply. Your dashboard does not need backend
-URLs, backend SDKs, or Kubernetes job manifests.
+every request; project permissions apply. Clients do not need backend URLs,
+backend SDKs, or Kubernetes job manifests.
 
 For browser integration, use the dashboard's same-origin API proxy and forward
 the user's bearer token. The service does not enable cross-origin browser access.
@@ -12,19 +17,22 @@ Keep tokens out of URLs and logs.
 ## Discover and submit
 
 ```bash
-export SERVICE_URL=https://training-service.apps.example.com
+# Replace with the API URL from the installation guide or your administrator.
+export TRAINING_SERVICE_URL=https://training-service.apps.example.com
 export PROJECT=my-project
 export TOKEN=$(oc whoami -t)
 export JOB=my-training-job
 
-curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/api/v1/algorithms"
-curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/api/v1/algorithms/lora_sft"
+curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$TRAINING_SERVICE_URL/api/v1/algorithms"
+curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$TRAINING_SERVICE_URL/api/v1/algorithms/lora_sft"
 ```
 
 Use discovery's parameter types, defaults, and required fields to build your form;
 POST validates against that same catalog. Discovery can list more algorithms than
-POST accepts; offer only `sft`, `osft`, `lora_sft`, and `lora_grpo` for submission. Prepare model/data storage and any
-connection Secrets in the target project. Example `job.json`:
+POST accepts; offer only `sft`, `osft`, `lora_sft`, and `lora_grpo` for submission.
+Prepare model/data storage and any connection Secrets in the target project; see
+[algorithm requirements](training-runtime.md) when choosing resources or a dataset.
+Example `job.json`:
 
 ```json
 {
@@ -47,7 +55,7 @@ with smaller resources. HF and S3 connection-backed inputs are also supported;
 see the [request examples](api/openapi.yaml).
 
 ```bash
-export JOBS="$SERVICE_URL/api/v1/projects/$PROJECT/training-jobs"
+export JOBS="$TRAINING_SERVICE_URL/api/v1/projects/$PROJECT/training-jobs"
 curl --fail-with-body -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d @job.json "$JOBS"
 curl --fail-with-body -H "Authorization: Bearer $TOKEN" "$JOBS/$JOB"

@@ -1,15 +1,21 @@
-# Install Training Service
+# Install and access Training Service
 
-For platform administrators. Use an existing OpenShift/RHOAI cluster with its
-training backend and authenticated gateway configured, Helm 3, `oc`, and `uv`.
-The installer needs namespace/Helm permissions and permission to create the
-TokenReview/SubjectAccessReview and gateway discovery RBAC in this chart,
-including a Role in `openshift-config-managed`. The chart does not install
-the platform or grant workload permissions to API callers.
+Start here to install the service, find its HTTPS address, and make your first
+API request. This is the guide to share with a team receiving the Helm chart.
+RHOAI 3.6 Developer Preview supports Ray as the training backend.
 
-## Install
+## Before you start
 
-While logged into the target cluster, install the published chart:
+- Use an existing OpenShift/RHOAI cluster with Ray and its authenticated gateway configured.
+- Install Helm 3 and `oc`, and log into the target cluster with `oc login`.
+- Have a platform administrator install the chart. It creates cluster-scoped RBAC
+  for authentication and gateway discovery, plus a Role in `openshift-config-managed`.
+  API callers use their own project permissions.
+
+The chart installs Training Service. It does not install Ray or prepare model
+and dataset storage.
+
+## 1. Install the chart
 
 ```bash
 helm repo add training-service https://raw.githubusercontent.com/opendatahub-io/training-service/helm-charts/
@@ -18,82 +24,114 @@ helm upgrade --install training-service training-service/training-service \
   --namespace training-service \
   --create-namespace \
   --wait --timeout 15m
-
-export TRAINING_SERVICE_URL="https://$(oc -n training-service get route training-service -o jsonpath='{.spec.host}')"
 ```
 
-To customize, run `helm pull training-service/training-service --untar`, edit
-`training-service/values.yaml`, then install `./training-service` instead.
+No values file is needed for the standard installation. Gateway, public ingress
+CA, and algorithm discovery are automatic. The first install downloads a training
+image larger than 10 GB. If Helm times out while it is downloading, wait for the
+pod to become ready and rerun the same install command.
 
-The service discovers the platform gateway and **public** ingress CA
-automatically; no values file is needed. Helm discovers algorithms from the
-training image automatically. The first install pulls that image (over 10 GB);
-on a fresh node Helm can report `Progress deadline exceeded` while the pull
-continues. Wait for the pod to become ready and rerun the same
-`helm upgrade --install` command. Share `TRAINING_SERVICE_URL` and the
-[dashboard quickstart](dashboard-integration.md) with the integration team.
-Swagger UI is at `$TRAINING_SERVICE_URL/docs`.
+## 2. Find the API URL
+
+The chart creates an HTTPS address automatically. OpenShift calls this a
+**Route**; you do not need to create one or choose a hostname.
+
+```bash
+export TRAINING_SERVICE_URL="https://$(oc -n training-service get route training-service -o jsonpath='{.spec.host}')"
+printf 'API URL: %s\nAPI reference: %s/docs\n' "$TRAINING_SERVICE_URL" "$TRAINING_SERVICE_URL"
+```
+
+The API URL looks like `https://training-service-training-service.apps.example.com`.
+Share this address with API users. For a customized release name or namespace,
+retrieve the matching lookup command with
+`helm get notes RELEASE_NAME -n NAMESPACE`.
+
+## 3. Open the API and check access
+
+Open the printed **API reference** URL in your browser. This is Swagger UI, where
+you can browse endpoints and try requests. Select **Authorize** and enter your
+OpenShift access token (`oc whoami -t`) to call protected endpoints.
+
+From a terminal logged into OpenShift, check authenticated access:
+
+```bash
+export TOKEN="$(oc whoami -t)"
+curl --fail-with-body -H "Authorization: Bearer $TOKEN" \
+  "$TRAINING_SERVICE_URL/api/v1/algorithms"
+```
+
+A successful response returns JSON listing the available algorithms. API requests
+start with `$TRAINING_SERVICE_URL/api/v1`. Clients must trust your organization's
+OpenShift HTTPS certificates.
+
+To submit a job or connect an application, continue with the
+[API integration quickstart](dashboard-integration.md). It covers authentication,
+storage, submission, status, logs, and deletion. The optional
+[runtime reference](training-runtime.md) explains training image compatibility and
+algorithm requirements.
+
+## Optional installation settings
+
+### Customize the chart
+
+Download the chart, edit its `values.yaml`, then install the local copy:
+
+```bash
+helm pull training-service/training-service --untar
+# Edit training-service/values.yaml, then:
+helm upgrade --install training-service ./training-service \
+  --namespace training-service \
+  --create-namespace \
+  --wait --timeout 15m
+```
 
 The default API image is public `quay.io/modh/training-service:0.1.0`. Keep the API
-image and chart from the same handoff. The separate `trainingRuntime.image`
-selects the training image; see [compatibility](training-runtime.md).
+image and chart from the same release. `trainingRuntime.image` selects the
+separate training image. Private images can use `imagePullSecrets`.
 
-## Platform settings
+### Custom gateway or certificates
 
-For platforms without automatic discovery, create a values override:
+For platforms without automatic discovery, edit these settings in the chart's
+`values.yaml`:
 
 ```yaml
 logBackend:
   gatewayURL: https://gateway.apps.example.com
   streamTimeoutSeconds: 300
-  # Optional when normal container trust already verifies the gateway:
   trustedCA:
     configMapName: platform-gateway-ca
     key: ca-bundle.crt
 ```
 
-The gateway is the platform's authenticated backend entry point, **not** the
-Training Service URL shared with API callers. A custom CA is needed only when
-its issuer is absent from the container trust store. `trustedCA.configMapName`
-references a ConfigMap in the service namespace. Alternatively, `trustedCA.bundle`
-accepts public PEM certificates, as produced by the optional
-`uv run python scripts/platform_values.py` helper. TLS verification stays
-enabled. Use the helper's `--system-trust` option to omit custom trust.
+The gateway is the platform's training-backend address; callers use the API URL
+from step 2. A custom CA is needed only if normal container trust cannot verify
+the gateway. `configMapName` references an existing ConfigMap in the service
+namespace. Alternatively, `trustedCA.bundle` supplies public PEM certificates for
+Helm to create one. TLS verification stays enabled.
 
-For a platform-managed ConfigMap, new connections read mounted CA updates.
-For the helper's Helm-managed bundle, rerun the helper and Helm upgrade after
-certificate rotation. API clients must also trust the platform's Route issuer;
-provide the normal platform CA through your organization's trust setup.
+New connections read mounted ConfigMap updates. Update a Helm-managed bundle and
+run Helm upgrade after certificate rotation. The optional
+`uv run python scripts/platform_values.py` helper in a source checkout prepares
+public CA settings; `--system-trust` omits custom trust. Use structured settings
+instead of legacy gateway/CA environment overrides.
 
-Helm rejects conflicting settings before installation. `/readyz` checks the
-runtime catalog; `/healthz` checks only the process. Neither checks the gateway:
-gateway or CA problems return `503 logs_unavailable` on log requests.
-Legacy gateway/CA environment settings still work; remove them when adopting
-structured settings. Keep checked-in defaults free of credentials and cluster-specific
-URLs. Set `route.enabled=false` when exposing the internal Service through your
-platform's own proxy.
+### Access without an OpenShift Route
 
-## Build or share a chart
-
-Maintainers with Quay Write access can publish a commit-specific image:
+If your platform uses its own proxy, set `route.enabled=false` and get the API
+address from the platform administrator. For local access, keep this command
+running:
 
 ```bash
-podman login quay.io
-export IMAGE_REPOSITORY=quay.io/modh/training-service
-export IMAGE_TAG=dev-$(git rev-parse --short HEAD)
-make generate-server CONTAINER_RUNTIME=podman
-make check helm-lint helm-template
-make image-build CONTAINER_RUNTIME=podman IMAGE_PLATFORM=linux/amd64 IMAGE_TAG="$IMAGE_TAG"
-# Run the image smoke check on an amd64 host.
-make image-smoke CONTAINER_RUNTIME=podman IMAGE_TAG="$IMAGE_TAG"
-make image-push CONTAINER_RUNTIME=podman IMAGE_TAG="$IMAGE_TAG"
-make helm-package
+oc -n training-service port-forward service/training-service 8080:8080
 ```
 
-These targets use the existing `Containerfile` and `quay.io/modh/training-service`.
-For amd64 images built on an ARM workstation, verify startup on amd64 OpenShift
-nodes. To deploy your new tag, add `--set-string image.tag="$IMAGE_TAG"` to the
-install. Packaging preserves the checked-in defaults; include any custom
-`image.tag` in your handoff values. Share the chart archive in `dist/`, image
-tag/digest, this guide, and platform values through your team's normal handoff channel.
-Private image overrides can use `imagePullSecrets`; the default image is public.
+Open `http://localhost:8080/docs`. In a second terminal, use
+`export TRAINING_SERVICE_URL=http://localhost:8080` for API commands. This local
+address is available only while port-forwarding is running.
+
+### Troubleshoot access
+
+- `/readyz` checks the runtime catalog; `/healthz` checks the process. Neither
+  checks the training gateway.
+- `503 logs_unavailable` on log requests can indicate a gateway or CA problem.
+- Helm rejects conflicting settings before installation.

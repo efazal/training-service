@@ -19,8 +19,8 @@ through the same service URL. OpenShift bearer tokens and project permissions
 control access. Every new job requires an S3 or PVC output destination so trained
 model artifacts remain available after job cleanup.
 
-- **Install the service:** [Helm quickstart](docs/installation.md).
-- **Integrate a dashboard:** [API quickstart](docs/dashboard-integration.md).
+- **Install and find the API URL:** [Installation guide](docs/installation.md).
+- **Use or integrate the API:** [Integration quickstart](docs/dashboard-integration.md).
 - **Explore the API:** open `/docs` on your service, or read the upstream
   [OpenAPI contract](https://github.com/opendatahub-io/training-service/blob/main/docs/api/openapi.yaml).
 
@@ -51,3 +51,28 @@ belongs in `src/training_service/`.
 See [API generation](docs/api/README.md), [job operations](docs/job-operations.md),
 [algorithm discovery](docs/algorithm-discovery.md), [architecture](docs/architecture.md),
 and [live E2E tests](tests/e2e/README.md).
+
+### Build and publish
+
+Maintainers with Quay Write access can publish a commit-specific image from a
+source checkout:
+
+```bash
+podman login quay.io
+export IMAGE_REPOSITORY=quay.io/modh/training-service
+export IMAGE_TAG=dev-$(git rev-parse --short HEAD)
+make generate-server CONTAINER_RUNTIME=podman
+make check helm-lint helm-template
+make image-build CONTAINER_RUNTIME=podman IMAGE_PLATFORM=linux/amd64 IMAGE_TAG="$IMAGE_TAG"
+# Run the image smoke check on an amd64 host.
+make image-smoke CONTAINER_RUNTIME=podman IMAGE_TAG="$IMAGE_TAG"
+make image-push CONTAINER_RUNTIME=podman IMAGE_TAG="$IMAGE_TAG"
+make helm-package
+```
+
+These targets use the existing `Containerfile`. For an amd64 image built on an
+ARM workstation, verify startup on amd64 OpenShift nodes. Packaging preserves the
+checked-in defaults; edit the chart's `image.tag` before packaging if the handoff
+should use your new image. For handoff, share the
+[installation guide](docs/installation.md) and the API URL. Include the archive
+from `dist/` and its matching image tag/digest when distributing an unpublished chart.

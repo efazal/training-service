@@ -1,86 +1,79 @@
-# Training runtime and compatibility
+# Training image and algorithm requirements
 
-The chart automatically discovers Training Hub algorithms and parameters from
-the configured runtime image, using a GPU-free init container. No manual catalog
-export or ConfigMap setup is needed. GET discovery and POST validation share
-`catalog.json`; unsupported algorithms or parameters return `422` before submission.
+Use this optional reference when changing the training image or preparing a
+training request. For installation and the API URL, start with the
+[installation guide](installation.md).
 
-POST dispatches through per-algorithm adapters to Training Hub algorithm/backend classes
-used by the [Ray fine-tuning examples](https://github.com/red-hat-data-services/red-hat-ai-examples/tree/main/examples/fine-tuning):
-`sft`, `osft`, `lora_sft`, and `lora_grpo`. Algorithm overrides are validated
-against the generated runtime catalog, not a static service schema or OpenAPI. Unsupported or
-malformed overrides return `422` rather than being passed to Training Hub.
-Each adapter owns its additional validation, data preparation, and Ray
-entrypoint settings. Training Hub's `create_algorithm` selects the explicit backend
-class; no single convenience function is hardcoded. New Training Hub algorithms
-are not exposed automatically.
+## What is the training runtime?
 
-OSFT requires `unfreeze_rank_ratio`, `effective_batch_size`,
-`max_tokens_per_gpu`, `max_seq_len`, and `learning_rate`. SFT and OSFT derive
-`data_output_dir` beneath the output directory. Model/data preparation shown
-in the notebooks is still performed before calling the API; the request uses
-existing project storage or Hugging Face repositories.
-For Hugging Face datasets loaded on the Ray head, `dataset.config` selects
-a named dataset configuration and `dataset.split` selects a split (default:
-`train`). These fields are rejected for LoRA GRPO. Where supported by the runtime,
-GRPO's separate `algorithm.parameters.data_config` selects the Hugging Face
-configuration for tool-call datasets. It is not a column mapping and does not
-apply to local JSONL math datasets.
+The runtime is the container image that executes training jobs. It is separate
+from the image running the REST API:
 
-For SFT, OSFT, and LoRA SFT, the Ray head runs training and receives
-`resources.gpus_per_node` GPUs, matching the one-node examples. For LoRA GRPO,
-`resources.num_nodes` includes a GPU-free head and at least one GPU worker;
-`gpus_per_node` is the GPU count **per worker**. The adapter derives Training
-Hub's `n_gpus` and `nnodes` from these resources and selects the `verl`
-backend. GRPO's head uses 4 CPUs/32Gi; CPU and memory fields size each worker.
-SFT, OSFT, and LoRA SFT require `num_nodes=1`; unsupported multi-node
-requests return `422` before resource lookup or submission. SFT/OSFT derive
-local torchrun process counts from `gpus_per_node`. Multi-GPU LoRA requires
-explicit `enable_model_splitting=true`; no distributed workers are launched.
-LoRA SFT defaults to bf16, which needs an Ampere or newer GPU. On older GPUs
-such as the T4 (AWS g4dn), set `bf16: false` and `fp16: true`; otherwise the job
-fails with `Your setup doesn't support bf16/gpu`.
-GRPO requires a shared ReadWriteMany PVC output and either shared PVC or HF
-inputs; S3 inputs/output are not supported for this topology. HF inputs must
-reference an existing project Secret, even for public repos. GRPO uses one
-such Secret for both HF inputs and mounts its token file on all Ray pods
-without serializing the token into the RayJob. The GRPO notebook's
-`tasks_per_iteration` argument is not consumed by the reviewed Training Hub
-versions and is therefore rejected by this API; use `prompt_batch_size`
-instead. GRPO math rewards require a PVC JSONL dataset; Training Hub cannot
-open a Hugging Face repository ID as a local math-data file. The exposed
-parameters come from the selected runtime's signatures. Text LoRA's
-`assistant_only_loss` default differs between those runtimes; test the chosen
-image with the intended dataset format.
+| Chart setting | Purpose |
+| --- | --- |
+| `image.repository` and `image.tag` | Run Training Service and expose the API. |
+| `trainingRuntime.image` | Run model training with Ray, Training Hub, and GPU libraries. |
 
-The API maps resources and queue settings to a CodeFlare RayJob.
-When resources are omitted, the default per-node CPU and memory limits are
-4 CPUs and 16Gi for the training node; the GRPO head keeps its dedicated
-4-CPU/32Gi layout. Callers should size worker resources for their model and
-algorithm.
-The `202` response returns the RayJob name as `id` and a project-scoped
-`Location` header; it does not mean training has completed.
+Algorithm discovery and submission validation share a catalog generated
+automatically from this runtime image, without a GPU or manual catalog setup.
 
-The chart's dedicated `trainingRuntime.image` value selects the Ray workload
-image, separate from `image.repository`/`image.tag` for the API service. For
-non-Helm deployments, set the process environment variable `TRAINING_RAY_IMAGE`.
-The image must contain Ray and Training Hub with a Ray
-version compatible with the API's Ray 2.58.0. The API image pins the RHOAI 3.6
-CodeFlare SDK 0.40.1 and Ray 2.58.0 wheels. Discovery, readiness and submission
-return `503` without a valid startup catalog. CodeFlare accepts
-a caller-scoped Kubernetes client; no service-side job store or hand-authored
-RayJob manifest is used.
+## Choose a compatible image
 
-The four Training Hub algorithms in the referenced Ray fine-tuning examples
-are `sft`, `osft`, `lora_sft`, and `lora_grpo`. Discovery can list additional
-runtime algorithms, but submission still requires a supported execution profile.
-Kueue discovery remains unimplemented. Earlier dev-cluster
-smoke tests of the broader branch completed small SFT, OSFT, and LoRA SFT
-RayJobs with the Training Hub 0.11.2 image
-`quay.io/modh/ray@sha256:888ffb8008a095eff0e6f2f97335903f56867773b9493da4a46a92708d54cb55`.
-The image reported Ray 2.58.1 despite its 2.58.0 tag; the API used Ray 2.58.0.
-LoRA GRPO submitted and reached verl but did not finish due to a TRL/verl
-import incompatibility in the runtime image. A compatible image is required
-before relying on GRPO training. This image is not confirmed as cluster-shipped
-in every target RHOAI release.
+- The default runtime is `quay.io/modh/ray:2.58.0-py312-cu130-th0112`.
+- The API pins Ray 2.58.0 and CodeFlare SDK 0.40.1. Use a compatible Ray version,
+  Training Hub dependencies, GPU drivers, and node architecture. Check the actual
+  versions inside the image, as tags can differ from installed versions.
+- Prefer a tested image digest when customizing `trainingRuntime.image`. Changing
+  it regenerates the catalog when the API pods restart. See
+  [algorithm discovery](algorithm-discovery.md) for setup troubleshooting.
 
+**GRPO compatibility:** the tested Training Hub 0.11.2 image failed during GRPO
+training because of a TRL/verl import incompatibility. Verify a compatible
+runtime before using GRPO; successful submission does not guarantee completion.
+
+## Supported algorithms and resources
+
+| Algorithm | Supported layout | Main requirement |
+| --- | --- | --- |
+| `sft` | One training node: `num_nodes=1`. | Multiple GPUs use local torchrun processes. |
+| `osft` | One training node: `num_nodes=1`. | Supply all required OSFT parameters below. |
+| `lora_sft` | One training node: `num_nodes=1`. | Multiple GPUs require `enable_model_splitting=true`. |
+| `lora_grpo` | GPU-free head and at least one GPU worker: `num_nodes>=2`. | Shared ReadWriteMany PVC storage and a compatible verl runtime. |
+
+For SFT, OSFT, and LoRA SFT, `gpus_per_node` is the GPU count on the training
+node. Defaults are 1 GPU, 4 CPUs, and 16Gi memory; size them for your model.
+For GRPO, `num_nodes` includes the head and `gpus_per_node` applies to each worker.
+CPU/memory settings size the workers; the head uses 4 CPUs and 32Gi.
+
+### Algorithm-specific settings
+
+- **OSFT:** provide `unfreeze_rank_ratio`, `effective_batch_size`,
+  `max_tokens_per_gpu`, `max_seq_len`, and `learning_rate`.
+- **LoRA SFT:** bf16 is the default and needs an Ampere or newer GPU. For older
+  GPUs such as T4, set `bf16: false` and `fp16: true`. Check the runtime's
+  `assistant_only_loss` default against your dataset format.
+- **LoRA GRPO:** use `prompt_batch_size`; `tasks_per_iteration` is not supported.
+  GPU counts and batch/parallelism settings must satisfy submission validation.
+
+Use `GET /api/v1/algorithms/{name}` for the selected image's required parameters,
+types, and defaults. Invalid parameters or layouts return `422`. Additional
+algorithms can appear in discovery but cannot yet be submitted through this API.
+
+## Prepare datasets and persistent storage
+
+Prepare model and dataset files before submission. Every new job requires an
+S3 or PVC output destination; the API references existing project storage.
+
+- **SFT, OSFT, and LoRA SFT:** Hugging Face `dataset.config` selects a named dataset
+  configuration; `dataset.split` selects a split or slice and defaults to `train`.
+- **LoRA GRPO:** `dataset.config` and `dataset.split` are rejected. Where the runtime
+  supports it, `algorithm.parameters.data_config` selects the HF configuration for
+  tool-call datasets. It is not a column mapping or an option for local math data.
+- **GRPO storage:** use shared ReadWriteMany PVC output and shared PVC or HF inputs.
+  S3 inputs/output are unsupported for this layout. HF inputs must reference the
+  same existing project Secret, including for public repositories. Math rewards
+  require a PVC JSONL dataset.
+
+See the [API integration quickstart](dashboard-integration.md) for a submission
+example and the [Ray fine-tuning examples](https://github.com/red-hat-data-services/red-hat-ai-examples/tree/main/examples/fine-tuning)
+for dataset preparation.
