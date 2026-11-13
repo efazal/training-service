@@ -32,43 +32,32 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
 @router.get(
     "/projects/{project}/training-jobs/{job_id}/logs",
     responses={
-        200: {"model": str, "description": "Driver log snapshot or SSE stream, selected by follow"},
+        200: {"model": str, "description": "Log snapshot or SSE stream, selected by follow."},
         400: {
             "model": ErrorResponse,
-            "description": "Malformed JSON or invalid query/path parameter syntax",
+            "description": "Malformed JSON or invalid path or query parameters.",
         },
-        401: {
-            "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
-        },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": "The service or a required dependency is temporarily unavailable.",
         },
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
         404: {
             "model": ErrorResponse,
-            "description": (
-                "Target project, RayJob, or referenced project resource does not exist "
-                "in the requested scope"
-            ),
+            "description": "The project, job, or referenced resource was not found.",
         },
-        409: {
-            "model": ErrorResponse,
-            "description": "RayJob exists, but driver logs are not ready yet",
-        },
+        409: {"model": ErrorResponse, "description": "The job exists, but logs are not ready."},
         410: {
             "model": ErrorResponse,
-            "description": "RayJob exists, but its managed RayCluster and logs are gone",
+            "description": "The training cluster and its logs are no longer available.",
         },
     },
     tags=["Observability"],
-    summary="Read or follow training job driver logs",
+    summary="Get training job logs",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -78,57 +67,34 @@ async def stream_job_logs(
         StrictStr,
         Field(
             description=(
-                "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                "resource references are scoped to it. Provision the project through "
-                "normal OpenShift self-service or administrator workflows before using "
-                "this API. The Training API does not create projects or namespaces and "
-                "never falls back to a default namespace or an elevated service "
-                "identity. A missing project returns 404; insufficient caller "
-                "permissions return 403. "
+                "Existing OpenShift project containing the job and its referenced "
+                "storage and queues."
             )
         ),
     ] = Path(
         ...,
         description=(
-            "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-            "resource references are scoped to it. Provision the project through "
-            "normal OpenShift self-service or administrator workflows before using "
-            "this API. The Training API does not create projects or namespaces and "
-            "never falls back to a default namespace or an elevated service "
-            "identity. A missing project returns 404; insufficient caller "
-            "permissions return 403. "
+            "Existing OpenShift project containing the job and its referenced storage and queues."
         ),
         examples=["team-alpha-ml"],
     ),
     job_id: Annotated[
         StrictStr,
-        Field(
-            description=(
-                "Name of the RayJob custom resource, scoped to the target project. "
-                "Resolve it only through caller-authorized Kubernetes APIs in that "
-                "project. "
-            )
-        ),
+        Field(description="Job ID returned at submission, scoped to the specified project."),
     ] = Path(
         ...,
-        description=(
-            "Name of the RayJob custom resource, scoped to the target project. "
-            "Resolve it only through caller-authorized Kubernetes APIs in that "
-            "project. "
-        ),
+        description="Job ID returned at submission, scoped to the specified project.",
         examples=["llama3-8b-alpaca-lora"],
     ),
     follow: bool | None = Query(
         False,
-        description="False returns text/plain; true follows logs as text/event-stream.",
+        description=("Return a text/plain snapshot when false, or a text/event-stream when true."),
         alias="follow",
     ),
     tail_lines: int | None = Query(
         100,
         description=(
-            "Number of trailing lines in the non-following snapshot, selected by "
-            "the service after get_job_logs. Ignored when follow&#x3D;true, which "
-            "forwards the log chunks provided by Ray&#39;s tail_job_logs. "
+            "Number of trailing lines returned in a snapshot. Ignored when follow&#x3D;true."
         ),
         alias="tail_lines",
         ge=1,
@@ -136,16 +102,11 @@ async def stream_job_logs(
     timeout_seconds: int | None = Query(
         None,
         description=(
-            "Requested total lifetime of this follow connection in seconds (1 to "
-            "2147483647), written with ASCII digits and no signs, leading zeros, "
-            "whitespace, or decimal point. The numeric upper bound keeps deadline "
-            "arithmetic representable. The effective lifetime is the smaller of "
-            "this value and TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS (300 "
-            "seconds by default); omission uses that configured maximum. Validated "
-            "for every request: invalid values return 400 even when "
-            "follow&#x3D;false; valid values have no effect on snapshots. Expiry "
-            "closes the stream with a stream_expired event; reconnect to continue "
-            "reading logs. "
+            "Maximum duration in seconds for a follow connection. Omission uses "
+            "the deployment limit (300 seconds by default); larger values are "
+            "capped at that limit. Supply a positive integer without signs, "
+            "leading zeros, or decimals. Invalid values return 400; valid values "
+            "are ignored when follow&#x3D;false."
         ),
         alias="timeout_seconds",
         ge=1,
@@ -153,7 +114,7 @@ async def stream_job_logs(
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> str:
-    """Read or follow training job driver logs"""
+    """Get training job logs"""
     await authorize_project_request(
         request,
         project,

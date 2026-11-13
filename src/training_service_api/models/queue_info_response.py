@@ -19,9 +19,7 @@ class QueueInfoResponse(ContractModel):
     Schema: QueueInfoResponse in docs/api/openapi.yaml.
     """
 
-    kueue_enabled: StrictBool = Field(
-        description="False when Kueue is absent or disabled in the target deployment."
-    )
+    kueue_enabled: StrictBool = Field(description="Whether Kueue is enabled in RHOAI.")
     queues: list[QueueInfo]
 
     model_config = ConfigDict(

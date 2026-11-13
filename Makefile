@@ -5,7 +5,7 @@ OPENAPI_GENERATOR_VERSION ?= 7.25.0
 CONTAINER_RUNTIME ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
 IMAGE_PLATFORM ?=
 IMAGE_REPOSITORY ?= quay.io/modh/training-service
-IMAGE_TAG ?= 0.1.0
+IMAGE_TAG ?= dev-$(shell git rev-parse --short HEAD)
 IMAGE ?= $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 IMAGE_SMOKE_PORT ?= 18080
 IMAGE_SMOKE_CONTAINER ?= training-service-smoke
@@ -14,8 +14,9 @@ HELM_RELEASE ?= training-service
 HELM_NAMESPACE ?= training-service
 HELM_CHART ?= charts/training-service
 HELM_OUTPUT_DIR ?= dist
-CHART_VERSION ?= 0.1.0
-APP_VERSION ?= $(CHART_VERSION)
+# Empty overrides preserve the chart's checked-in version/appVersion.
+CHART_VERSION ?=
+APP_VERSION ?=
 E2E_ARGS ?=
 
 .PHONY: install test test-e2e test-e2e-deploy lint format format-check typecheck check run generate-server \
@@ -122,5 +123,5 @@ helm-package: helm-check
 	mkdir -p $(HELM_OUTPUT_DIR)
 	helm package $(HELM_CHART) \
 		--destination $(HELM_OUTPUT_DIR) \
-		--version $(CHART_VERSION) \
-		--app-version $(APP_VERSION)
+		$(if $(CHART_VERSION),--version $(CHART_VERSION),) \
+		$(if $(APP_VERSION),--app-version $(APP_VERSION),)

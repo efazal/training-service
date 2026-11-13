@@ -17,6 +17,7 @@ from training_service.main import create_app
 
 BASE = "/api/v1/projects/team-a/training-jobs"
 HEADERS = {"Authorization": "Bearer unit-test-token"}
+# A recorded submission from before persistent output became required.
 PAYLOAD = {
     "name": "example",
     "model": {"uri": "pvc://inputs/model"},
@@ -872,7 +873,8 @@ def test_log_configuration_failure_keeps_job_operations_available(
         discovery.assert_not_called()
         assert http.get(BASE, headers=HEADERS).status_code == 200
         assert http.get(BASE + "/example", headers=HEADERS).status_code == 200
-        assert http.post(BASE, json=PAYLOAD, headers=HEADERS).status_code == 202
+        payload = {**PAYLOAD, "output": {"destination_uri": "pvc://inputs/output/"}}
+        assert http.post(BASE, json=payload, headers=HEADERS).status_code == 202
         response = http.get(
             BASE + "/example/logs", params={"follow": str(follow).lower()}, headers=HEADERS
         )

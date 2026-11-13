@@ -42,39 +42,28 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
     responses={
         200: {
             "model": ListTrainingJobs200Response,
-            "description": (
-                "Compact page of authorized training jobs and total matching count; an "
-                "empty result has items empty and total_count zero"
-            ),
+            "description": "A page of training jobs and the total matching count.",
         },
         400: {
             "model": ErrorResponse,
-            "description": "Malformed JSON or invalid query/path parameter syntax",
+            "description": "Malformed JSON or invalid path or query parameters.",
         },
-        401: {
-            "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
-        },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": "The service or a required dependency is temporarily unavailable.",
         },
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
         404: {
             "model": ErrorResponse,
-            "description": (
-                "Target project, RayJob, or referenced project resource does not exist "
-                "in the requested scope"
-            ),
+            "description": "The project, job, or referenced resource was not found.",
         },
     },
     tags=["Training Jobs"],
-    summary="List training jobs in an OpenShift Project",
+    summary="List training jobs",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -84,74 +73,48 @@ async def list_training_jobs(
         StrictStr,
         Field(
             description=(
-                "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                "resource references are scoped to it. Provision the project through "
-                "normal OpenShift self-service or administrator workflows before using "
-                "this API. The Training API does not create projects or namespaces and "
-                "never falls back to a default namespace or an elevated service "
-                "identity. A missing project returns 404; insufficient caller "
-                "permissions return 403. "
+                "Existing OpenShift project containing the job and its referenced "
+                "storage and queues."
             )
         ),
     ] = Path(
         ...,
         description=(
-            "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-            "resource references are scoped to it. Provision the project through "
-            "normal OpenShift self-service or administrator workflows before using "
-            "this API. The Training API does not create projects or namespaces and "
-            "never falls back to a default namespace or an elevated service "
-            "identity. A missing project returns 404; insufficient caller "
-            "permissions return 403. "
+            "Existing OpenShift project containing the job and its referenced storage and queues."
         ),
         examples=["team-alpha-ml"],
     ),
     status: Annotated[
         JobStatus | None,
-        Field(
-            description=(
-                "Optional exact-status filter. When omitted, includes jobs in all "
-                "statuses, subject to caller access, other filters, and pagination. "
-                "There is no default status filter or ALL status value. "
-            )
-        ),
+        Field(description="Filter by an exact job state. Omit to include all states."),
     ] = Query(
         None,
-        description=(
-            "Optional exact-status filter. When omitted, includes jobs in all "
-            "statuses, subject to caller access, other filters, and pagination. "
-            "There is no default status filter or ALL status value. "
-        ),
+        description="Filter by an exact job state. Omit to include all states.",
         alias="status",
     ),
     queue_name: Annotated[
-        StrictStr | None,
-        Field(description="Filter by queue name recorded in training submission metadata."),
+        StrictStr | None, Field(description="Filter by the queue name recorded for the job.")
     ] = Query(
-        None,
-        description="Filter by queue name recorded in training submission metadata.",
-        alias="queue_name",
+        None, description="Filter by the queue name recorded for the job.", alias="queue_name"
     ),
     limit: int | None = Query(20, description="", alias="limit", ge=1),
     page_token: Annotated[
         StrictStr | None,
         Field(
             description=(
-                "Opaque continuation token for the same project and filters. The token "
-                "never grants access; every request rechecks caller permissions. "
+                "Continuation token from the previous page. Use the same project and filters."
             )
         ),
     ] = Query(
         None,
         description=(
-            "Opaque continuation token for the same project and filters. The token "
-            "never grants access; every request rechecks caller permissions. "
+            "Continuation token from the previous page. Use the same project and filters."
         ),
         alias="page_token",
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> ListTrainingJobs200Response:
-    """List training jobs in an OpenShift Project"""
+    """List training jobs"""
     await authorize_project_request(
         request,
         project,
@@ -176,52 +139,41 @@ async def list_training_jobs(
     responses={
         202: {
             "model": TrainingJobSubmission,
-            "description": "RayJob created; training execution proceeds asynchronously",
+            "description": "Job accepted for asynchronous execution.",
         },
         400: {
             "model": ErrorResponse,
-            "description": "Malformed JSON or invalid query/path parameter syntax",
+            "description": "Malformed JSON or invalid path or query parameters.",
         },
-        401: {
-            "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
-        },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,
-            "description": (
-                "OpenShift authentication, authorization, or Ray submission is "
-                "temporarily unavailable"
-            ),
+            "description": "Training submission is temporarily unavailable.",
         },
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
         404: {
             "model": ErrorResponse,
-            "description": (
-                "Target project, RayJob, or referenced project resource does not exist "
-                "in the requested scope"
-            ),
+            "description": "The project, job, or referenced resource was not found.",
         },
         409: {
             "model": ErrorResponse,
-            "description": "A RayJob with the requested name already exists in the project",
+            "description": "A job with this name already exists in the project.",
         },
-        415: {"model": ErrorResponse, "description": "Request body must use application/json"},
+        415: {"model": ErrorResponse, "description": "Request body must use application/json."},
         422: {
             "model": ErrorResponse,
-            "description": "JSON is well-formed but fails schema or domain validation",
+            "description": "Request fields or training parameters failed validation.",
         },
         501: {
             "model": ErrorResponse,
-            "description": "Requested backend is not implemented in this Developer Preview",
+            "description": "The requested operation or training backend is not available.",
         },
     },
     tags=["Training Jobs"],
-    summary="Submit a Ray training job in an OpenShift Project",
+    summary="Submit a training job",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
     status_code=status.HTTP_202_ACCEPTED,
@@ -233,25 +185,14 @@ async def create_training_job(
         StrictStr,
         Field(
             description=(
-                "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                "resource references are scoped to it. Provision the project through "
-                "normal OpenShift self-service or administrator workflows before using "
-                "this API. The Training API does not create projects or namespaces and "
-                "never falls back to a default namespace or an elevated service "
-                "identity. A missing project returns 404; insufficient caller "
-                "permissions return 403. "
+                "Existing OpenShift project containing the job and its referenced "
+                "storage and queues."
             )
         ),
     ] = Path(
         ...,
         description=(
-            "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-            "resource references are scoped to it. Provision the project through "
-            "normal OpenShift self-service or administrator workflows before using "
-            "this API. The Training API does not create projects or namespaces and "
-            "never falls back to a default namespace or an elevated service "
-            "identity. A missing project returns 404; insufficient caller "
-            "permissions return 403. "
+            "Existing OpenShift project containing the job and its referenced storage and queues."
         ),
         examples=["team-alpha-ml"],
     ),
@@ -281,7 +222,7 @@ async def create_training_job(
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> TrainingJobSubmission:
-    """Submit a Ray training job in an OpenShift Project"""
+    """Submit a training job"""
     await authorize_project_request(
         request,
         project,
@@ -300,41 +241,27 @@ async def create_training_job(
 @router.get(
     "/projects/{project}/training-jobs/{job_id}",
     responses={
-        200: {
-            "model": TrainingJob,
-            "description": (
-                "Accepted submission configuration, current RayJob status, and all "
-                "available job details"
-            ),
-        },
+        200: {"model": TrainingJob, "description": "Current job status and available details."},
         400: {
             "model": ErrorResponse,
-            "description": "Malformed JSON or invalid query/path parameter syntax",
+            "description": "Malformed JSON or invalid path or query parameters.",
         },
-        401: {
-            "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
-        },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": "The service or a required dependency is temporarily unavailable.",
         },
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
         404: {
             "model": ErrorResponse,
-            "description": (
-                "Target project, RayJob, or referenced project resource does not exist "
-                "in the requested scope"
-            ),
+            "description": "The project, job, or referenced resource was not found.",
         },
     },
     tags=["Training Jobs"],
-    summary="Get training job status and available details",
+    summary="Get a training job",
     response_model_by_alias=True,
     response_model_exclude_unset=True,
 )
@@ -344,49 +271,28 @@ async def get_training_job(
         StrictStr,
         Field(
             description=(
-                "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                "resource references are scoped to it. Provision the project through "
-                "normal OpenShift self-service or administrator workflows before using "
-                "this API. The Training API does not create projects or namespaces and "
-                "never falls back to a default namespace or an elevated service "
-                "identity. A missing project returns 404; insufficient caller "
-                "permissions return 403. "
+                "Existing OpenShift project containing the job and its referenced "
+                "storage and queues."
             )
         ),
     ] = Path(
         ...,
         description=(
-            "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-            "resource references are scoped to it. Provision the project through "
-            "normal OpenShift self-service or administrator workflows before using "
-            "this API. The Training API does not create projects or namespaces and "
-            "never falls back to a default namespace or an elevated service "
-            "identity. A missing project returns 404; insufficient caller "
-            "permissions return 403. "
+            "Existing OpenShift project containing the job and its referenced storage and queues."
         ),
         examples=["team-alpha-ml"],
     ),
     job_id: Annotated[
         StrictStr,
-        Field(
-            description=(
-                "Name of the RayJob custom resource, scoped to the target project. "
-                "Resolve it only through caller-authorized Kubernetes APIs in that "
-                "project. "
-            )
-        ),
+        Field(description="Job ID returned at submission, scoped to the specified project."),
     ] = Path(
         ...,
-        description=(
-            "Name of the RayJob custom resource, scoped to the target project. "
-            "Resolve it only through caller-authorized Kubernetes APIs in that "
-            "project. "
-        ),
+        description="Job ID returned at submission, scoped to the specified project.",
         examples=["llama3-8b-alpaca-lora"],
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> TrainingJob:
-    """Get training job status and available details"""
+    """Get a training job"""
     await authorize_project_request(
         request,
         project,
@@ -404,43 +310,29 @@ async def get_training_job(
 @router.delete(
     "/projects/{project}/training-jobs/{job_id}",
     responses={
-        204: {
-            "description": (
-                "RayJob deletion initiated with foreground cascading cleanup of its "
-                "owned RayCluster and pods"
-            )
-        },
+        204: {"description": "Deletion accepted; cleanup is in progress."},
         400: {
             "model": ErrorResponse,
-            "description": "Malformed JSON or invalid query/path parameter syntax",
+            "description": "Malformed JSON or invalid path or query parameters.",
         },
-        401: {
-            "model": ErrorResponse,
-            "description": "Missing, invalid, or expired OpenShift bearer token",
-        },
+        401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift authentication or authorization is temporarily unavailable",
+            "description": "The service or a required dependency is temporarily unavailable.",
         },
         403: {
             "model": ErrorResponse,
-            "description": (
-                "User lacks OpenShift RBAC permissions for the requested resource or project"
-            ),
+            "description": "Insufficient permissions for the requested project or resource.",
         },
         404: {
             "model": ErrorResponse,
-            "description": (
-                "Target project, RayJob, or referenced project resource does not exist "
-                "in the requested scope"
-            ),
+            "description": "The project, job, or referenced resource was not found.",
         },
         409: {
             "model": ErrorResponse,
             "description": (
-                "conflict means the resource changed concurrently; refresh and retry. "
-                "shared_cluster and unowned_cluster refuse deletion because the "
-                "RayCluster is shared or not exclusively owned by this RayJob. "
+                "The job changed concurrently or its training cluster is shared or not "
+                "exclusively owned. Refresh and retry only concurrent-change conflicts."
             ),
         },
     },
@@ -455,44 +347,23 @@ async def delete_training_job(
         StrictStr,
         Field(
             description=(
-                "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                "resource references are scoped to it. Provision the project through "
-                "normal OpenShift self-service or administrator workflows before using "
-                "this API. The Training API does not create projects or namespaces and "
-                "never falls back to a default namespace or an elevated service "
-                "identity. A missing project returns 404; insufficient caller "
-                "permissions return 403. "
+                "Existing OpenShift project containing the job and its referenced "
+                "storage and queues."
             )
         ),
     ] = Path(
         ...,
         description=(
-            "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-            "resource references are scoped to it. Provision the project through "
-            "normal OpenShift self-service or administrator workflows before using "
-            "this API. The Training API does not create projects or namespaces and "
-            "never falls back to a default namespace or an elevated service "
-            "identity. A missing project returns 404; insufficient caller "
-            "permissions return 403. "
+            "Existing OpenShift project containing the job and its referenced storage and queues."
         ),
         examples=["team-alpha-ml"],
     ),
     job_id: Annotated[
         StrictStr,
-        Field(
-            description=(
-                "Name of the RayJob custom resource, scoped to the target project. "
-                "Resolve it only through caller-authorized Kubernetes APIs in that "
-                "project. "
-            )
-        ),
+        Field(description="Job ID returned at submission, scoped to the specified project."),
     ] = Path(
         ...,
-        description=(
-            "Name of the RayJob custom resource, scoped to the target project. "
-            "Resolve it only through caller-authorized Kubernetes APIs in that "
-            "project. "
-        ),
+        description="Job ID returned at submission, scoped to the specified project.",
         examples=["llama3-8b-alpaca-lora"],
     ),
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),

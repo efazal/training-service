@@ -1,6 +1,6 @@
 # API generation
 
-`openapi.yaml` is the reviewed public contract (version `1.4.0-dp`).
+`openapi.yaml` is the reviewed public contract (version `0.1.0`).
 Generation does not modify its endpoints or schemas. The POST-only
 `x-submission-context` vendor extension controls generated dispatch and
 response handling without changing the public wire schema.
@@ -38,7 +38,8 @@ and focused unit tests verify request examples round-trip unchanged.
 
 Authentication, project authorization, submission, job reads, driver logs,
 and job deletion are handwritten outside the generated tree. Algorithm
-discovery is implemented; queue discovery and estimation remain fail-closed with `501`.
+discovery is implemented; queue discovery returns `501` until implemented.
+Estimation is not part of the public API.
 
 The POST-only `x-submission-context` preserves the 202 status and Location
 header. Operations marked `x-request-context` also receive the authenticated
@@ -46,8 +47,10 @@ request explicitly. Dispatch selects each operation's owner independently of
 import order. The query argument override permits normal integer/boolean HTTP
 query parsing without weakening strict JSON body models.
 
-Swagger's runtime copy uses a relative server URL and never overwrites the
-canonical YAML.
+Swagger serves the canonical contract with a relative server URL. API release
+versions match the Python package, chart application version and default image
+tag; the `/api/v1` URL prefix remains the API's major version. Update these
+release metadata fields together when publishing an image.
 
 ## Formatting and regeneration
 

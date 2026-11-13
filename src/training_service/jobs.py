@@ -44,6 +44,7 @@ from training_service.ray_entrypoint import get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_backend import JobBackend
 from training_service_api.models.resource_spec import ResourceSpec
+from training_service_api.models.training_configuration import TrainingConfiguration
 
 _LOG = logging.getLogger(__name__)
 _K8S_TIMEOUT_SECONDS = 10
@@ -423,8 +424,7 @@ class CodeFlareJobBackend:
                     "dataset.config and dataset.split are not supported by the remote GRPO loader."
                 )
             locations["dataset"].update(dataset_options)
-        if request.output is not None:
-            locations["output"] = _parse_location(request.output.destination_uri, output=True)
+        locations["output"] = _parse_location(request.output.destination_uri, output=True)
         backend = get_backend(request.algorithm.name)
         try:
             backend.validate_locations(locations, parameters)
@@ -704,7 +704,7 @@ def detail(job: dict[str, Any], project: str) -> dict[str, Any]:
     submission = annotations.get(_ANNOTATION + "submission")
     if isinstance(submission, str) and len(submission.encode()) <= 65536:
         try:
-            accepted = CreateJobRequest.model_validate_json(submission)
+            accepted = TrainingConfiguration.model_validate_json(submission)
             result["submission"] = accepted.model_dump(mode="json", exclude_unset=True)
         except (ModelValidationError, ValueError):
             # External jobs may have missing, legacy or malformed API annotations.

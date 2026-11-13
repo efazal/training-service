@@ -22,7 +22,6 @@ from training_service.contract import component_validator, contract_document, lo
 from training_service.errors import ApiError
 from training_service.jobs import CodeFlareJobBackend, JobsBackend, JobSubmitter
 from training_service.logs import log_stream_timeout_seconds
-from training_service_api.apis.estimations_api import router as estimations_router
 from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
 from training_service_api.apis.observability_api import router as observability_router
 from training_service_api.apis.training_jobs_api import router as jobs_router
@@ -160,7 +159,7 @@ def create_app(
             },
         )
 
-    for router in (estimations_router, discovery_router, observability_router, jobs_router):
+    for router in (discovery_router, observability_router, jobs_router):
         application.include_router(router, prefix="/api/v1")
     application.openapi = contract_document  # type: ignore[method-assign]
 

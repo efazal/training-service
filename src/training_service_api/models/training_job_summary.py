@@ -21,22 +21,17 @@ class TrainingJobSummary(ContractModel):
     """
 
     id: StrictStr = Field(
-        description="Name of the RayJob custom resource in the requested project.",
+        description="Job ID within the project.",
         json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]},
     )
     status: JobStatus
     queue_name: StrictStr | None = Field(
         default=None,
-        description=("Kueue LocalQueue recorded in training submission metadata, when available."),
+        description="Recorded training queue, when available.",
         json_schema_extra={"examples": ["team-alpha-local-queue"]},
     )
     created_at: datetime = Field(
-        description=(
-            "RayJob resource creation timestamp from Kubernetes "
-            "metadata.creationTimestamp, in RFC 3339 format. Present for all "
-            "persisted RayJobs, including externally created jobs; not the "
-            "training start time. "
-        )
+        description=("Job creation time in RFC 3339 format; distinct from the training start time.")
     )
 
     model_config = ConfigDict(

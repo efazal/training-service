@@ -33,37 +33,28 @@ class BaseObservabilityApi:
             StrictStr,
             Field(
                 description=(
-                    "Explicit pre-existing OpenShift Project (Kubernetes namespace); all "
-                    "resource references are scoped to it. Provision the project through "
-                    "normal OpenShift self-service or administrator workflows before using "
-                    "this API. The Training API does not create projects or namespaces and "
-                    "never falls back to a default namespace or an elevated service "
-                    "identity. A missing project returns 404; insufficient caller "
-                    "permissions return 403. "
+                    "Existing OpenShift project containing the job and its referenced "
+                    "storage and queues."
                 )
             ),
         ],
         job_id: Annotated[
             StrictStr,
-            Field(
-                description=(
-                    "Name of the RayJob custom resource, scoped to the target project. "
-                    "Resolve it only through caller-authorized Kubernetes APIs in that "
-                    "project. "
-                )
-            ),
+            Field(description="Job ID returned at submission, scoped to the specified project."),
         ],
         follow: Annotated[
             StrictBool | None,
-            Field(description="False returns text/plain; true follows logs as text/event-stream."),
+            Field(
+                description=(
+                    "Return a text/plain snapshot when false, or a text/event-stream when true."
+                )
+            ),
         ],
         tail_lines: Annotated[
             Annotated[int, Field(strict=True, ge=1)] | None,
             Field(
                 description=(
-                    "Number of trailing lines in the non-following snapshot, selected by "
-                    "the service after get_job_logs. Ignored when follow=true, which "
-                    "forwards the log chunks provided by Ray's tail_job_logs. "
+                    "Number of trailing lines returned in a snapshot. Ignored when follow=true."
                 )
             ),
         ],
@@ -71,20 +62,16 @@ class BaseObservabilityApi:
             Annotated[int, Field(le=2147483647, strict=True, ge=1)] | None,
             Field(
                 description=(
-                    "Requested total lifetime of this follow connection in seconds (1 to "
-                    "2147483647), written with ASCII digits and no signs, leading zeros, "
-                    "whitespace, or decimal point. The numeric upper bound keeps deadline "
-                    "arithmetic representable. The effective lifetime is the smaller of "
-                    "this value and TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS (300 "
-                    "seconds by default); omission uses that configured maximum. Validated "
-                    "for every request: invalid values return 400 even when follow=false; "
-                    "valid values have no effect on snapshots. Expiry closes the stream "
-                    "with a stream_expired event; reconnect to continue reading logs. "
+                    "Maximum duration in seconds for a follow connection. Omission uses "
+                    "the deployment limit (300 seconds by default); larger values are "
+                    "capped at that limit. Supply a positive integer without signs, "
+                    "leading zeros, or decimals. Invalid values return 400; valid values "
+                    "are ignored when follow=false."
                 )
             ),
         ],
         token_OpenShiftBearer: TokenModel,
         request: Request,
     ) -> str:
-        """Read or follow training job driver logs"""
+        """Get training job logs"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
