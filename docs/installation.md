@@ -6,7 +6,8 @@ RHOAI 3.6 Developer Preview supports Ray as the training backend.
 
 ## Before you start
 
-- Use an existing OpenShift/RHOAI cluster with Ray and its authenticated gateway configured.
+- Use an existing OpenShift cluster running **RHOAI 3.5 or later**, with Ray and
+  its authenticated gateway configured.
 - Install Helm 3 and `oc`, and log into the target cluster with `oc login`.
 - Have a platform administrator install the chart. It creates cluster-scoped RBAC
   for authentication and gateway discovery, plus a Role in `openshift-config-managed`.
