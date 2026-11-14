@@ -1,0 +1,34 @@
+# API contract checks (RHOAIENG-103987).
+# @latest resolves to v2.2.0 as verified on 2026-11-14.
+# Release and upgrade guidance:
+# https://github.com/red-hat-data-services/api-contract-tests/blob/main/docs/releasing.md
+name: API contract
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  api-contract:
+    uses: red-hat-data-services/api-contract-tests/.github/workflows/provider-openapi-check.yml@latest
+    with:
+      contract-set: .rhoai/contracts.yaml
+      contract-id: training-service-v1
+      # origin/main on 2026-11-14; no RHOAI 3.6 baseline is available.
+      # Confirmed by the component owner. Advancing it needs another owner's approval.
+      baseline-refs: ea34e8da057d605569dbcd75c290965b8f9f683b
+      oasdiff-version: "1.33.0"
+      yq-version: "4.45.1"
+      mode: enforce
+
+  api-contract-coverage:
+    uses: red-hat-data-services/api-contract-tests/.github/workflows/provider-coverage-check.yml@latest
+    with:
+      contract-set: .rhoai/contracts.yaml
+      # Same owner-confirmed origin/main baseline as the compatibility job.
+      baseline-refs: ea34e8da057d605569dbcd75c290965b8f9f683b
+      yq-version: "4.45.1"
+      mode: enforce

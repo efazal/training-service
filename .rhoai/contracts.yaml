@@ -1,0 +1,25 @@
+# Training API provider contract (RHOAIENG-103987).
+apiVersion: contracts.rhoai.io/v1alpha1
+kind: ContractSet
+metadata:
+  name: training-service
+spec:
+  baseline:
+    # origin/main on 2026-11-14, confirmed by the component owner.
+    # No RHOAI 3.6 baseline is available; protect the current DP API.
+    # Advancing this baseline needs approval from another owner.
+    refs:
+      - ea34e8da057d605569dbcd75c290965b8f9f683b
+  contracts:
+    - id: training-service-v1
+      type: openapi
+      declaredArtifact: docs/api/openapi.yaml
+      # Includes the /api/v1 server base path and all six path templates.
+      matchPath: "^/api/v1(/|$)"
+      policy:
+        oasdiffVersion: "1.33.0"
+        yqVersion: "4.45.1"
+        flattenAllOf: true
+      generator:
+        adapter: openapi.static
+        source: docs/api/openapi.yaml
