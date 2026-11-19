@@ -619,3 +619,78 @@ def test_post_without_queue_uses_real_discovery_and_preflight_on_non_beta1_clust
     assert sdk.call_args.kwargs["api_client"] is caller
     assert sdk.call_args.kwargs["annotations"]["training.rhoai.io/submitted-by"] == "alice"
     sdk.return_value.submit.assert_called_once()
+
+
+def test_selected_queue_maps_to_local_queue_in_requested_project(default_discovery, installation):
+    caller, custom = default_discovery
+    assert k.resolve_local_queue(caller, "project", "gpu.batch") == "gpu.batch"
+    assert installation[1].read_namespace.call_args.args == ("project",)
+    assert custom.get_namespaced_custom_object.call_args.args == (
+        k.GROUP,
+        "v1beta1",
+        "project",
+        "localqueues",
+        "gpu.batch",
+    )
+    custom.list_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["", "Bad", "bad/name", "a..b", "-edge", "a" * 64, 7])
+def test_invalid_queue_selection_is_rejected_before_cluster_access(
+    default_discovery, installation, name
+):
+    caller, custom = default_discovery
+    with pytest.raises(ApiError) as error:
+        k.resolve_local_queue(caller, "project", name)
+    assert (error.value.status_code, error.value.code) == (422, "validation_error")
+    # Namespace and platform reads go through the patched core API, not `caller`.
+    assert installation[1].mock_calls == [] and custom.mock_calls == []
+
+
+@pytest.mark.parametrize("status", [0, 400, 409, 410, 429, 500, 503])
+def test_failed_queue_lookup_is_uncertain_not_missing(default_discovery, status):
+    caller, custom = default_discovery
+    custom.get_namespaced_custom_object.side_effect = ApiException(status=status)
+    with pytest.raises(ApiError) as error:
+        k.resolve_local_queue(caller, "project", "gpu.batch")
+    assert (error.value.status_code, error.value.code) == (503, "backend_unavailable")
+
+
+def test_queue_missing_from_requested_project_is_rejected(default_discovery, monkeypatch):
+    caller, custom = default_discovery
+    monkeypatch.setattr(k, "serves_localqueues", lambda *_: True)
+    custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    with pytest.raises(ApiError) as error:
+        k.resolve_local_queue(caller, "project", "other-project-queue")
+    assert (error.value.status_code, error.value.code) == (404, "not_found")
+    assert "project 'project'" in error.value.message
+
+
+@pytest.mark.parametrize(
+    "labels,absent,expected",
+    [
+        ({}, False, (409, "kueue_project_excluded")),
+        ({"kueue.openshift.io/managed": "true"}, True, (409, "kueue_not_installed")),
+    ],
+)
+def test_unavailable_queue_selection_is_rejected(
+    default_discovery, installation, monkeypatch, labels, absent, expected
+):
+    caller, custom = default_discovery
+    installation[1].read_namespace.return_value = NS(metadata=NS(labels=labels))
+    if absent:
+        monkeypatch.setattr(
+            k, "served_version", Mock(side_effect=ApiError(409, "kueue_not_installed", "Absent"))
+        )
+    with pytest.raises(ApiError) as error:
+        k.resolve_local_queue(caller, "project", "gpu.batch")
+    assert (error.value.status_code, error.value.code) == expected
+    custom.get_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize("items,expected", [([], None), ([default_item()], "gpu.batch")])
+def test_omitted_queue_selection_uses_project_default(default_discovery, items, expected):
+    caller, custom = default_discovery
+    custom.list_namespaced_custom_object.return_value = {"items": items}
+    assert k.resolve_local_queue(caller, "project", None) == expected
+    assert custom.list_namespaced_custom_object.call_args.args[2] == "project"

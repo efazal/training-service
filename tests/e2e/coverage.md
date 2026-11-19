@@ -7,8 +7,8 @@ The deployment workflow provides Podman → Quay → Helm automation, a fresh la
 namespace, LocalQueue/PVC/fixture provisioning, and mandatory Kueue-admitted
 training. Shared cluster/operator/DSC/ClusterQueue/StorageClass provisioning and
 Jenkins remain excluded; users prepare Ray/Kueue first. Direct installation is
-supported without DSC checks. Kueue failures fail the queued test with diagnostics
-while independent API tests continue; the final run still fails.
+supported without DSC checks. Kueue failures fail the queued test and the queue discovery/selection tests with
+diagnostics while other API tests continue; the final run still fails.
 For `test-e2e-deploy`'s newly created, UID/run-label-owned namespace, default
 cleanup runs after success/failure/interruption, including test PVCs and leftover
 Ray resources. `--keep-resources` retains debugging resources, never temporary
@@ -30,6 +30,7 @@ registry credentials. Existing-deployment tests preserve customer namespaces/dat
 | SEC-02–05/08–10 (partial/deferred) | Optional forbidden-project list; complete real least-privilege endpoint/persona matrix, permission changes and concurrent isolation deferred |
 | DATA-02–05/07–09 (partial/opt-in) | Missing HF/S3 Secret/PVC context and PVC traversal rejection; PVC positive fixture. New `--remote-fixtures-file` matrix submits all four S3/HF model/dataset combinations, requires real `SUCCEEDED`, then reads back LoRA adapter artifacts from S3 after API deletion. HF output is rejected by HTTP 422. These remote tests require externally staged Secrets/model/datasets and S3 verifier credentials; no passing live evidence is implied. Private/gated failures and access-mode matrix remain deferred. |
 | QUEUE-01/02/09/10 (profile-dependent) | Default deploy run assumes installed/configured Ray/Kueue (no DSC check), creates a labeled fresh namespace and LocalQueue, then requires an owned admitted Workload, SUCCEEDED, artifacts and GPU cleanup. Queue failures are test-local, not a suite-wide abort. Existing-deployment absent-Kueue/unqueued-opt-out profiles remain separate |
+| Queue discovery and selection (partial/profile-dependent) | `test_queues.py`: discovery response shape and the usable/absent/excluded outcomes; malformed queue names (`422`); a missing LocalQueue (`404`, or `409` where Kueue is unusable); with `with-kueue`, the prepared queue is listed and accepted up to the storage lookup; no job is created by any rejection. `--other-project-queue` adds cross-project scoping proof. The `default-queue` profile runs a lifecycle with `queue_name` omitted and requires the annotated project default on the RayJob, job detail and admitted Workload. Queued lifecycles check the detail and queue-filtered list. Project exclusion, unhealthy controllers and ambiguous defaults are unit-tested, not injected live. |
 | QUEUE-03–08/11 (partial/deferred) | Invalid resources/empty queue covered. Quota hold/release, mandatory-admission denial, disabled integrations and compatibility matrix require prepared scenarios |
 | READ-01–04/06/07 (partial) | Compact summaries/count bounds, pagination, created-job inclusion/status filters, payload/optional truthful timestamps, malformed token; exact inventory count/default-status/filter binding matrix deferred |
 | READ-05/08 (deferred) | External/failed-before-start records, metadata after API restart require prepared scenarios |

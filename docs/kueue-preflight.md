@@ -13,9 +13,14 @@ There are no DSC reads or dependencies, so an independently installed RHBoK is s
 * 409 `kueue_not_installed`: successful API discovery did not advertise Kueue.
 * 409 `kueue_project_excluded`: effective configured selectors exclude the project.
 * 404 `not_found`: caller project or explicitly selected LocalQueue is missing.
+* 422 `validation_error`: a selected `queue_name` is not a DNS subdomain of at
+  most 63 characters; rejected before any project or queue lookup.
+* 400 `bad_request`: the project is not a valid OpenShift project name.
 * 401/403: caller authentication/permission failure, including downstream failures.
 * 503 `backend_unavailable`: incomplete/unavailable capability checks, unhealthy
-  controller, unsupported configuration, or platform service-account permission failure.
+  controller, unsupported configuration, a LocalQueue lookup answered with an unexpected
+  status, or platform
+  service-account permission failure.
 
 This replaces the old absence response (`200`, `kueue_enabled: false`).
 POST repeats preflight without requiring a preceding GET. Creation acknowledges

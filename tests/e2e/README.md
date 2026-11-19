@@ -16,7 +16,8 @@ Prepare once:
   quota. **Direct installations are supported**: the runner does not read the DSC
   or require Kueue to be DSC-managed. It assumes this infrastructure is ready;
   the queued test verifies actual APIs, namespace policy and admission. A Kueue
-  problem fails that test with diagnostics, not the independent API tests.
+  problem fails that test and the queue discovery/selection tests with
+  diagnostics, not the other API tests.
 - Select a **ReadWriteMany-capable StorageClass**, writable by OpenShift-assigned
   nonroot UIDs. The built-in fixture needs one NVIDIA GPU, 4 CPUs, 32Gi memory,
   5Gi storage and outbound access to the public Hugging Face model repository.
@@ -255,8 +256,9 @@ timeouts include the last observed Workload condition reasons. Raw controller
 messages and API error bodies are not copied into reports.
 
 A LocalQueue creation/check failure does not abort deployment or the suite.
-The queued test fails before submission if its prerequisites are unavailable;
-independent tests continue. The deployment runner overrides inherited pytest
+The queued test fails before submission if its prerequisites are unavailable,
+and the queue discovery/selection tests fail with it; other tests continue.
+The deployment runner overrides inherited pytest
 fail-fast settings (`--maxfail=0`) and **still exits nonzero** for failed tests.
 It never silently skips queued training or falls back to unqueued execution.
 Missing required lifecycle evidence fails even if pytest was accidentally filtered.
@@ -313,9 +315,14 @@ make test-e2e E2E_ARGS="--job-file /path/to/tiny-job.json --queue-profile no-kue
   (DSC-managed or directly installed), RayJob integration, namespace enrollment, ResourceFlavor, active
   ClusterQueue/quota and LocalQueue. Verify the label and an owner-linked
   Workload with `Admitted=True`, not just successful POST.
+- `default-queue`: **omit `queue_name`** in a Kueue-enrolled project that has
+  exactly one LocalQueue annotated `kueue.x-k8s.io/default-queue: "true"`. The
+  observer resolves that queue itself and requires the RayJob label, job detail
+  and an owner-linked admitted Workload to name it. Zero or several annotated
+  queues fail before submission.
 - `unqueued-opt-out`: omit `queue_name` only where project policy explicitly
   permits it. It is recorded separately and **does not prove Kueue absence**.
-  A default LocalQueue silently selected by the SDK fails unqueued proof.
+  A default LocalQueue selected for the job fails unqueued proof.
   The runner never disables mandatory admission.
 
 Both scheduling configurations need independent passing evidence before
@@ -331,11 +338,41 @@ delivery, not that every line was generated after opening the connection.
 The deployment runner always enables log checks and the cluster observer. The observer
 uses **kubeconfig**, never the HTTP caller token; it cannot make a denied API call
 succeed. It needs namespace get, PVC get, RayJob get/list, RayCluster list, batch
-Job list and pod get/list. With Kueue also: Workload list, LocalQueue get and
+Job list and pod get/list. With Kueue also: Workload list, LocalQueue get (and list for `default-queue`) and
 ClusterQueue get. Inventory is paginated. Transitive controller-owner UIDs link
 the RayJob/clusters/batch Jobs/pods. After terminal DELETE the observer waits for
 owned resources/Workload to disappear and verifies observed running GPU pods are
 gone. Global free-GPU counts need not rise if other workloads consume capacity.
+
+### Queue discovery and selection
+
+[`test_queues.py`](test_queues.py) runs with the default HTTP suite and starts no
+training. It checks `GET /projects/{project}/queues`, then submits requests whose
+storage claim is deliberately missing, so a response identifies how far queue
+selection got:
+
+- malformed names return `422` naming `queue_name`;
+- a well-formed name with no LocalQueue in the test project returns `404` naming
+  that LocalQueue and project (or `409` where Kueue is absent or the project is
+  excluded);
+- with `--queue-profile with-kueue`, the job file's queue must be listed by
+  discovery and be accepted by submission, reaching the missing-claim `404`.
+
+Every case confirms no job exists afterwards. Without a profile, both the usable
+(`200`) and unusable (`409 kueue_not_installed`/`kueue_project_excluded`) Kueue
+outcomes pass; `503` always fails, because it means readiness is unknown. The HTTP
+caller needs permission to list LocalQueues in the test project; without it
+discovery returns `403` and the test fails.
+
+Add `--other-project-queue OTHER_PROJECT/QUEUE` to prove project scoping: the
+caller must be able to discover that queue in the other project, it must not
+exist in the test project, and selecting it in the test project must return the
+missing-LocalQueue `404`. Both projects must be Kueue-enrolled: an excluded test
+project rejects every queue and fails this check rather than passing it.
+
+Queued lifecycles (`with-kueue`, `default-queue`, including `--algorithm-matrix`)
+also require `queue_name` in the job detail and the queue-filtered job list, and
+an empty result for a different queue filter.
 
 ### Verify saved output independently
 
@@ -418,6 +455,7 @@ training fixture described above. Constraints absent from a runtime skip visibly
 | `--preflight-only` | Read-only cluster/tooling/config checks; no build/push/deploy |
 | `--values /path/to/overrides.yaml` | Optional test overrides; omitted uses chart defaults |
 | `--ray-ca-bundle /path/to/custom-ray-ca.pem` | Override trust for a custom gateway using the legacy CA mount configuration |
+| `--other-project-queue other-project/queue` | Queue discoverable only in another project; selecting it in the test project must be rejected; existing-deployment command |
 | `--forbidden-project other-project` | Existing project the HTTP caller cannot access; not an admin-token test |
 | `--keep-failed-job` | Existing-deployment only: retain FAILED/STOPPED for inspection, still fail |
 | `--junitxml /path/results.xml` | Optional sanitized report, existing-deployment command |

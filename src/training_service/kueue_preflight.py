@@ -259,7 +259,7 @@ def preflight(api: client.ApiClient, project: str, queue: str | None = None) -> 
 
 
 def check_queue(api: client.ApiClient, project: str, queue: str, version: str) -> None:
-    """A missing API version must not be reported as a missing queue."""
+    """A missing API version or failed lookup must not be reported as a missing queue."""
     with describe_not_found("LocalQueue", queue, project=project):
         try:
             client.CustomObjectsApi(api).get_namespaced_custom_object(
@@ -275,6 +275,9 @@ def check_queue(api: client.ApiClient, project: str, queue: str, version: str) -
                 with platform_client() as platform:
                     if not serves_localqueues(platform, version):
                         raise unavailable() from error
+            elif error.status not in (401, 403):
+                # Any other status proves neither presence nor absence.
+                raise unavailable() from error
             raise
 
 
@@ -335,3 +338,23 @@ def default_queue(api: client.ApiClient, project: str) -> str | None:
         return None
     preflight(api, project, defaults[0])
     return str(defaults[0])
+
+
+def resolve_local_queue(api: client.ApiClient, project: str, queue_name: str | None) -> str | None:
+    """Map an API queue selection to the CodeFlare ``local_queue`` for one project.
+
+    A selected queue is returned only after its name, Kueue readiness, project
+    eligibility and caller-visible existence in ``project`` are established.
+    Without a selection the project's default LocalQueue applies. ``None`` means a
+    confirmed unqueued submission, never an unresolved or rejected selection.
+    """
+    if queue_name is None:
+        return default_queue(api, project)
+    if not valid_queue_name(queue_name):
+        raise ApiError(
+            422,
+            "validation_error",
+            "queue_name must be a DNS subdomain of at most 63 characters.",
+        )
+    preflight(api, project, queue_name)
+    return queue_name

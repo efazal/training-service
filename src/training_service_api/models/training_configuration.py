@@ -39,13 +39,14 @@ class TrainingConfiguration(ContractModel):
             "submission repeats Kueue readiness, project eligibility and "
             "caller-authenticated queue existence checks without requiring a "
             "preceding GET. Creation is not admission; jobs may wait for quota or "
-            "GPUs. Absence or exclusion returns 409, missing queues return 404, "
-            "caller denial 403 and uncertain readiness 503. When omitted, the "
-            "service discovers a default LocalQueue using a served Kubernetes API "
-            "version and applies the same preflight. Confirmed absence of Kueue or "
-            "a default permits unqueued submission; failed lookup returns an "
-            "error. Subject to caller permissions and platform admission policy; "
-            "this does not grant access. "
+            "GPUs. The name must be a DNS subdomain of at most 63 characters, "
+            "otherwise 422. Absence or exclusion returns 409, missing queues "
+            "return 404, caller denial 403 and uncertain readiness 503. When "
+            "omitted, the service discovers a default LocalQueue using a served "
+            "Kubernetes API version and applies the same preflight. Confirmed "
+            "absence of Kueue or a default permits unqueued submission; failed "
+            "lookup returns an error. Subject to caller permissions and platform "
+            "admission policy; this does not grant access. "
         ),
         json_schema_extra={"examples": ["team-alpha-local-queue"]},
     )

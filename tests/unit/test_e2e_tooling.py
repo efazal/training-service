@@ -48,8 +48,9 @@ def test_profiles_require_omitted_queue_and_explicit_selection(jobfile):
     payload = workload(jobfile, "no-kueue")
     payload["queue_name"] = ""
     jobfile.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="omit"):
-        workload(jobfile, "no-kueue")
+    for profile in ("no-kueue", "default-queue", "unqueued-opt-out"):
+        with pytest.raises(ValueError, match="omit"):
+            workload(jobfile, profile)
     payload["queue_name"] = "prepared-local-queue"
     jobfile.write_text(json.dumps(payload))
     assert workload(jobfile, "with-kueue")["queue_name"] == "prepared-local-queue"
@@ -795,6 +796,44 @@ def test_observer_accepts_operational_kueue_regardless_of_installation_method(qu
     observer.preflight(payload, "with-kueue")
     assert observer.queue == "e2e"
     observer.inventory.assert_called_once()
+
+
+def default_queue(name, marker="true"):
+    return {"metadata": {"name": name, "annotations": {"kueue.x-k8s.io/default-queue": marker}}}
+
+
+def test_observer_resolves_the_project_default_queue_for_an_omitted_selection(queue_observer):
+    observer, payload, _, _ = queue_observer
+    del payload["queue_name"]
+    observer.listing.return_value = [
+        default_queue("team-default", "True"),
+        default_queue("other", "false"),
+        {"metadata": {"name": "unmarked"}},
+    ]
+    observer.preflight(payload, "default-queue")
+    assert observer.queue == "team-default"
+    assert observer.custom.get_namespaced_custom_object.call_args.args[4] == "team-default"
+
+
+def test_default_queue_listing_failure_names_the_resource_without_raw_bodies(queue_observer):
+    observer, payload, _, _ = queue_observer
+    del payload["queue_name"]
+    observer.listing.side_effect = ApiException(status=403, reason="private-token")
+    with pytest.raises(ObserverError) as error:
+        observer.preflight(payload, "default-queue")
+    reason = failure_reason(error.value)
+    assert "LocalQueues in namespace 'new-test-project'" in reason and "HTTP 403" in reason
+    assert "private-token" not in reason
+
+
+@pytest.mark.parametrize("queues", [[], [default_queue("a"), default_queue("b")]])
+def test_default_queue_profile_requires_exactly_one_default(queue_observer, queues):
+    observer, payload, _, _ = queue_observer
+    del payload["queue_name"]
+    observer.listing.return_value = queues
+    with pytest.raises(ObserverError, match=f"found {len(queues)}"):
+        observer.preflight(payload, "default-queue")
+    observer.inventory.assert_not_called()
 
 
 @pytest.mark.parametrize(

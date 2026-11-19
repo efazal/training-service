@@ -27,7 +27,14 @@ from huggingface_hub.errors import RepositoryNotFoundError
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-from training_service import catalog, hf_dataset, jobs, kubernetes_client, ray_entrypoint
+from training_service import (
+    catalog,
+    hf_dataset,
+    jobs,
+    kubernetes_client,
+    kueue_preflight,
+    ray_entrypoint,
+)
 from training_service import jobs as submission
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
@@ -1185,7 +1192,7 @@ def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
     if queue_mode != "explicit":
         body = body.model_copy(update={"queue_name": None})
         expected_queue = "gpu.batch" if queue_mode == "default" else None
-        monkeypatch.setattr(submission, "default_queue", Mock(return_value=expected_queue))
+        monkeypatch.setattr(kueue_preflight, "default_queue", Mock(return_value=expected_queue))
     identifier = submission.CodeFlareJobBackend(image)._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
@@ -2265,8 +2272,8 @@ def test_embedded_ray_entrypoint_executes_the_selected_algorithm(
 def mock_queue_preflight(monkeypatch):
     # These tests exercise submission; capability checks have separate Kubernetes mocks.
     check = Mock(return_value="v1beta2")
-    monkeypatch.setattr(submission, "preflight", check)
-    monkeypatch.setattr(submission, "default_queue", Mock(return_value=None))
+    monkeypatch.setattr(kueue_preflight, "preflight", check)
+    monkeypatch.setattr(kueue_preflight, "default_queue", Mock(return_value=None))
     return check
 
 
@@ -2305,20 +2312,41 @@ def test_queue_preflight_failure_prevents_creation(monkeypatch, mock_queue_prefl
         ("a" * 64, False),
     ],
 )
-def test_queue_names_support_dns_subdomains(name, valid):
+def test_queue_names_support_dns_subdomains(monkeypatch, mock_queue_preflight, name, valid):
+    _mock_sdk(monkeypatch)
     body = _sample().model_copy(update={"queue_name": name})
+    backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+    arguments = ("team-alpha", body, CallerIdentity("alice", None, ()), "caller-token")
     if valid:
-        submission._validate_request(body)
+        backend._submit_sync(*arguments)
+        assert FakeRayJob.instances[0].kwargs["local_queue"] == name
     else:
         with pytest.raises(ApiError) as error:
-            submission._validate_request(body)
+            backend._submit_sync(*arguments)
         assert error.value.status_code == 422
+        assert "queue_name" in error.value.message
+        mock_queue_preflight.assert_not_called()
+        assert FakeRayJob.instances == []
+
+
+@pytest.mark.parametrize("project", ["..", "Bad_Project", "team/alpha", "a" * 64])
+def test_invalid_project_is_rejected_before_queue_selection(
+    monkeypatch, mock_queue_preflight, project
+):
+    _mock_sdk(monkeypatch)
+    with pytest.raises(ApiError) as error:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            project, _sample(), CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert (error.value.status_code, error.value.code) == (400, "bad_request")
+    mock_queue_preflight.assert_not_called()
+    assert FakeRayJob.instances == []
 
 
 def test_omitted_queue_passes_resolved_default_to_sdk(monkeypatch):
     _mock_sdk(monkeypatch)
     resolve = Mock(return_value="gpu.batch")
-    monkeypatch.setattr(submission, "default_queue", resolve)
+    monkeypatch.setattr(kueue_preflight, "default_queue", resolve)
     body = _sample().model_copy(update={"queue_name": None})
     submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
@@ -2331,7 +2359,7 @@ def test_omitted_queue_passes_resolved_default_to_sdk(monkeypatch):
 def test_failed_default_lookup_prevents_creation(monkeypatch, status):
     _mock_sdk(monkeypatch)
     monkeypatch.setattr(
-        submission,
+        kueue_preflight,
         "default_queue",
         Mock(
             side_effect=ApiError(

@@ -65,6 +65,11 @@ def pytest_addoption(parser):
     )
     group.addoption("--forbidden-project", help="Existing project this caller must not access.")
     group.addoption(
+        "--other-project-queue",
+        metavar="PROJECT/QUEUE",
+        help="LocalQueue the caller can discover in another project but not in the test project.",
+    )
+    group.addoption(
         "--missing-submission-job",
         help="Existing terminal RayJob whose live cluster no longer has its Ray submission.",
     )
@@ -116,9 +121,11 @@ def pytest_configure(config):
             workload(config.getoption("job_file"), config.getoption("queue_profile"))
         except ValueError as error:
             raise pytest.UsageError(str(error)) from None
-        if config.getoption("queue_profile") in {"with-kueue", "no-kueue"} and not config.getoption(
-            "observe_cluster"
-        ):
+        if config.getoption("queue_profile") in {
+            "with-kueue",
+            "default-queue",
+            "no-kueue",
+        } and not config.getoption("observe_cluster"):
             raise pytest.UsageError("Kueue enabled/absent proof requires --observe-cluster")
     if filename := config.getoption("remote_fixtures_file"):
         from tests.e2e.support import remote_workloads, s3_path

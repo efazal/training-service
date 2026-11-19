@@ -38,7 +38,7 @@ from training_service.kubernetes_client import (
     describe_not_found,
     validate_names,
 )
-from training_service.kueue_preflight import default_queue, preflight, valid_queue_name
+from training_service.kueue_preflight import resolve_local_queue
 from training_service.log_config import LogBackendConfig, LogBackendResolver
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
 from training_service.ray_entrypoint import get_backend
@@ -209,8 +209,6 @@ def _validate_request(
     parameters = validate_algorithm_parameters(
         request.algorithm.name, request.algorithm.parameters, runtime_image
     )
-    if request.queue_name is not None and not valid_queue_name(request.queue_name):
-        raise _invalid("queue_name must be a DNS subdomain of at most 63 characters.")
     resources = request.resources or ResourceSpec()
     cpu = resources.cpus_per_node or "4"
     memory = resources.memory_per_node or "16Gi"
@@ -421,6 +419,7 @@ class CodeFlareJobBackend:
     def _submit_sync(
         self, project: str, request: CreateJobRequest, caller: CallerIdentity, token: str
     ) -> str:
+        validate_names(project)
         if not self._image:
             raise ApiError(503, "submission_unavailable", "A Ray training image is not configured.")
         resources, parameters = _validate_request(request, self._image)
@@ -456,13 +455,9 @@ class CodeFlareJobBackend:
         }
 
         with _caller_api_client(token) as api_client:
-            queue = request.queue_name
-            if queue is not None:
-                preflight(api_client, project, queue)
-            else:
-                queue = default_queue(api_client, project)
-                if queue is None:
-                    api_client.unqueued_project = project
+            queue = resolve_local_queue(api_client, project, request.queue_name)
+            if queue is None:
+                api_client.unqueued_project = project
             core_api = client.CoreV1Api(api_client)
             resolved, volumes, mounts, hf_tokens = _storage_plan(
                 core_api, project, locations, resources.num_nodes or 1

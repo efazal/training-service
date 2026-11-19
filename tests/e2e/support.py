@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-PROFILES = ("no-kueue", "with-kueue", "unqueued-opt-out")
+PROFILES = ("no-kueue", "with-kueue", "default-queue", "unqueued-opt-out")
 REMOTE_SOURCES = ("s3", "hf")
 
 
@@ -76,7 +76,10 @@ def workload(filename, profile):
             raise ValueError("with-kueue requires a non-empty queue_name in the job file")
         namespace(queue)
     elif "queue_name" in payload:
-        raise ValueError("Unqueued profiles must omit queue_name, not supply an empty string")
+        raise ValueError(
+            "Unqueued and default-queue profiles must omit queue_name entirely "
+            "(not null, empty or a name)"
+        )
     if payload.get("backend", "ray") != "ray":
         raise ValueError("This live lifecycle currently verifies the Ray backend only")
     for field in ("model", "dataset", "algorithm", "output"):

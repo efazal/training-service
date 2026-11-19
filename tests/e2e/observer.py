@@ -119,12 +119,12 @@ class Observer:
             raise ObserverError(
                 "Kueue APIs exist: use a Kueue-absent environment or record unqueued-opt-out"
             )
-        if profile == "with-kueue":
+        if profile in {"with-kueue", "default-queue"}:
             if not kueue:
                 raise ObserverError(
                     "Kueue API group is absent; install Kueue and its RayJob integration"
                 )
-            self.queue = payload["queue_name"]
+            self.queue = payload["queue_name"] if profile == "with-kueue" else self.default_queue()
             self.queue_preflight(project.metadata.labels or {}, payload)
         self.inventory()  # Fail on insufficient observer permissions before POST.
         # Preserve metadata only; never read Secrets or their values.
@@ -136,6 +136,30 @@ class Observer:
                     claim, self.project, _request_timeout=TIMEOUT
                 )
                 self.preserved.append((claim, record.metadata.uid))
+
+    def default_queue(self):
+        """The one LocalQueue an omitted queue_name must resolve to."""
+        try:
+            queues = self.listing("localqueues", "kueue.x-k8s.io", "v1beta1")
+        except ApiException as error:
+            raise ObserverError(
+                f"LocalQueues in namespace '{self.project}': listing failed; "
+                f"check Kueue installation and observer permissions (HTTP {error.status})"
+            ) from None
+        names = [
+            queue["metadata"]["name"]
+            for queue in queues
+            if str(
+                (queue["metadata"].get("annotations") or {}).get("kueue.x-k8s.io/default-queue")
+            ).lower()
+            == "true"
+        ]
+        if len(names) != 1:
+            raise ObserverError(
+                f"default-queue requires exactly one LocalQueue annotated "
+                f"kueue.x-k8s.io/default-queue=true in '{self.project}'; found {len(names)}"
+            )
+        return names[0]
 
     def queue_preflight(self, labels, payload):
         context = f"LocalQueue '{self.project}/{self.queue}'"
@@ -218,7 +242,7 @@ class Observer:
             selected_queue = job["metadata"].get("labels", {}).get("kueue.x-k8s.io/queue-name")
             if self.profile in {"no-kueue", "unqueued-opt-out"} and selected_queue:
                 raise ValueError(
-                    "SDK selected a default queue; this is not unqueued execution proof"
+                    "A default queue was selected; this is not unqueued execution proof"
                 )
             if self.queue and selected_queue != self.queue:
                 raise ValueError("RayJob did not preserve the selected LocalQueue")

@@ -210,6 +210,8 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
     assert receipt["project"] == api.project
     assert receipt["status"] == "SUBMITTED"
     assert receipt["selected_backend"] == payload.get("backend", "ray")
+    if "queue_name" in payload:
+        assert receipt.get("queue_name") == payload["queue_name"]
     # Never follow a server-supplied URL with the bearer token.
     assert response.headers.get("location") == path
 
@@ -221,8 +223,10 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
     assert detail.get("submission") == payload
     assert detail.get("created_at")
     assert detail.get("selected_backend") == payload.get("backend", "ray")
-    if "queue_name" in payload:
-        assert detail.get("queue_name") == payload["queue_name"]
+    # An omitted selection resolves to the observed project default, if any.
+    expected_queue = payload.get("queue_name") or (observer.queue if observer else None)
+    if expected_queue or (observer and observer.profile in {"no-kueue", "unqueued-opt-out"}):
+        assert detail.get("queue_name") == expected_queue
     # A GPU-free GRPO head makes node groups heterogeneous; the service omits resources.
     if "resources" in payload and payload["algorithm"]["name"] != "lora_grpo":
         assert detail.get("resources")
@@ -241,6 +245,12 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
     )
 
     api.find_job(job_id)
+    if expected_queue:
+        listed = api.find_job(job_id, queue_name=expected_queue)
+        assert listed["queue_name"] == expected_queue
+        assert (
+            api.page({"limit": 20, "queue_name": "e2e-unselected-" + job_id[-16:]})["items"] == []
+        )
 
     deadline = time.monotonic() + pytestconfig.getoption("job_timeout")
     check_logs = pytestconfig.getoption("check_logs") or pytestconfig.getoption("check_stream")
