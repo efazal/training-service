@@ -96,6 +96,40 @@
           }
         }
       }
+    },
+    "mlflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "grantTrainingAccess",
+        "server"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "grantTrainingAccess": {
+          "type": "boolean"
+        },
+        "server": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "create",
+            "storageSize"
+          ],
+          "properties": {
+            "create": {
+              "type": "boolean"
+            },
+            "storageSize": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"
+            }
+          }
+        }
+      }
     }
   },
   "required": [

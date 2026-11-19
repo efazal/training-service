@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shlex
+import zlib
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +42,7 @@ from training_service.kubernetes_client import (
 from training_service.kueue_preflight import resolve_local_queue
 from training_service.log_config import LogBackendConfig, LogBackendResolver
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
+from training_service.metrics import tracking as metrics_tracking
 from training_service.ray_entrypoint import get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_backend import JobBackend
@@ -245,9 +247,39 @@ class _MetadataRayJob(RayJob):
 
 def _entrypoint(configuration: dict[str, Any]) -> str:
     source = Path(__file__).with_name("ray_entrypoint.py").read_text(encoding="utf-8")
-    program = source + "\nmain(" + repr(configuration) + ")\n"
-    encoded = base64.b64encode(program.encode("utf-8")).decode("ascii")
-    return "python -c " + shlex.quote(f'import base64; exec(base64.b64decode("{encoded}"))')
+    bootstrap = ""
+    if configuration.get("mlflow"):
+        directory = Path(__file__).with_name("metrics")
+        modules = {
+            "training_service_metrics_client": (directory / "client.py").read_text(),
+            "training_service_metrics_runtime": (directory / "runtime.py").read_text(),
+            "training_service_metrics_callback": (directory / "callback.py").read_text(),
+        }
+        # Real files preserve inspect.getsource across Training Hub's torchrun boundary.
+        bootstrap = (
+            "\nimport os\n"
+            "_metrics_dir = Path('/tmp/training-api/metrics')\n"
+            "_metrics_dir.mkdir(parents=True, exist_ok=True)\n"
+            f"for _name, _source in {modules!r}.items():\n"
+            "    (_metrics_dir / (_name + '.py')).write_text(_source)\n"
+            "sys.path.insert(0, str(_metrics_dir))\n"
+            "os.environ['PYTHONPATH'] = str(_metrics_dir) + os.pathsep + "
+            "os.environ.get('PYTHONPATH', '')\n"
+        )
+    program = source + bootstrap + "\nmain(" + repr(configuration) + ")\n"
+    if configuration.get("mlflow"):
+        # Added portable modules must not push accepted requests over exec's argument limit.
+        encoded = base64.b64encode(zlib.compress(program.encode("utf-8"))).decode("ascii")
+        command = "python -c " + shlex.quote(
+            f'import base64, zlib; exec(zlib.decompress(base64.b64decode("{encoded}")))'
+        )
+    else:
+        encoded = base64.b64encode(program.encode("utf-8")).decode("ascii")
+        command = "python -c " + shlex.quote(f'import base64; exec(base64.b64decode("{encoded}"))')
+    # Leave room for KubeRay's shell wrapper below Linux's 128 KiB per-argument limit.
+    if len(command.encode("utf-8")) > 120 * 1024:
+        raise _invalid("The generated training command exceeds the supported size.")
+    return command
 
 
 def _storage_plan(
@@ -481,46 +513,103 @@ class CodeFlareJobBackend:
             memory = resources.memory_per_node or "16Gi"
             workers = (resources.num_nodes or 1) - 1
             layout = backend.cluster_options(gpu_count, cpu, memory, resolved)
-            cluster = ClusterConfiguration(
-                image=self._image,
-                num_workers=workers,
-                head_cpu_requests=layout["head_cpu"],
-                head_cpu_limits=layout["head_cpu"],
-                head_memory_requests=layout["head_memory"],
-                head_memory_limits=layout["head_memory"],
-                head_extended_resource_requests={gpu_type: layout["head_gpu_count"]}
-                if layout["head_gpu_count"]
-                else {},
-                worker_cpu_requests=cpu,
-                worker_cpu_limits=cpu,
-                worker_memory_requests=memory,
-                worker_memory_limits=memory,
-                worker_extended_resource_requests={gpu_type: gpu_count} if gpu_count else {},
-                envs=layout["envs"],
-                volumes=volumes,
-                volume_mounts=mounts,
-            )
-            job = _MetadataRayJob(
-                job_name=request.name,
-                namespace=project,
-                entrypoint=_entrypoint(
+            tracked = None
+            mlflow = None
+            uri = metrics_tracking.discover()
+            if uri:
+                ca_file = self.log_configuration().ca_file
+                metrics_tracking.verify_training_access(project)
+                tracked = metrics_tracking.reserve(
+                    uri,
+                    project,
+                    token,
+                    request.mlflow_experiment_name,
+                    request.name,
+                    request.algorithm.name,
+                    caller.username,
                     {
-                        **resolved,
-                        "algorithm": request.algorithm.name,
-                        "parameters": parameters,
+                        "num_nodes": workers + 1,
                         "gpus_per_node": gpu_count,
-                        "num_workers": workers,
+                        "cpus_per_node": cpu,
+                        "memory_per_node": memory,
+                    },
+                    ca_file=ca_file,
+                    parameters=parameters,
+                    details={
+                        "algorithm": request.algorithm.name,
+                        "runtime_image": self._image,
+                        "model_uri": request.model.uri.root,
+                        "dataset_uri": request.dataset.uri.root,
+                        "output_uri": request.output.destination_uri,
+                        **({"queue_name": queue} if queue else {}),
+                    },
+                )
+                annotations[metrics_tracking.ANNOTATION] = json.dumps(
+                    {
+                        **tracked.metadata(),
+                        "tracking_uri": uri,
+                        "project": project,
                     }
-                ),
-                cluster_config=cluster,
-                local_queue=queue,
-                annotations=annotations,
-                api_client=api_client,
-            )
-            identifier = str(job.submit())
-            if identifier != request.name:
-                raise RuntimeError("CodeFlare returned an unexpected RayJob identifier")
-            return identifier
+                )
+            elif request.mlflow_experiment_name is not None:
+                raise metrics_tracking.unavailable()
+            try:
+                metrics_environment = {}
+                if tracked is not None:
+                    mlflow = tracked.configuration(ca_file)
+                    # Trust is public data, but a full root bundle exceeds exec's single-
+                    # argument limit. Carry it on the Ray pods, in bounded env entries.
+                    bundle = mlflow.pop("ca_bundle", "")
+                    metrics_environment = {
+                        f"TRAINING_SERVICE_MLFLOW_CA_{index}": bundle[offset : offset + 16384]
+                        for index, offset in enumerate(range(0, len(bundle), 16384))
+                    }
+                    mlflow["ca_bundle_parts"] = str(len(metrics_environment))
+                cluster = ClusterConfiguration(
+                    image=self._image,
+                    num_workers=workers,
+                    head_cpu_requests=layout["head_cpu"],
+                    head_cpu_limits=layout["head_cpu"],
+                    head_memory_requests=layout["head_memory"],
+                    head_memory_limits=layout["head_memory"],
+                    head_extended_resource_requests={gpu_type: layout["head_gpu_count"]}
+                    if layout["head_gpu_count"]
+                    else {},
+                    worker_cpu_requests=cpu,
+                    worker_cpu_limits=cpu,
+                    worker_memory_requests=memory,
+                    worker_memory_limits=memory,
+                    worker_extended_resource_requests={gpu_type: gpu_count} if gpu_count else {},
+                    envs={**layout["envs"], **metrics_environment},
+                    volumes=volumes,
+                    volume_mounts=mounts,
+                )
+                job = _MetadataRayJob(
+                    job_name=request.name,
+                    namespace=project,
+                    entrypoint=_entrypoint(
+                        {
+                            **resolved,
+                            "algorithm": request.algorithm.name,
+                            "parameters": parameters,
+                            "gpus_per_node": gpu_count,
+                            "num_workers": workers,
+                            **({"mlflow": mlflow} if mlflow else {}),
+                        }
+                    ),
+                    cluster_config=cluster,
+                    local_queue=queue,
+                    annotations=annotations,
+                    api_client=api_client,
+                )
+                identifier = str(job.submit())
+                if identifier != request.name:
+                    raise RuntimeError("CodeFlare returned an unexpected RayJob identifier")
+                return identifier
+            except Exception:
+                if tracked is not None:
+                    tracked.failed_submission()
+                raise
 
     def list_jobs(
         self,
@@ -606,6 +695,21 @@ class CodeFlareJobBackend:
                     ),
                     _request_timeout=TIMEOUT,
                 )
+
+        if metrics_tracking.metadata(job, project):
+            try:
+                metrics_tracking.finalize_deleted(
+                    job, project, request.headers["authorization"], self.log_configuration().ca_file
+                )
+            except (
+                ApiError,
+                metrics_tracking.TrackingError,
+                OSError,
+                KeyError,
+                TypeError,
+                ValueError,
+            ):
+                _LOG.warning("Training job deleted; its MLflow run could not be finalized.")
 
     def log_client(self, request: Request, project: str, name: str) -> tuple[LogClient, str]:
         validate_names(project, name)
@@ -736,6 +840,8 @@ def detail(job: dict[str, Any], project: str) -> dict[str, Any]:
         result["failure_reason"] = state["message"]
     if resources := _resources(job.get("spec", {}).get("rayClusterSpec", {})):
         result["resources"] = resources
+    if tracked := metrics_tracking.metadata(job, project):
+        result.update(mlflow_url=tracked["url"], mlflow_run_id=tracked["run_id"])
     return result
 
 

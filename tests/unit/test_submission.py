@@ -6,6 +6,7 @@ import base64
 import json
 import shlex
 import sys
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -26,6 +27,7 @@ from fastapi.testclient import TestClient
 from huggingface_hub.errors import RepositoryNotFoundError
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
+from requests.certs import where
 
 from training_service import (
     catalog,
@@ -2275,6 +2277,136 @@ def mock_queue_preflight(monkeypatch):
     monkeypatch.setattr(kueue_preflight, "preflight", check)
     monkeypatch.setattr(kueue_preflight, "default_queue", Mock(return_value=None))
     return check
+
+
+@pytest.mark.parametrize("full_trust_bundle", [False, True])
+def test_tracked_submission_persists_run_and_never_embeds_caller_credential(
+    monkeypatch, tmp_path, full_trust_bundle
+):
+    from training_service.metrics import tracking
+    from training_service.metrics.client import TrackingClient
+
+    _mock_sdk(monkeypatch)
+    body = _sample()
+    body.mlflow_experiment_name = "Fine tuning"
+    backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+    bundle = Path(where()).read_text() if full_trust_bundle else ""
+    ca_file = tmp_path / "public-ca.pem"
+    ca_file.write_text(bundle)
+    monkeypatch.setattr(
+        backend,
+        "log_configuration",
+        lambda: SimpleNamespace(ca_file=str(ca_file) if full_trust_bundle else None),
+    )
+    monkeypatch.setattr(tracking, "discover", lambda: "https://tracking.example/mlflow")
+    access = Mock()
+    monkeypatch.setattr(tracking, "verify_training_access", access)
+    run = tracking.TrackedRun(
+        TrackingClient("https://tracking.example/mlflow", "team-alpha", lambda: "caller-secret"),
+        "a" * 32,
+        "42",
+        "Fine tuning",
+    )
+    reserve = Mock(return_value=run)
+    monkeypatch.setattr(tracking, "reserve", reserve)
+    assert (
+        backend._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "caller-secret")
+        == body.name
+    )
+    access.assert_called_once_with("team-alpha")
+    assert reserve.call_args.args[:4] == (
+        "https://tracking.example/mlflow",
+        "team-alpha",
+        "caller-secret",
+        "Fine tuning",
+    )
+    resource = FakeRayJob.instances[0].kwargs
+    # KubeRay passes the whole entrypoint through one /bin/bash -c argument.
+    assert len(resource["entrypoint"].encode()) < 120 * 1024
+    assert json.loads(resource["annotations"][tracking.ANNOTATION])["run_id"] == "a" * 32
+    command = shlex.split(resource["entrypoint"])
+    program = zlib.decompress(base64.b64decode(command[2].split('"')[1])).decode()
+    assert "caller-secret" not in program
+    assert "caller-secret" not in json.dumps(resource["annotations"])
+    assert "BEGIN CERTIFICATE" not in program
+    with client.ApiClient() as serializer:
+        cluster = serializer.sanitize_for_serialization(
+            build_ray_cluster_spec(resource["cluster_config"], "metrics-cluster")
+        )
+    env = {
+        item["name"]: item["value"]
+        for item in cluster["headGroupSpec"]["template"]["spec"]["containers"][0]["env"]
+        if item["name"].startswith("TRAINING_SERVICE_MLFLOW_CA_")
+    }
+    assert "".join(env[f"TRAINING_SERVICE_MLFLOW_CA_{i}"] for i in range(len(env))) == bundle
+    assert all(len(value.encode()) <= 16 * 1024 for value in env.values())
+
+
+def test_tracking_permission_failure_prevents_rayjob_creation(monkeypatch):
+    from training_service.metrics import tracking
+
+    _mock_sdk(monkeypatch)
+    backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+    monkeypatch.setattr(backend, "log_configuration", lambda: SimpleNamespace(ca_file=None))
+    monkeypatch.setattr(tracking, "discover", lambda: "https://tracking.example/mlflow")
+    monkeypatch.setattr(
+        tracking,
+        "verify_training_access",
+        Mock(side_effect=ApiError(403, "metrics_forbidden", "Training account denied")),
+    )
+    with pytest.raises(ApiError) as raised:
+        backend._submit_sync(
+            "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert raised.value.status_code == 403
+    assert FakeRayJob.instances == []
+
+
+@pytest.mark.parametrize("experiment", [None, "Required experiment"])
+def test_absent_mlflow_is_optional_unless_experiment_explicitly_requested(monkeypatch, experiment):
+    from training_service.metrics import tracking
+
+    _mock_sdk(monkeypatch)
+    monkeypatch.setattr(tracking, "discover", lambda: None)
+    body = _sample()
+    body.mlflow_experiment_name = experiment
+    backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+    if experiment is not None:
+        with pytest.raises(ApiError) as raised:
+            backend._submit_sync(
+                "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+            )
+        assert raised.value.status_code == 503
+        assert raised.value.code == "metrics_unavailable"
+        assert FakeRayJob.instances == []
+    else:
+        assert (
+            backend._submit_sync(
+                "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+            )
+            == body.name
+        )
+        assert tracking.ANNOTATION not in FakeRayJob.instances[0].kwargs["annotations"]
+
+
+def test_failed_submission_finalizes_reserved_mlflow_run(monkeypatch):
+    from training_service.metrics import tracking
+
+    _mock_sdk(monkeypatch)
+    backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+    monkeypatch.setattr(backend, "log_configuration", lambda: SimpleNamespace(ca_file=None))
+    monkeypatch.setattr(tracking, "discover", lambda: "https://tracking.example/mlflow")
+    monkeypatch.setattr(tracking, "verify_training_access", lambda project: None)
+    run = Mock()
+    run.metadata.return_value = {"run_id": "a" * 32}
+    run.configuration.return_value = {"run_id": "a" * 32}
+    monkeypatch.setattr(tracking, "reserve", Mock(return_value=run))
+    FakeRayJob.error = ApiException(status=409)
+    with pytest.raises(ApiException):
+        backend._submit_sync(
+            "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+        )
+    run.failed_submission.assert_called_once()
 
 
 def test_queued_submission_without_get_runs_preflight(monkeypatch, mock_queue_preflight):

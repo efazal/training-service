@@ -443,6 +443,7 @@ training fixture described above. Constraints absent from a runtime skip visibly
 | Option | Purpose |
 | --- | --- |
 | `--job-timeout 1800` | Training deadline, seconds |
+| `--mlflow-url https://YOUR_GATEWAY/mlflow` | With `--job-file`, require real callback metrics and a readable run after job deletion; see [metrics coverage](../../docs/metrics.md) |
 | `--stream-timeout 60` | SSE deadline; socket reads bounded too |
 | `--log-stream-max-seconds N` | Expected deployed limit; with `--check-stream`, also measure omitted-timeout and above-limit requests |
 | `--cleanup-timeout 180` | Terminal/resource cleanup deadline |

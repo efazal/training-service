@@ -107,6 +107,8 @@ spec:
               path: /readyz
               port: http
           env:
+            - name: TRAINING_SERVICE_MLFLOW_ENABLED
+              value: {{ .Values.mlflow.enabled | quote }}
             {{- if .Values.writableTemp.enabled }}
             - name: HF_HOME
               value: /tmp/huggingface

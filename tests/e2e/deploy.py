@@ -126,6 +126,9 @@ def arguments(argv=None):
         help="Run all four supported Training Hub algorithms instead of baseline LoRA only",
     )
     parser.add_argument("--stream-timeout", type=int, default=60)
+    parser.add_argument(
+        "--mlflow-url", help="Trusted MLflow URL; require persistent training metrics."
+    )
     parser.add_argument("--cleanup-timeout", type=int, default=180)
     parser.add_argument("--results-dir", type=Path, default=ROOT / "artifacts/e2e")
     return parser.parse_args(argv)
@@ -454,6 +457,8 @@ def run(args):
             test_args.append("--check-stream")
         if args.forbidden_project:
             test_args += ["--forbidden-project", args.forbidden_project]
+        if args.mlflow_url:
+            test_args += ["--mlflow-url", args.mlflow_url]
         print(f"Testing {url}; results: {results}", flush=True)
         from tests.e2e.algorithms import ALGORITHMS
 
@@ -474,6 +479,8 @@ def run(args):
             lifecycle_path = results / filename
             lifecycle = json.loads(lifecycle_path.read_text()) if lifecycle_path.is_file() else {}
             required = ("succeeded", "queue_admitted", "gpu_cleanup", "snapshot_logs")
+            if args.mlflow_url:
+                required += ("mlflow",)
             if not args.algorithm_matrix:
                 required += ("sse",)
             if not all(lifecycle.get(key) for key in required) or not isinstance(

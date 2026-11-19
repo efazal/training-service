@@ -30,6 +30,13 @@ class TrainingJob(ContractModel):
     Schema: TrainingJob in docs/api/openapi.yaml.
     """
 
+    mlflow_url: StrictStr | None = Field(
+        default=None,
+        description="Link to this job's persistent MLflow run, when tracking is enabled.",
+    )
+    mlflow_run_id: StrictStr | None = Field(
+        default=None, description="Persistent MLflow run identifier, when tracking is enabled."
+    )
     id: StrictStr = Field(
         description="Job ID within the project.",
         json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]},

@@ -55,6 +55,17 @@ class CreateJobRequest(ContractModel):
     dataset: DatasetSpec
     algorithm: AlgorithmSpec
     resources: ResourceSpec | None = None
+    mlflow_experiment_name: (
+        Annotated[str, Field(min_length=1, strict=True, max_length=256)] | None
+    ) = Field(
+        default=None,
+        description=(
+            "MLflow experiment name in this project. Defaults to Default when "
+            "MLflow is available. Supplying a name requires MLflow tracking to be "
+            "available."
+        ),
+        json_schema_extra={"examples": ["model-fine-tuning"]},
+    )
     output: OutputSpec
 
     @field_validator("name")
@@ -62,6 +73,16 @@ class CreateJobRequest(ContractModel):
         """Validates the regular expression"""
         if not re.match(r"^[a-z]([-a-z0-9]*[a-z0-9])?$", value):
             raise ValueError(r"must validate the regular expression /^[a-z]([-a-z0-9]*[a-z0-9])?$/")
+        return value
+
+    @field_validator("mlflow_experiment_name")
+    def mlflow_experiment_name_validate_regular_expression(cls, value):
+        """Validates the regular expression"""
+        if value is None:
+            return value
+
+        if not re.match(r"\S", value):
+            raise ValueError(r"must validate the regular expression /\S/")
         return value
 
     model_config = ConfigDict(

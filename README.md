@@ -31,6 +31,9 @@ selecting an image; GRPO requires a compatible verl/TRL runtime. The queue
 discovery endpoint lists project LocalQueues after checking Kueue readiness and
 project eligibility. See [Kueue preflight](docs/kueue-preflight.md) for setup and errors.
 
+Training runs can retain lifecycle, training and resource metrics in MLflow.
+See [training metrics](docs/metrics.md) for setup, coverage and API fields.
+
 ## Development
 
 Use Python 3.11+, [uv](https://docs.astral.sh/uv/), Helm 3, and Podman.

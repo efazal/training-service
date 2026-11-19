@@ -56,6 +56,19 @@ logBackend:
     key: ca-bundle.crt
     bundle: ""
 
+mlflow:
+  # Automatically track jobs when the managed MLflow singleton is available.
+  enabled: true
+  # Grant this namespace's service accounts experiment access, including Ray's
+  # generated accounts. Other training projects need the same scoped grant.
+  grantTrainingAccess: true
+  server:
+    # The platform administrator normally provisions this cluster-wide singleton.
+    # Enable only for an initial development installation with the operator enabled.
+    # An existing MLflow/mlflow is reused. Helm retains a newly created server.
+    create: false
+    storageSize: 10Gi
+
 # Additional settings. Prefer the structured settings above and trainingRuntime.image.
 # Legacy gateway/CA environment variables remain supported; do not configure both.
 env: []

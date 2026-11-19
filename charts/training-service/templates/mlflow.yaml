@@ -1,0 +1,76 @@
+{{- if .Values.mlflow.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "training-service.rbacName" . }}-mlflow-discovery
+rules:
+  - apiGroups: [mlflow.opendatahub.io]
+    resources: [mlflows]
+    resourceNames: [mlflow]
+    verbs: [get]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "training-service.rbacName" . }}-mlflow-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "training-service.rbacName" . }}-mlflow-discovery
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "training-service.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace | quote }}
+{{- if .Values.mlflow.grantTrainingAccess }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "training-service.fullname" . }}-mlflow-training
+rules:
+  - apiGroups: [mlflow.kubeflow.org]
+    resources: [experiments]
+    verbs: [get, list, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "training-service.fullname" . }}-mlflow-training
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "training-service.fullname" . }}-mlflow-training
+subjects:
+  # Ray creates a separate OAuth service account for each cluster.
+  - kind: Group
+    name: {{ printf "system:serviceaccounts:%s" .Release.Namespace | quote }}
+{{- end }}
+{{- if .Values.mlflow.server.create }}
+{{- if not (.Capabilities.APIVersions.Has "mlflow.opendatahub.io/v1") }}
+{{- fail "Enable the RHOAI MLflow operator before setting mlflow.server.create=true." }}
+{{- end }}
+{{- $server := lookup "mlflow.opendatahub.io/v1" "MLflow" "" "mlflow" }}
+{{- $annotations := dig "metadata" "annotations" (dict) $server }}
+{{- $owned := and (eq (get $annotations "meta.helm.sh/release-name") .Release.Name) (eq (get $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
+{{- if or (not $server) $owned }}
+---
+apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  artifactsDestination: file:///mlflow/artifacts
+  serveArtifacts: true
+  storage:
+    accessModes: [ReadWriteOnce]
+    resources:
+      requests:
+        storage: {{ .Values.mlflow.server.storageSize | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

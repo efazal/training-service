@@ -12,6 +12,67 @@ CHART = Path(__file__).parents[2] / "charts/training-service"
 pytestmark = pytest.mark.skipif(not shutil.which("helm"), reason="helm is not installed")
 
 
+def test_mlflow_permissions_are_project_scoped_and_server_is_optional(tmp_path):
+    result = render(tmp_path, {})
+    assert result.returncode == 0, result.stderr
+    docs = list(yaml.safe_load_all(result.stdout))
+    assert not any(d["kind"] == "MLflow" for d in docs)
+    role = next(
+        d
+        for d in docs
+        if d["kind"] == "Role" and d["metadata"]["name"].endswith("-mlflow-training")
+    )
+    assert role["rules"] == [
+        {
+            "apiGroups": ["mlflow.kubeflow.org"],
+            "resources": ["experiments"],
+            "verbs": ["get", "list", "create", "update"],
+        }
+    ]
+    assert not any(
+        d["kind"] == "ClusterRoleBinding" and "mlflow-training" in d["metadata"]["name"]
+        for d in docs
+    )
+    binding = next(
+        d
+        for d in docs
+        if d["kind"] == "RoleBinding" and d["metadata"]["name"].endswith("-mlflow-training")
+    )
+    assert binding["subjects"] == [{"kind": "Group", "name": "system:serviceaccounts:default"}]
+    disabled = render(tmp_path, {"mlflow": {"enabled": False}})
+    assert disabled.returncode == 0, disabled.stderr
+    assert "-mlflow-training" not in disabled.stdout
+
+
+def test_mlflow_server_creation_requires_installed_operator(tmp_path):
+    result = render(tmp_path, {"mlflow": {"server": {"create": True}}})
+    assert result.returncode != 0
+    assert "Enable the RHOAI MLflow operator" in result.stderr
+
+
+def test_optional_mlflow_server_has_persistent_storage_and_is_retained():
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "validation",
+            str(CHART),
+            "--api-versions",
+            "mlflow.opendatahub.io/v1",
+            "--set",
+            "mlflow.server.create=true",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    server = next(d for d in yaml.safe_load_all(result.stdout) if d["kind"] == "MLflow")
+    assert server["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+    assert server["spec"]["storage"]["resources"]["requests"]["storage"] == "10Gi"
+    assert server["spec"]["serveArtifacts"] is True
+
+
 def render(tmp_path, values, namespace="default"):
     path = tmp_path / "values.yaml"
     path.write_text(yaml.safe_dump(values))

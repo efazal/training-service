@@ -102,6 +102,7 @@ paths:
         Validate and submit a training job in the specified project. Reference existing model,
         dataset, and output storage in that project. An S3 or PVC output destination is required
         to retain trained model artifacts. Use the returned ID to check status or retrieve logs.
+        When available, metrics are retained in a project-scoped MLflow run.
       operationId: createTrainingJob
       x-submission-context: true
       x-project-authorization:
@@ -851,6 +852,16 @@ components:
           $ref: '#/components/schemas/AlgorithmSpec'
         resources:
           $ref: '#/components/schemas/ResourceSpec'
+        mlflow_experiment_name:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 256
+          pattern: '\S'
+          description: >-
+            MLflow experiment name in this project. Defaults to Default when MLflow is
+            available. Supplying a name requires MLflow tracking to be available.
+          example: model-fine-tuning
         output:
           $ref: '#/components/schemas/OutputSpec'
 
@@ -1062,6 +1073,15 @@ components:
         - status
         - selected_backend
       properties:
+        mlflow_url:
+          type: string
+          format: uri
+          readOnly: true
+          description: Link to this job's persistent MLflow run, when tracking is enabled.
+        mlflow_run_id:
+          type: string
+          readOnly: true
+          description: Persistent MLflow run identifier, when tracking is enabled.
         id:
           type: string
           description: "Job ID within the project."
@@ -1280,6 +1300,8 @@ components:
             - authentication_unavailable
             - authorization_unavailable
             - submission_unavailable
+            - metrics_unavailable
+            - metrics_forbidden
             - not_implemented
             - backend_unavailable
             - conflict

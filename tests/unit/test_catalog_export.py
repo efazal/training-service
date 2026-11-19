@@ -74,6 +74,26 @@ def test_export_uses_registry_and_preserves_schemas(exported):
     assert not {"data_path", "model_path", "reward_fn"} & schema["properties"].keys()
 
 
+def test_callbacks_and_tracking_destination_are_managed_by_service():
+    def future_algorithm(
+        model_path: str,
+        data_path: str,
+        callbacks: list | None = None,
+        mlflow_tracking_uri: str | None = None,
+        mlflow_experiment_name: str | None = None,
+        mlflow_run_name: str | None = None,
+        learning_rate: float = 0.001,
+    ):
+        pass
+
+    exporter = runpy.run_path(str(EXPORTER))
+    hub = SimpleNamespace(AlgorithmRegistry=Registry, future_algorithm=future_algorithm)
+    schema = exporter["describe"](hub, "future_algorithm")["parameter_schema"]
+    assert set(schema["properties"]) == {"learning_rate"}
+    assert schema["x-training-hub"]["supports_callbacks"] is True
+    assert "callbacks" not in schema["x-training-hub"]["unavailable_callable_parameters"]
+
+
 def test_grpo_export_uses_only_the_full_parameter_entrypoint(exported):
     algorithm = next(item for item in exported["algorithms"] if item["name"] == "grpo")
     schema = algorithm["parameter_schema"]

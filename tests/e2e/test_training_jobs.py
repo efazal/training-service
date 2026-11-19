@@ -335,9 +335,18 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             )
 
     # A terminal job must be included with and without the explicit status filter.
+    mlflow_result = None
+    mlflow_url = pytestconfig.getoption("mlflow_url")
+    if mlflow_url:
+        from tests.e2e.mlflow import verify_run
+
+        mlflow_result = verify_run(api, mlflow_url, detail)
     assert api.find_job(job_id)["status"] == "SUCCEEDED"
     assert api.find_job(job_id, status="SUCCEEDED")["status"] == "SUCCEEDED"
     api.cleanup(job_id, pytestconfig.getoption("cleanup_timeout"), payload)
+    if mlflow_url:
+        # Query MLflow independently after DELETE, without using the deleted job endpoint.
+        assert verify_run(api, mlflow_url, detail) == mlflow_result
     if observer:
         try:
             observer.verify_cleanup(job_id, pytestconfig.getoption("cleanup_timeout"))
@@ -365,6 +374,7 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             "gpu_cleanup": bool(observer and observer.saw_gpu),
             "queue_admitted": bool(observer and observer.admitted),
             "artifacts": artifact_result or "not verified: no --artifact-pod selected",
+            "mlflow": mlflow_result,
         }
         name = payload["algorithm"]["name"]
         filename = (

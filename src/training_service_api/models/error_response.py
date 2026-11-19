@@ -48,6 +48,8 @@ class ErrorResponse(ContractModel):
             "authentication_unavailable",
             "authorization_unavailable",
             "submission_unavailable",
+            "metrics_unavailable",
+            "metrics_forbidden",
             "not_implemented",
             "backend_unavailable",
             "conflict",
@@ -63,9 +65,10 @@ class ErrorResponse(ContractModel):
                 "'kueue_project_excluded', 'logs_not_ready', 'ray_cluster_gone', "
                 "'unsupported_media_type', 'validation_error', "
                 "'authentication_unavailable', 'authorization_unavailable', "
-                "'submission_unavailable', 'not_implemented', 'backend_unavailable', "
-                "'conflict', 'invalid_page_token', 'unowned_cluster', "
-                "'shared_cluster', 'logs_unavailable', 'stream_expired')"
+                "'submission_unavailable', 'metrics_unavailable', 'metrics_forbidden', "
+                "'not_implemented', 'backend_unavailable', 'conflict', "
+                "'invalid_page_token', 'unowned_cluster', 'shared_cluster', "
+                "'logs_unavailable', 'stream_expired')"
             )
         return value
 

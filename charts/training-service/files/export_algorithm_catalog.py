@@ -34,6 +34,10 @@ MANAGED = {
     "master_port",
     "art_path",
     "checkpoint_storage",
+    "callbacks",
+    "mlflow_tracking_uri",
+    "mlflow_experiment_name",
+    "mlflow_run_name",
 }
 
 
@@ -150,6 +154,7 @@ def describe(hub: Any, name: str) -> dict[str, Any]:
             "unavailable_callable_parameters": unavailable,
             "unavailable_required_parameters": unavailable_required,
             "managed_parameters": sorted(MANAGED - {"self"}),
+            "supports_callbacks": "callbacks" in parameters,
         },
     }
     if "default" in backend_schema:

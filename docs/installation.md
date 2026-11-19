@@ -13,6 +13,10 @@ RHOAI 3.6 Developer Preview supports Ray as the training backend.
   for authentication and gateway discovery, plus a Role in `openshift-config-managed`.
   API callers use their own project permissions.
 
+For persistent experiment tracking, the chart also discovers the managed MLflow
+server and grants training service accounts access in the installation project.
+See [training metrics](metrics.md) for platform setup and other training projects.
+
 The chart installs Training Service. It does not install Ray or prepare model
 and dataset storage.
 

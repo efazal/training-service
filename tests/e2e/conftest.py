@@ -39,6 +39,10 @@ def pytest_addoption(parser):
     group.addoption("--request-timeout", type=int, default=30, help="HTTP timeout in seconds.")
     group.addoption("--check-logs", action="store_true", help="Require a non-empty log snapshot.")
     group.addoption(
+        "--mlflow-url",
+        help="Trusted managed MLflow URL; require real metrics and history after deletion.",
+    )
+    group.addoption(
         "--check-stream", action="store_true", help="Require incremental SSE driver logs."
     )
     group.addoption("--stream-timeout", type=int, default=60)
@@ -113,6 +117,7 @@ def pytest_configure(config):
         "artifact_pod",
         "queue_profile",
         "algorithm_matrix",
+        "mlflow_url",
     ):
         if config.getoption(option) and not config.getoption("job_file"):
             raise pytest.UsageError(f"--{option.replace('_', '-')} requires --job-file")
