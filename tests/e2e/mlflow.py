@@ -1,5 +1,7 @@
 """Independent MLflow oracle; never send a token to a job-provided URL."""
 
+import hashlib
+import json
 import math
 import os
 from urllib.parse import urlencode
@@ -7,7 +9,7 @@ from urllib.parse import urlencode
 from training_service.metrics.client import TrackingClient, TrackingError
 
 
-def verify_run(api, uri, detail):
+def verify_run(api, uri, detail, *, detailed=True):
     tracking = TrackingClient(
         uri,
         api.project,
@@ -35,22 +37,32 @@ def verify_run(api, uri, detail):
         tags = {t["key"]: t["value"] for t in run["data"]["tags"]}
         assert tags.get("training.project") == api.project
         assert tags.get("training.job_id") == detail["id"]
-        assert tags.get("tracking.unified_callbacks") == "true", (
-            "Detailed metrics require a callback-enabled runtime and algorithm"
-        )
         values = {m["key"]: m["value"] for m in run["data"]["metrics"]}
-        for key in ("train/loss", "training/epoch", "training/step", "job/duration_seconds"):
-            assert key in values and math.isfinite(values[key]), (
-                f"Missing numeric MLflow metric: {key}"
+        assert math.isfinite(values["job/duration_seconds"])
+        assert values["job/finished_at_unix_seconds"] >= values["job/started_at_unix_seconds"]
+        history = []
+        if detailed:
+            assert tags.get("tracking.unified_callbacks") == "true", (
+                "Detailed metrics require a callback-enabled runtime and algorithm"
             )
-        assert (
-            values["training/finished_at_unix_seconds"]
-            >= values["training/started_at_unix_seconds"]
+            for key in ("train/loss", "training/epoch", "training/step"):
+                assert key in values and math.isfinite(values[key]), (
+                    f"Missing numeric MLflow metric: {key}"
+                )
+            assert (
+                values["training/finished_at_unix_seconds"]
+                >= values["training/started_at_unix_seconds"]
+            )
+            history = tracking.request(
+                "GET", "metrics/get-history", {"run_id": run_id, "metric_key": "train/loss"}
+            )["metrics"]
+            assert history and all(
+                math.isfinite(m["value"]) and m["step"] >= 0 and m["timestamp"] >= 0
+                for m in history
+            )
+        assert tags.get("training.nonfinite_metrics") != "true", (
+            "Training reported nonfinite metrics"
         )
-        history = tracking.request(
-            "GET", "metrics/get-history", {"run_id": run_id, "metric_key": "train/loss"}
-        )["metrics"]
-        assert history and all(math.isfinite(m["value"]) and m["step"] >= 0 for m in history)
         assert tags.get("tracking.delivery") == "complete", "Metric delivery was incomplete"
     except TrackingError:
         raise AssertionError(
@@ -60,5 +72,8 @@ def verify_run(api, uri, detail):
         "run_id": run_id,
         "experiment_id": info["experiment_id"],
         "loss_points": len(history),
+        "loss_history_sha256": hashlib.sha256(
+            json.dumps(sorted((m["step"], m["timestamp"], m["value"]) for m in history)).encode()
+        ).hexdigest(),
         "persisted": True,
     }

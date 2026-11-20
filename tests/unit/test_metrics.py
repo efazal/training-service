@@ -194,9 +194,22 @@ class FakeTracking:
     def __init__(self, *args, **kwargs):
         self.logs = []
         self.finished = []
+        self.batches = []
 
     def log(self, run_id, **kwargs):
         self.logs.append((run_id, kwargs))
+
+    def log_batch(self, run_id, metrics, tags):
+        self.batches.append(metrics)
+        self.log(run_id, tags=tags)
+        for point in metrics:
+            self.log(run_id, metrics={point["key"]: point["value"]}, step=point["step"])
+
+    def get_run(self, run_id):
+        tags = {}
+        for _, call in self.logs:
+            tags.update(call.get("tags", {}))
+        return {"data": {"tags": [{"key": k, "value": v} for k, v in tags.items()]}}
 
     def finish(self, run_id, status):
         self.finished.append((run_id, status))
@@ -337,46 +350,60 @@ def test_resources_measure_pod_cgroup_not_host_memory(monkeypatch, tmp_path):
     }
 
 
-def test_get_job_returns_project_scoped_link_without_contacting_mlflow():
-    obj = client.TrackingClient(CONFIG["tracking_uri"], "team-alpha", lambda: "never-read")
-    run = tracking.TrackedRun(obj, RUN, "42", "Default")
-    job = {
-        "metadata": {
-            "name": "job",
-            "creationTimestamp": "2026-11-19T00:00:00Z",
-            "annotations": {
-                tracking.ANNOTATION: json.dumps(
-                    {**run.metadata(), "tracking_uri": obj.uri, "project": "team-alpha"}
-                )
-            },
-        }
-    }
-    result = jobs.detail(job, "team-alpha")
-    assert result["mlflow_url"] == run.metadata()["url"]
-    assert TrainingJob.model_validate(result).mlflow_run_id == RUN
-    assert tracking.metadata(job, "different-project") is None
-    job["metadata"]["annotations"][tracking.ANNOTATION] = '{"run_id":"not-a-run"}'
-    assert "mlflow_url" not in jobs.detail(job, "team-alpha")
-
-
 def tracked_job(uri=CONFIG["tracking_uri"]):
     obj = client.TrackingClient(uri, "team-alpha", lambda: "never-read")
     run = tracking.TrackedRun(obj, RUN, "42", "Default")
     return {
         "metadata": {
+            "name": "job",
+            "uid": "rayjob-uid",
+            "creationTimestamp": "2026-11-19T00:00:00Z",
             "annotations": {
                 tracking.ANNOTATION: json.dumps(
                     {**run.metadata(), "tracking_uri": uri, "project": "team-alpha"}
                 )
-            }
+            },
         }
     }
+
+
+def bound_response(status="RUNNING", **tags):
+    return {
+        "info": {"run_id": RUN, "experiment_id": "42", "status": status},
+        "data": {
+            "params": [{"key": "training.rayjob_uid", "value": "rayjob-uid"}],
+            "tags": [
+                {"key": k, "value": v}
+                for k, v in {
+                    "training.project": "team-alpha",
+                    "training.job_id": "job",
+                    **tags,
+                }.items()
+            ],
+        },
+    }
+
+
+def test_get_job_returns_only_authenticated_project_scoped_link(monkeypatch):
+    obj = Mock()
+    obj.get_run.return_value = bound_response()
+    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
+    job = tracked_job()
+    assert "mlflow_url" not in jobs.detail(job, "team-alpha")
+    result = jobs.detail(job, "team-alpha") | tracking.public_metadata(
+        job, "team-alpha", "caller", None
+    )
+    assert TrainingJob.model_validate(result).mlflow_run_id == RUN
+    assert tracking.metadata(job, "different-project") is None
+    job["metadata"]["uid"] = "copied-job-uid"
+    assert tracking.public_metadata(job, "team-alpha", "caller", None) == {}
 
 
 @pytest.mark.parametrize("status", ["FINISHED", "FAILED", "KILLED"])
 def test_deletion_preserves_terminal_mlflow_history(monkeypatch, status):
     obj = Mock()
-    obj.request.return_value = {"run": {"info": {"status": status}}}
+    obj.get_run.return_value = bound_response(status)
     monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     tracking.finalize_deleted(tracked_job(), "team-alpha", "caller-credential", None)
@@ -385,11 +412,11 @@ def test_deletion_preserves_terminal_mlflow_history(monkeypatch, status):
 
 
 @pytest.mark.parametrize(
-    "state, expected", [("RUNNING", "KILLED"), ("SUCCEEDED", "FINISHED"), ("FAILED", "FAILED")]
+    "state, expected", [("PENDING", "KILLED"), ("SUCCEEDED", "FINISHED"), ("FAILED", "FAILED")]
 )
 def test_deletion_finalizes_only_unfinished_runs(monkeypatch, state, expected):
     obj = Mock()
-    obj.request.return_value = {"run": {"info": {"status": "RUNNING"}}}
+    obj.get_run.return_value = bound_response()
     monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     job = tracked_job()
@@ -403,8 +430,8 @@ def test_deletion_never_sends_caller_token_to_annotation_selected_server(monkeyp
     monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
     constructor = Mock()
     monkeypatch.setattr(tracking, "TrackingClient", constructor)
-    with pytest.raises(ApiError):
-        tracking.finalize_deleted(job, "team-alpha", "caller-credential", None)
+    tracking.finalize_deleted(job, "team-alpha", "caller-credential", None)
+    assert tracking.public_metadata(job, "team-alpha", "caller", None) == {}
     constructor.assert_not_called()
 
 

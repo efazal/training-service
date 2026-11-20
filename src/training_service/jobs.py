@@ -25,6 +25,7 @@ from jsonschema import ValidationError
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from pydantic import ValidationError as ModelValidationError
+from urllib3.exceptions import HTTPError
 
 from training_service import catalog
 from training_service.auth import CallerIdentity
@@ -557,6 +558,9 @@ class CodeFlareJobBackend:
                 metrics_environment = {}
                 if tracked is not None:
                     mlflow = tracked.configuration(ca_file)
+                    mlflow["expected_ranks"] = str(
+                        gpu_count if request.algorithm.name in {"sft", "osft"} else 1
+                    )
                     # Trust is public data, but a full root bundle exceeds exec's single-
                     # argument limit. Carry it on the Ray pods, in bounded env entries.
                     bundle = mlflow.pop("ca_bundle", "")
@@ -605,11 +609,30 @@ class CodeFlareJobBackend:
                 identifier = str(job.submit())
                 if identifier != request.name:
                     raise RuntimeError("CodeFlare returned an unexpected RayJob identifier")
-                return identifier
             except Exception:
                 if tracked is not None:
                     tracked.failed_submission()
                 raise
+            if tracked is not None:
+                # The job is accepted: tracking bookkeeping must not turn this into a
+                # failed POST for a job that already exists. Missing binding hides the
+                # link and disables API finalization rather than trusting an annotation.
+                for attempt in range(2):
+                    try:
+                        tracked.bind(read_job(api_client, project, identifier))
+                        break
+                    except (
+                        metrics_tracking.TrackingError,
+                        ApiError,
+                        ApiException,
+                        HTTPError,
+                        OSError,
+                    ):
+                        if attempt:
+                            _LOG.warning(
+                                "Training job submitted; MLflow job binding could not be saved."
+                            )
+            return identifier
 
     def list_jobs(
         self,
@@ -663,7 +686,21 @@ class CodeFlareJobBackend:
     def get_job(self, request: Request, project: str, name: str) -> dict[str, Any]:
         validate_names(project, name)
         with caller_client(request) as api:
-            return detail(read_job(api, project, name), project)
+            job = read_job(api, project, name)
+        result = detail(job, project)
+        if metrics_tracking.metadata(job, project):
+            try:
+                result.update(
+                    metrics_tracking.public_metadata(
+                        job,
+                        project,
+                        request.headers["authorization"],
+                        self.log_configuration().ca_file,
+                    )
+                )
+            except ApiError:
+                _LOG.warning("MLflow trust could not be resolved; tracking link omitted.")
+        return result
 
     def delete_job(self, request: Request, project: str, name: str) -> None:
         validate_names(project, name)
@@ -840,8 +877,6 @@ def detail(job: dict[str, Any], project: str) -> dict[str, Any]:
         result["failure_reason"] = state["message"]
     if resources := _resources(job.get("spec", {}).get("rayClusterSpec", {})):
         result["resources"] = resources
-    if tracked := metrics_tracking.metadata(job, project):
-        result.update(mlflow_url=tracked["url"], mlflow_run_id=tracked["run_id"])
     return result
 
 

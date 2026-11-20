@@ -17,7 +17,10 @@ Add an optional experiment name to your usual submission:
 This is an additional field, not a complete training request. If omitted, the
 service uses the `Default` experiment. The workspace is always the project in
 `/api/v1/projects/{project}`; callers cannot select another workspace or server.
-An explicitly named experiment requires tracking to be available.
+An explicitly named experiment requires tracking to be available. Omitting the name
+selects `Default`; it does not opt out of tracking or its project permissions.
+If the selected experiment was deleted in MLflow, submission returns
+`409 mlflow_experiment_deleted`. Restore the experiment in MLflow or select another name.
 
 GET the job as usual. When tracking is enabled, its response includes
 `mlflow_url` and `mlflow_run_id`. Open the URL to see the run in MLflow. Save the
@@ -32,7 +35,8 @@ the MLflow run remains available.
 | Execution start/end, duration and success/failure | Driver lifecycle, including input loading and output upload |
 | Training start/end, epoch, step, loss, learning rate | Algorithms whose runtime exposes unified callbacks |
 | Evaluation and backend numeric metrics | Available callback metrics, including nested numeric values |
-| Checkpoint time, step, count, path and size | Successful saves reported through `on_save` |
+| Checkpoint time, step, count and path | Successful saves reported through `on_save` |
+| Checkpoint size | Backend-reported size, or a directory scan while its recorded identity remains unchanged |
 | Checkpoint save duration and type | Only when explicitly reported by the backend |
 | Pod CPU time, throttling, memory and storage I/O | Cgroup v2 counters from instrumented pods |
 | NVIDIA GPU utilization, used memory and power | Samples from `nvidia-smi`, where available |
@@ -42,7 +46,13 @@ the MLflow run remains available.
 Training metrics use `train/`, evaluation metrics `eval/`, checkpoint events
 `checkpoint/`, and resource samples `system/pod_<name>/`. Inspect
 `tracking.unified_callbacks`, `checkpoint.duration_source`, and
-`tracking.delivery` to see the available coverage and delivery health.
+`tracking.delivery` to see the available coverage and delivery health. The driver
+aggregates `tracking.producer.*` summaries and verifies the expected trainer ranks
+before marking delivery complete. `tracking/failed_events` and
+`tracking/unresolved_events` distinguish failed/dropped writes from work still
+pending at the flush deadline. Events are batched with their original timestamps
+and steps. NaN or infinity is omitted from numeric payloads and exposed through
+`training.nonfinite_metrics=true` and `tracking/nonfinite_values`.
 
 Resource sampling runs every 10 seconds, with an immediate initial sample.
 Counters describe their named pod or process; they are not whole-cluster totals.
@@ -114,15 +124,25 @@ tracking. Once a server exists, readiness and authorization failures are errors;
 they do not silently disable tracking. Transient delivery failures during an
 accepted training run are reported without crashing training, with bounded queues
 and flush timeouts. A forced process/node loss can leave a run open; there is no
-background history controller in this change. Deletion through this API attempts
-to finalize an unfinished run without deleting its metrics.
+background history controller in this change. Deletion through this API preserves
+metrics and finalizes queued jobs or reconciles a terminal job's result. Once a
+driver has started, it owns the terminal update to avoid racing its completion;
+graceful termination records `KILLED`. A forced kill can still leave the run open.
+If MLflow is unavailable while a pending job is deleted, its reserved run can also
+remain open and requires manual reconciliation in MLflow.
+
+Tracking links are returned only when the configured server and the immutable run
+binding match the current RayJob UID. Unverifiable links are omitted while ordinary
+job status remains available. Jobs submitted before UID binding was introduced do
+not gain tracking links automatically.
 
 ## Verify a deployment
 
 Run the usual live training lifecycle with `--mlflow-url` pointing to the
-administrator-provided managed server URL. This check requires a callback-enabled
-algorithm and verifies actual loss/step metrics and that the run remains readable
-after job deletion:
+administrator-provided managed server URL. For callback-enabled
+algorithms this check verifies actual loss/step history and its persistence after
+job deletion. GRPO verifies the common lifecycle and delivery health without
+requiring unsupported per-step callbacks. This also applies to `--algorithm-matrix`:
 
 ```bash
 make test-e2e E2E_ARGS="--job-file /path/to/request.json --queue-profile with-kueue --observe-cluster --check-logs --mlflow-url https://YOUR_GATEWAY/mlflow -v"

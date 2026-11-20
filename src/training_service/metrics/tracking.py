@@ -18,7 +18,12 @@ from urllib3.exceptions import HTTPError
 
 from training_service.errors import ApiError
 from training_service.kubernetes_client import TIMEOUT
-from training_service.metrics.client import TrackingClient, TrackingError, valid_url
+from training_service.metrics.client import (
+    DeletedExperimentError,
+    TrackingClient,
+    TrackingError,
+    valid_url,
+)
 
 LOG = logging.getLogger(__name__)
 ANNOTATION = "training.rhoai.io/mlflow"
@@ -93,7 +98,13 @@ def verify_training_access(project: str) -> None:
                     ),
                     _request_timeout=TIMEOUT,
                 )
-                if not result.status or not result.status.allowed or result.status.evaluation_error:
+                if (
+                    not result.status
+                    or result.status.evaluation_error
+                    or result.status.allowed is None
+                ):
+                    raise unavailable()
+                if not result.status.allowed:
                     raise ApiError(
                         403,
                         "metrics_forbidden",
@@ -138,26 +149,71 @@ def metadata(job: dict[str, Any], project: str) -> dict[str, str] | None:
         return None
 
 
+def bound_run(
+    job: dict[str, Any], project: str, token: str, ca_file: str | None
+) -> tuple[TrackingClient, dict[str, str], dict[str, Any]] | None:
+    """Verify the server and immutable MLflow param against the actual Kubernetes UID."""
+    value = metadata(job, project)
+    if not value:
+        return None
+    uri = discover()
+    if not uri or uri.rstrip("/") != value["tracking_uri"].rstrip("/"):
+        return None
+    tracking = TrackingClient(uri, project, lambda: token.removeprefix("Bearer "), ca_file=ca_file)
+    run = tracking.get_run(value["run_id"])
+    data = run.get("data", {})
+    params = {item["key"]: item["value"] for item in data.get("params", [])}
+    tags = {item["key"]: item["value"] for item in data.get("tags", [])}
+    identity = job.get("metadata", {})
+    if (
+        not identity.get("uid")
+        or params.get("training.rayjob_uid") != identity["uid"]
+        or tags.get("training.project") != project
+        or tags.get("training.job_id") != identity.get("name")
+        or run["info"]["experiment_id"] != value["experiment_id"]
+    ):
+        return None
+    return tracking, value, run
+
+
+def public_metadata(
+    job: dict[str, Any], project: str, token: str, ca_file: str | None
+) -> dict[str, str]:
+    """A tracking outage must not hide ordinary job status."""
+    try:
+        bound = bound_run(job, project, token, ca_file)
+        if bound:
+            _, value, _ = bound
+            return {"mlflow_url": value["url"], "mlflow_run_id": value["run_id"]}
+    except (ApiError, TrackingError, OSError):
+        LOG.warning("MLflow job binding could not be verified; tracking link omitted.")
+    return {}
+
+
 def finalize_deleted(
     job: dict[str, Any],
     project: str,
     token: str,
     ca_file: str | None,
 ) -> None:
-    value = metadata(job, project)
-    if not value:
+    bound = bound_run(job, project, token, ca_file)
+    if not bound:
         return
-    # Never forward a credential to a URL supplied only through a mutable job annotation.
-    uri = discover()
-    if not uri or uri.rstrip("/") != value["tracking_uri"].rstrip("/"):
-        raise unavailable()
-    tracking = TrackingClient(uri, project, lambda: token.removeprefix("Bearer "), ca_file=ca_file)
-    info = tracking.request("GET", "runs/get", {"run_id": value["run_id"]})["run"]["info"]
-    if info["status"] not in {"FINISHED", "FAILED", "KILLED"}:
-        state = job.get("status", {}).get("jobStatus")
-        status = {"SUCCEEDED": "FINISHED", "FAILED": "FAILED"}.get(state, "KILLED")
-        tracking.log(value["run_id"], tags={"training.phase": "deleted"})
-        tracking.finish(value["run_id"], status)
+    tracking, value, run = bound
+    if run["info"]["status"] in {"FINISHED", "FAILED", "KILLED"}:
+        return
+    try:
+        tracking.log(value["run_id"], tags={"training.deletion_requested": "true"})
+    except TrackingError:
+        LOG.warning("MLflow deletion tag could not be saved; attempting eligible finalization.")
+    state = job.get("status", {}).get("jobStatus")
+    tags = {item["key"]: item["value"] for item in run.get("data", {}).get("tags", [])}
+    # An active driver owns its terminal result. API cancellation must not race its
+    # FINISHED/FAILED write with a stale KILLED update; MLflow has no compare-and-set.
+    if state not in {"SUCCEEDED", "FAILED"} and tags.get("job.started_at"):
+        return
+    status = {"SUCCEEDED": "FINISHED", "FAILED": "FAILED"}.get(state, "KILLED")
+    tracking.finish(value["run_id"], status)
 
 
 @dataclass(frozen=True)
@@ -189,9 +245,18 @@ class TrackedRun:
             "ca_bundle": Path(ca_file).read_text() if ca_file else "",
         }
 
+    def bind(self, job: dict[str, Any]) -> None:
+        uid = job.get("metadata", {}).get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise TrackingError()
+        self.client.log(self.run_id, params={"training.rayjob_uid": uid})
+
     def failed_submission(self) -> None:
         try:
             self.client.log(self.run_id, tags={"training.phase": "submission_failed"})
+        except TrackingError:
+            LOG.warning("Could not record the MLflow submission failure tag.")
+        try:
             self.client.finish(self.run_id, "FAILED")
         except TrackingError:
             LOG.warning("Could not mark the MLflow run as failed after submission failure.")
@@ -250,6 +315,13 @@ def reserve(
             run.failed_submission()
             raise
         return run
+    except DeletedExperimentError:
+        raise ApiError(
+            409,
+            "mlflow_experiment_deleted",
+            "The selected MLflow experiment is deleted. Restore it in MLflow or choose "
+            "another mlflow_experiment_name. If omitted, the selected experiment is Default.",
+        ) from None
     except TrackingError as error:
         if error.status in {401, 403}:
             raise ApiError(

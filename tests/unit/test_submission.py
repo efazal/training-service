@@ -2309,11 +2309,19 @@ def test_tracked_submission_persists_run_and_never_embeds_caller_credential(
     )
     reserve = Mock(return_value=run)
     monkeypatch.setattr(tracking, "reserve", reserve)
+    monkeypatch.setattr(
+        submission, "read_job", lambda *args: {"metadata": {"uid": "created-rayjob-uid"}}
+    )
+    log_run = Mock()
+    monkeypatch.setattr(run.client, "log", log_run)
     assert (
         backend._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "caller-secret")
         == body.name
     )
     access.assert_called_once_with("team-alpha")
+    log_run.assert_called_once_with(
+        run.run_id, params={"training.rayjob_uid": "created-rayjob-uid"}
+    )
     assert reserve.call_args.args[:4] == (
         "https://tracking.example/mlflow",
         "team-alpha",

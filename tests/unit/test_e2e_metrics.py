@@ -1,5 +1,7 @@
 """Adversarial checks for the live metrics oracle, without a running training job."""
 
+import hashlib
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -32,17 +34,27 @@ def oracle(monkeypatch):
                     "training/epoch": 1,
                     "training/step": 2,
                     "job/duration_seconds": 10,
+                    "job/started_at_unix_seconds": 100,
+                    "job/finished_at_unix_seconds": 110,
                     "training/started_at_unix_seconds": 100,
                     "training/finished_at_unix_seconds": 110,
                 }.items()
             ],
         },
     }
-    history = [{"value": 0.5, "step": 2}]
+    history = [{"value": 0.5, "step": 2, "timestamp": 105000}]
     tracking_client = Mock()
-    tracking_client.request.side_effect = lambda method, endpoint, data: (
-        {"run": run} if endpoint == "runs/get" else {"metrics": history}
-    )
+
+    def request(method, endpoint, data):
+        assert method == "GET"
+        if endpoint == "runs/get":
+            assert data == {"run_id": RUN}
+            return {"run": run}
+        assert endpoint == "metrics/get-history"
+        assert data == {"run_id": RUN, "metric_key": "train/loss"}
+        return {"metrics": history}
+
+    tracking_client.request.side_effect = request
     constructor = Mock(return_value=tracking_client)
     monkeypatch.setattr(mlflow, "TrackingClient", constructor)
     api = SimpleNamespace(
@@ -59,7 +71,13 @@ def oracle(monkeypatch):
 
 def test_metrics_oracle_requires_actual_history_and_can_verify_after_job_deletion(oracle):
     api, detail, _, _, constructor = oracle
-    expected = {"run_id": RUN, "experiment_id": "42", "loss_points": 1, "persisted": True}
+    expected = {
+        "run_id": RUN,
+        "experiment_id": "42",
+        "loss_points": 1,
+        "persisted": True,
+        "loss_history_sha256": hashlib.sha256(json.dumps([(2, 105000, 0.5)]).encode()).hexdigest(),
+    }
     assert mlflow.verify_run(api, URI, detail) == expected
     assert mlflow.verify_run(api, URI, deepcopy(detail)) == expected
     assert all(call.args[:2] == (URI, "team-alpha") for call in constructor.call_args_list)
@@ -102,3 +120,27 @@ def test_metrics_oracle_rejects_missing_or_misattributed_metrics(oracle, fault):
     with pytest.raises(AssertionError):
         mlflow.verify_run(api, URI, detail)
     assert constructor.call_args.args[0] == URI
+
+
+def test_persistence_detects_changed_points_with_same_count(oracle):
+    api, detail, _, history, _ = oracle
+    before = mlflow.verify_run(api, URI, detail)
+    history[0].update(step=3, value=0.9)
+    assert mlflow.verify_run(api, URI, detail) != before
+
+
+def test_persistence_is_independent_of_response_order(oracle):
+    api, detail, _, history, _ = oracle
+    history.append({"value": 0.4, "step": 3, "timestamp": 106000})
+    before = mlflow.verify_run(api, URI, detail)
+    history.reverse()
+    assert mlflow.verify_run(api, URI, detail) == before
+
+
+def test_generic_profiles_verify_lifecycle_without_detailed_callbacks(oracle):
+    api, detail, run, _, _ = oracle
+    run["data"]["tags"] = [
+        t for t in run["data"]["tags"] if t["key"] != "tracking.unified_callbacks"
+    ]
+    run["data"]["metrics"] = [m for m in run["data"]["metrics"] if m["key"].startswith("job/")]
+    assert mlflow.verify_run(api, URI, detail, detailed=False)["persisted"]

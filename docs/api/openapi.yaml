@@ -857,7 +857,7 @@ components:
           nullable: true
           minLength: 1
           maxLength: 256
-          pattern: '\S'
+          pattern: '[\s\S]*\S'
           description: >-
             MLflow experiment name in this project. Defaults to Default when MLflow is
             available. Supplying a name requires MLflow tracking to be available.
@@ -1302,6 +1302,7 @@ components:
             - submission_unavailable
             - metrics_unavailable
             - metrics_forbidden
+            - mlflow_experiment_deleted
             - not_implemented
             - backend_unavailable
             - conflict

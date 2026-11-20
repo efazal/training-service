@@ -11,6 +11,7 @@ import re
 import ssl
 import time
 from collections.abc import Callable
+from http.client import HTTPException
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
@@ -23,6 +24,10 @@ class TrackingError(Exception):
     def __init__(self, status: int = 503) -> None:
         self.status = status
         super().__init__(f"MLflow request failed (HTTP {status}).")
+
+
+class DeletedExperimentError(TrackingError):
+    """An experiment must be restored explicitly before accepting new runs."""
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -41,8 +46,8 @@ def valid_url(value: str) -> bool:
             and url.port != 0
             and not url.username
             and not url.password
-            and not url.query
-            and not url.fragment
+            and "?" not in value
+            and "#" not in value
         )
     except ValueError:
         return False
@@ -99,24 +104,71 @@ class TrackingClient:
         except HTTPError as error:
             error.close()
             raise TrackingError(error.code) from None
-        except (URLError, OSError, ValueError, UnicodeError):
+        except (HTTPException, URLError, OSError, ValueError, UnicodeError):
             raise TrackingError() from None
+
+    @staticmethod
+    def experiment_id(result: dict[str, Any]) -> str:
+        value = result.get("experiment_id")
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value):
+            raise TrackingError()
+        return value
+
+    def _experiment_id(self, result: dict[str, Any]) -> str:
+        experiment = result.get("experiment")
+        if not isinstance(experiment, dict):
+            raise TrackingError()
+        if experiment.get("lifecycle_stage") == "deleted":
+            raise DeletedExperimentError(409)
+        return self.experiment_id(experiment)
 
     def experiment(self, name: str) -> str:
         try:
-            result = self.request("GET", "experiments/get-by-name", {"experiment_name": name})
-            return str(result["experiment"]["experiment_id"])
+            return self._experiment_id(
+                self.request("GET", "experiments/get-by-name", {"experiment_name": name})
+            )
         except TrackingError as error:
             if error.status != 404:
                 raise
         try:
-            return str(self.request("POST", "experiments/create", {"name": name})["experiment_id"])
+            return self.experiment_id(self.request("POST", "experiments/create", {"name": name}))
         except TrackingError as error:
             if error.status not in {400, 409}:
                 raise
             # Another submission can create the same experiment concurrently.
-            result = self.request("GET", "experiments/get-by-name", {"experiment_name": name})
-            return str(result["experiment"]["experiment_id"])
+            return self._experiment_id(
+                self.request("GET", "experiments/get-by-name", {"experiment_name": name})
+            )
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        run = self.request("GET", "runs/get", {"run_id": run_id}).get("run")
+        if not isinstance(run, dict) or not isinstance(run.get("info"), dict):
+            raise TrackingError()
+        info = run["info"]
+        if not isinstance(info.get("status"), str):
+            raise TrackingError()
+        if info.get("run_id") != run_id or info.get("status") not in {
+            "RUNNING",
+            "SCHEDULED",
+            "FINISHED",
+            "FAILED",
+            "KILLED",
+        }:
+            raise TrackingError()
+        self.experiment_id(info)
+        data = run.get("data", {})
+        if not isinstance(data, dict):
+            raise TrackingError()
+        for key in ("tags", "params"):
+            values = data.get(key, [])
+            if not isinstance(values, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("key"), str)
+                or not isinstance(item.get("value"), str)
+                for item in values
+            ):
+                raise TrackingError()
+        return run
 
     def create_run(self, experiment: str, name: str, tags: dict[str, str]) -> str:
         result = self.request(
@@ -129,10 +181,31 @@ class TrackingClient:
                 "tags": [{"key": key, "value": value} for key, value in tags.items()],
             },
         )
-        identifier = result["run"]["info"]["run_id"]
+        run = result.get("run")
+        info = run.get("info") if isinstance(run, dict) else None
+        identifier = info.get("run_id") if isinstance(info, dict) else None
         if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier):
             raise TrackingError()
         return identifier
+
+    def log_batch(self, run_id: str, metrics: list[dict[str, Any]], tags: dict[str, str]) -> None:
+        # Preserve every point's original timestamp and step, including repeated keys.
+        if len(tags) > 100:
+            raise TrackingError()
+        limit = 1000 - len(tags)
+        for offset in range(0, max(1, len(metrics)), limit):
+            self.request(
+                "POST",
+                "runs/log-batch",
+                {
+                    "run_id": run_id,
+                    "metrics": metrics[offset : offset + limit],
+                    "params": [],
+                    "tags": [{"key": key, "value": value} for key, value in tags.items()]
+                    if offset + limit >= len(metrics)
+                    else [],
+                },
+            )
 
     def log(
         self,

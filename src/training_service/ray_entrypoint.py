@@ -560,15 +560,15 @@ def _execute(configuration: dict[str, Any]) -> None:
         configuration["gpus_per_node"],
         configuration["num_workers"],
     )
-    if output is not None and output["scheme"] == "s3":
-        _upload_s3(output, output_dir)
     if configuration.get("mlflow"):
-        from training_service_metrics_runtime import current_recorder, numeric_metrics
+        from training_service_metrics_runtime import current_recorder
 
         recorder = current_recorder()
         if isinstance(result, dict):
-            recorder.emit(numeric_metrics(result, "result"))
+            recorder.emit({"result": result})
         recorder.emit(directory_size=("artifacts/output_directory_bytes", str(output_dir)))
+    if output is not None and output["scheme"] == "s3":
+        _upload_s3(output, output_dir)
 
 
 def main(configuration: dict[str, Any]) -> None:
@@ -577,6 +577,7 @@ def main(configuration: dict[str, Any]) -> None:
     if not tracked:
         _execute(configuration)
         return
+    import signal
     import socket
     import time
     from datetime import UTC, datetime
@@ -596,19 +597,33 @@ def main(configuration: dict[str, Any]) -> None:
         },
     )
     recorder.start_sampling()
+
+    def cancelled(signum: int, frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, cancelled)
     status = "FAILED"
     try:
         _execute(configuration)
         status = "FINISHED"
+    except (SystemExit, KeyboardInterrupt):
+        status = "KILLED"
+        raise
     finally:
-        recorder.emit(
-            {
-                "job/duration_seconds": time.monotonic() - started,
-                "job/finished_at_unix_seconds": time.time(),
-            },
-            tags={
-                "job.finished_at": datetime.now(UTC).isoformat(),
-                "training.phase": "completed" if status == "FINISHED" else "failed",
-            },
-        )
-        recorder.close(status)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            recorder.emit(
+                {
+                    "job/duration_seconds": time.monotonic() - started,
+                    "job/finished_at_unix_seconds": time.time(),
+                },
+                tags={
+                    "job.finished_at": datetime.now(UTC).isoformat(),
+                    "training.phase": {"FINISHED": "completed", "KILLED": "cancelled"}.get(
+                        status, "failed"
+                    ),
+                },
+            )
+            recorder.close(status)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
