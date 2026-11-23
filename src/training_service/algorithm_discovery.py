@@ -6,10 +6,14 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import Request
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
+from referencing import Registry
 
 from training_service import catalog
+from training_service.contract import component_validator
 from training_service.errors import ApiError
+from training_service.jobs import validate_algorithm_parameters
+from training_service.ray_entrypoint import get_backend
 
 _SUMMARIES = {
     "lora_sft": "Supervised fine-tuning using LoRA adapters.",
@@ -26,6 +30,29 @@ _PARAMETER_DESCRIPTIONS = {
         "Total samples per optimizer update across GPUs and gradient accumulation."
     ),
     "max_seq_len": "Maximum number of tokens per training sample.",
+}
+_SFT_EXAMPLE_PARAMETERS = {
+    "learning_rate": 0.00002,
+    "num_epochs": 1,
+    "effective_batch_size": 8,
+    "max_seq_len": 2048,
+}
+_EXAMPLE_PARAMETERS = {
+    "sft": _SFT_EXAMPLE_PARAMETERS,
+    "lora_sft": _SFT_EXAMPLE_PARAMETERS,
+    "osft": {
+        **_SFT_EXAMPLE_PARAMETERS,
+        "unfreeze_rank_ratio": 0.5,
+        "max_tokens_per_gpu": 1024,
+    },
+    "lora_grpo": {
+        "learning_rate": 0.00001,
+        "num_iterations": 2,
+        "prompt_batch_size": 8,
+        "group_size": 4,
+        "lora_r": 32,
+        "lora_alpha": 64,
+    },
 }
 
 
@@ -118,6 +145,76 @@ def _parameter(schema: dict[str, Any] | bool, name: str, docs: dict[str, str]) -
     return result
 
 
+def _example_value(schema: dict[str, Any] | bool, preferred: Any = None) -> Any:
+    """Choose only explicit, schema-valid values; never invent unknown argument semantics."""
+    candidates = [preferred]
+    if isinstance(schema, dict):
+        candidates.extend(schema.get(key) for key in ("example", "default", "const"))
+        candidates.extend(schema.get("enum", []))
+    validator = Draft202012Validator(schema, registry=Registry())
+    return next(
+        (
+            deepcopy(value)
+            for value in candidates
+            if value is not None and validator.is_valid(value)
+        ),
+        None,
+    )
+
+
+def _example_request(algorithm: dict[str, Any]) -> dict[str, Any] | None:
+    """Build an editable POST body, checked by the runtime and execution-profile validators."""
+    name = algorithm["name"]
+    schema = algorithm["parameter_schema"]
+    if (
+        name not in _EXAMPLE_PARAMETERS
+        or "ray" not in algorithm["supported_backends"]
+        or _has_references(schema)
+    ):
+        return None
+    backend = get_backend(name)
+    properties = schema.get("properties", {})
+    recipe = {**_EXAMPLE_PARAMETERS[name], "backend": backend.backend_name}
+    parameters = {}
+    for key in dict.fromkeys([*recipe, *schema.get("required", [])]):
+        if key in properties:
+            value = _example_value(properties[key], recipe.get(key))
+            if value is not None:
+                parameters[key] = value
+    job_name = name.replace("_", "-") + "-example"
+    paths = {
+        "model": "models/my-model/",
+        "dataset": "datasets/tool-calls.jsonl" if name == "lora_grpo" else "datasets/chat.jsonl",
+        "output": f"outputs/{job_name}/",
+    }
+    resources = {
+        "num_nodes": 2 if name == "lora_grpo" else 1,
+        "gpus_per_node": 1,
+        "gpu_type": "nvidia.com/gpu",
+        "cpus_per_node": "16" if name == "lora_grpo" else "8",
+        "memory_per_node": "64Gi" if name == "lora_grpo" else "32Gi",
+    }
+    example = {
+        "name": job_name,
+        "backend": "ray",
+        "model": {"uri": "pvc://training-data/" + paths["model"]},
+        "dataset": {"uri": "pvc://training-data/" + paths["dataset"]},
+        "algorithm": {"name": name, "parameters": parameters},
+        "resources": resources,
+        "output": {"destination_uri": "pvc://training-data/" + paths["output"]},
+    }
+    try:
+        normalized = validate_algorithm_parameters(name, parameters)
+        backend.validate_resources(1, 2 if name == "lora_grpo" else 1, "nvidia.com/gpu", normalized)
+        backend.validate_locations(
+            {role: {"scheme": "pvc", "path": path} for role, path in paths.items()}, normalized
+        )
+        component_validator("CreateJobRequest").validate(example)
+    except (ApiError, ValueError, ValidationError):
+        return None
+    return example
+
+
 def get_algorithm(request: Request, name: str, include: str | None = None) -> dict[str, Any]:
     """Return readable details, with the exact validation schema only on opt-in."""
     if include not in (None, "parameter_schema"):
@@ -155,6 +252,16 @@ def get_algorithm(request: Request, name: str, include: str | None = None) -> di
         notes.append(
             "Python callbacks and custom rollout functions are not supported through this API."
         )
+    example = _example_request(algorithm)
+    if example is not None:
+        result["example_request"] = example
+        notes.append(
+            "Customize the example's job name, model and dataset paths, storage, and resources "
+            "before submission. Referenced storage must exist in the target project. "
+            "Example values do not guarantee model fit or runtime compatibility."
+        )
+    else:
+        notes.append("No submission example is available for this runtime and execution profile.")
     result["notes"] = notes
     if "runtime" in payload:
         result["runtime"] = deepcopy(payload["runtime"])

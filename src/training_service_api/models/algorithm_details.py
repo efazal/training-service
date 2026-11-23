@@ -12,6 +12,7 @@ from pydantic import ConfigDict, Field, StrictStr
 from training_service.contract import ContractModel
 from training_service_api.models.algorithm_parameter import AlgorithmParameter
 from training_service_api.models.algorithm_runtime import AlgorithmRuntime
+from training_service_api.models.create_job_request import CreateJobRequest
 
 
 class AlgorithmDetails(ContractModel):
@@ -32,6 +33,16 @@ class AlgorithmDetails(ContractModel):
     parameter_schema: dict[str, Any] | None = Field(
         default=None,
         description=("Parameter validation schema, included only with include=parameter_schema."),
+    )
+    example_request: CreateJobRequest | None = Field(
+        default=None,
+        description=(
+            "Editable request body for POST /projects/{project}/training-jobs. "
+            "Customize the job name, input paths, output storage, resources, and "
+            "optional queue for your project. Values are examples, not runtime "
+            "defaults. Omitted when a compatible example cannot be generated for "
+            "the configured runtime or execution profile."
+        ),
     )
     runtime: AlgorithmRuntime | None = None
     notes: list[StrictStr]
