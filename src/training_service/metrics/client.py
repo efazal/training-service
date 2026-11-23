@@ -93,7 +93,9 @@ class TrackingClient:
                     "Content-Type": "application/json",
                 },
             )
-            with self._opener.open(request, timeout=5) as response:
+            # Scale with payload so large metric batches are not cut off at 5s.
+            timeout = 5 + (len(body) if body else 0) / 200_000
+            with self._opener.open(request, timeout=timeout) as response:
                 payload = response.read(2**20 + 1)
             if len(payload) > 2**20:
                 raise TrackingError()
@@ -237,3 +239,6 @@ class TrackingClient:
             "runs/update",
             {"run_id": run_id, "status": status, "end_time": int(time.time() * 1000)},
         )
+
+    def delete_run(self, run_id: str) -> None:
+        self.request("POST", "runs/delete", {"run_id": run_id})

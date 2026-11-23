@@ -110,8 +110,16 @@ def test_indeterminate_authorization_is_unavailable(monkeypatch, status):
     assert raised.value.status_code == 503
 
 
-def test_failed_submission_attempts_terminal_update_after_tag_failure():
+def test_failed_submission_deletes_the_reserved_run():
     obj = Mock()
+    tracking.TrackedRun(obj, RUN, "42", "Default").failed_submission()
+    obj.delete_run.assert_called_once_with(RUN)
+    obj.finish.assert_not_called()
+
+
+def test_failed_submission_marks_failed_when_deletion_fails():
+    obj = Mock()
+    obj.delete_run.side_effect = client.TrackingError()
     obj.log.side_effect = client.TrackingError()
     tracking.TrackedRun(obj, RUN, "42", "Default").failed_submission()
     obj.finish.assert_called_once_with(RUN, "FAILED")

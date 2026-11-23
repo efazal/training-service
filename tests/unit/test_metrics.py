@@ -101,7 +101,8 @@ def test_transport_isolates_project_and_refreshes_token_without_global_state():
 
     def open_request(request, timeout):
         requests.append(request)
-        assert timeout == 5
+        # Base timeout plus a small payload-scaled allowance.
+        assert 5 <= timeout <= 10
         return Response()
 
     tracking_client._opener.open = open_request
@@ -176,13 +177,10 @@ def test_training_identity_is_checked_in_target_project(monkeypatch):
     tracking.verify_training_access("team-alpha")
     for call in auth.create_subject_access_review.call_args_list:
         spec = call.args[0].spec
-        # A default-only binding does not authorize Ray's generated OAuth account.
+        # Only the exact project service-account group is queried; broader
+        # identities would give false-positive preflights.
         assert spec.user is None
-        assert spec.groups == [
-            "system:serviceaccounts",
-            "system:serviceaccounts:team-alpha",
-            "system:authenticated",
-        ]
+        assert spec.groups == ["system:serviceaccounts:team-alpha"]
         assert spec.resource_attributes.namespace == "team-alpha"
     auth.create_subject_access_review.return_value.status.allowed = False
     with pytest.raises(ApiError) as raised:

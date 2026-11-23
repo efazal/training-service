@@ -25,6 +25,8 @@ class TrainingBackend:
     name = ""
     backend_name = ""
     remote_hf = False
+    # True when torchrun spawns one metrics producer per GPU (rank == gpu index).
+    metrics_rank_per_gpu = False
 
     def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
         """Return columns that can be checked without reading training rows."""
@@ -93,7 +95,12 @@ class TrainingBackend:
             from training_service_metrics_runtime import current_recorder
 
             public = getattr(training_hub, self.name, algorithm.train)
-            supported = "callbacks" in inspect.signature(public).parameters
+            # A **kwargs signature can still accept callbacks; treat it as
+            # supported rather than silently dropping callback metrics.
+            supported = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "callbacks"
+                for parameter in inspect.signature(public).parameters.values()
+            )
             current_recorder().emit(
                 tags={
                     "tracking.unified_callbacks": str(supported).lower(),
@@ -126,6 +133,7 @@ class SingleNodeTrainingBackend(TrainingBackend):
 class SFTBackend(SingleNodeTrainingBackend):
     name = "sft"
     backend_name = "instructlab-training"
+    metrics_rank_per_gpu = True
 
     def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
         if parameters.get("is_pretraining"):

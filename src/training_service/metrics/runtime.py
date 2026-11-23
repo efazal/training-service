@@ -38,12 +38,10 @@ def numeric_metrics(
     """Preserve backend numeric metrics; exclude text, nonfinite values and secrets."""
     result: dict[str, float] = {}
 
+    _SECRET_KEY = re.compile(r"(?<![a-z_])token(?![a-z_])|password|secret|credential|api.key", re.I)
+
     def visit(value: Any, key: str, depth: int) -> None:
-        if (
-            len(result) >= 500
-            or depth > 5
-            or re.search(r"token(?!s)|password|secret|credential|api.key", key, re.I)
-        ):
+        if len(result) >= 500 or depth > 5 or _SECRET_KEY.search(key):
             return
         if isinstance(value, dict):
             for name, child in value.items():
@@ -210,7 +208,15 @@ class RuntimeRecorder:
         return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
 
     def _write(self) -> None:
-        while not self._stop.is_set() or not self._queue.empty():
+        deadline: float | None = None
+        while True:
+            if self._stop.is_set():
+                # After stop, drain only what already queued, bounded by the join
+                # timeout so a dead server cannot stall pod finalization.
+                if deadline is None:
+                    deadline = time.monotonic() + self.DRAIN_TIMEOUT
+                if time.monotonic() > deadline:
+                    return
             try:
                 batch = [self._queue.get(timeout=0.1)]
             except queue.Empty:
@@ -245,11 +251,16 @@ class RuntimeRecorder:
                     labels.update(tags)
                 self.client.log_batch(self.run_id, points, labels)
             except TrackingError:
-                with self._lock:
-                    self._failed += len(batch)
-                LOG.warning(
-                    "MLflow metrics could not be delivered; check server access and readiness."
-                )
+                # One bounded retry so a transient timeout does not lose the batch.
+                time.sleep(1)
+                try:
+                    self.client.log_batch(self.run_id, points, labels)
+                except TrackingError:
+                    with self._lock:
+                        self._failed += len(batch)
+                    LOG.warning(
+                        "MLflow metrics could not be delivered; check server access and readiness."
+                    )
             finally:
                 with self._lock:
                     self._completed += len(batch)

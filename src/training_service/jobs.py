@@ -429,6 +429,9 @@ class CodeFlareJobBackend:
     backend_name = "ray"
     api_group = "ray.io"
     resource = "rayjobs"
+    # Cap CA bundle env chunks so merged trust bundles cannot inflate the
+    # RayCluster CR past etcd's object size limit.
+    _MLFLOW_CA_MAX_PARTS = 16
 
     def __init__(self, image: str | None = None) -> None:
         self._image = image if image is not None else os.getenv("TRAINING_RAY_IMAGE", "")
@@ -558,12 +561,12 @@ class CodeFlareJobBackend:
                 metrics_environment = {}
                 if tracked is not None:
                     mlflow = tracked.configuration(ca_file)
-                    mlflow["expected_ranks"] = str(
-                        gpu_count if request.algorithm.name in {"sft", "osft"} else 1
-                    )
+                    mlflow["expected_ranks"] = str(gpu_count if backend.metrics_rank_per_gpu else 1)
                     # Trust is public data, but a full root bundle exceeds exec's single-
                     # argument limit. Carry it on the Ray pods, in bounded env entries.
                     bundle = mlflow.pop("ca_bundle", "")
+                    if len(bundle) > self._MLFLOW_CA_MAX_PARTS * 16384:
+                        raise metrics_tracking.unavailable()
                     metrics_environment = {
                         f"TRAINING_SERVICE_MLFLOW_CA_{index}": bundle[offset : offset + 16384]
                         for index, offset in enumerate(range(0, len(bundle), 16384))

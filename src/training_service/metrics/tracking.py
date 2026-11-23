@@ -83,11 +83,9 @@ def verify_training_access(project: str) -> None:
                 result = auth.create_subject_access_review(
                     client.V1SubjectAccessReview(
                         spec=client.V1SubjectAccessReviewSpec(
-                            groups=[
-                                "system:serviceaccounts",
-                                f"system:serviceaccounts:{project}",
-                                "system:authenticated",
-                            ],
+                            # Query only the exact group the Helm RoleBinding targets;
+                            # broader identities would give false-positive preflights.
+                            groups=[f"system:serviceaccounts:{project}"],
                             resource_attributes=client.V1ResourceAttributes(
                                 namespace=project,
                                 group="mlflow.kubeflow.org",
@@ -252,6 +250,13 @@ class TrackedRun:
         self.client.log(self.run_id, params={"training.rayjob_uid": uid})
 
     def failed_submission(self) -> None:
+        # The RayJob never existed, so the reserved run is garbage; submission
+        # retries must not leave duplicate FAILED runs in the experiment.
+        try:
+            self.client.delete_run(self.run_id)
+            return
+        except TrackingError:
+            LOG.warning("Could not delete the reserved MLflow run; marking it failed.")
         try:
             self.client.log(self.run_id, tags={"training.phase": "submission_failed"})
         except TrackingError:
