@@ -76,6 +76,13 @@ def test_metrics_oracle_requires_actual_history_and_can_verify_after_job_deletio
         "experiment_id": "42",
         "loss_points": 1,
         "persisted": True,
+        "lifecycle_metrics": {
+            "job/duration_seconds": 10,
+            "job/started_at_unix_seconds": 100,
+            "job/finished_at_unix_seconds": 110,
+            "training/started_at_unix_seconds": 100,
+            "training/finished_at_unix_seconds": 110,
+        },
         "loss_history_sha256": hashlib.sha256(json.dumps([(2, 105000, 0.5)]).encode()).hexdigest(),
     }
     assert mlflow.verify_run(api, URI, detail) == expected
@@ -135,6 +142,16 @@ def test_persistence_is_independent_of_response_order(oracle):
     before = mlflow.verify_run(api, URI, detail)
     history.reverse()
     assert mlflow.verify_run(api, URI, detail) == before
+
+
+@pytest.mark.parametrize("detailed", [False, True])
+def test_persistence_detects_changed_lifecycle_metrics(oracle, detailed):
+    api, detail, run, _, _ = oracle
+    before = mlflow.verify_run(api, URI, detail, detailed=detailed)
+    for metric in run["data"]["metrics"]:
+        if metric["key"] == "job/duration_seconds":
+            metric["value"] = 12
+    assert mlflow.verify_run(api, URI, detail, detailed=detailed) != before
 
 
 def test_generic_profiles_verify_lifecycle_without_detailed_callbacks(oracle):

@@ -36,10 +36,10 @@ the MLflow run remains available.
 | Training start/end, epoch, step, loss, learning rate | Algorithms whose runtime exposes unified callbacks |
 | Evaluation and backend numeric metrics | Available callback metrics, including nested numeric values |
 | Checkpoint time, step, count and path | Successful saves reported through `on_save` |
-| Checkpoint size | Backend-reported size, or a directory scan while its recorded identity remains unchanged |
+| Checkpoint size | Backend-reported size, or a confined, no-follow scan inside the approved output tree while its identity remains unchanged |
 | Checkpoint save duration and type | Only when explicitly reported by the backend |
 | Pod CPU time, throttling, memory and storage I/O | Cgroup v2 counters from instrumented pods |
-| NVIDIA GPU utilization, used memory and power | Samples from `nvidia-smi`, where available |
+| NVIDIA GPU utilization, used memory and power | Samples restricted to explicitly assigned devices visible to each instrumented process |
 | Per-rank process CPU, peak RSS and CUDA allocator peaks | Callback-enabled distributed trainers |
 | Final numeric results and output directory size | When returned by the execution profile |
 
@@ -78,8 +78,10 @@ lost on restart. It records backend-reported values and the observed initial
 training step without inferring missing measurements. Some preemption paths exit
 before emitting `on_save` or `on_train_end`.
 
-Only the driver and callback-enabled trainer processes are instrumented. In
-particular, GRPO worker pod utilization is not a cluster-wide aggregate. Per-rank
+Only the driver and callback-enabled trainer processes are instrumented. The
+GPU-less GRPO head does not report node-wide GPU usage, and GRPO worker GPU
+utilization is currently unavailable because those workers have no recorder hooks.
+Missing or unrestricted device visibility also omits GPU samples. Per-rank
 communication overlap and collective wait time require additional backend hooks.
 
 ## Platform setup
@@ -123,13 +125,31 @@ server is absent, requests without an experiment name can continue without
 tracking. Once a server exists, readiness and authorization failures are errors;
 they do not silently disable tracking. Transient delivery failures during an
 accepted training run are reported without crashing training, with bounded queues
-and flush timeouts. A forced process/node loss can leave a run open; there is no
-background history controller in this change. Deletion through this API preserves
-metrics and finalizes queued jobs or reconciles a terminal job's result. Once a
-driver has started, it owns the terminal update to avoid racing its completion;
-graceful termination records `KILLED`. A forced kill can still leave the run open.
-If MLflow is unavailable while a pending job is deleted, its reserved run can also
-remain open and requires manual reconciliation in MLflow.
+and flush timeouts. A forced process/node loss without API deletion can leave a
+run open; there is no background history controller in this change.
+
+Deletion through this API preserves metrics and finalizes an active or queued run
+as `KILLED`, including when the driver cannot receive SIGTERM. Driver completion
+and cancellation claim one immutable `training.terminal_result` parameter; retries
+use that first result and its end time, preserving an earlier completion.
+
+For a verified tracked job, DELETE adds the
+`training.rhoai.io/mlflow-finalization` RayJob finalizer before requesting foreground
+deletion. Callers need RayJob `patch` permission as well as `get` and `delete`.
+The finalizer retains the UID-to-run binding until MLflow finalization succeeds.
+If MLflow finalization fails, DELETE returns `503 metrics_unavailable`; restore
+MLflow access and retry DELETE on the same job. The retained RayJob makes that
+retry possible even after its workload stops. A successful retry preserves other
+Kubernetes finalizers and releases only the tracking finalizer. These retries are
+caller initiated and require the same project permissions; no credentials are
+persisted for background processing. If the original deletion was rejected,
+tracking is not finalized.
+
+An uncertain submission response also retains its reserved run, even if the first
+lookup returns 404: the original create may still commit after the timeout.
+Check the job by name before resubmitting after a transport failure; the API does
+not replay a possibly accepted submission. Reserved runs are removed only when
+creation was not attempted or Kubernetes definitively rejected the create.
 
 Tracking links are returned only when the configured server and the immutable run
 binding match the current RayJob UID. Unverifiable links are omitted while ordinary

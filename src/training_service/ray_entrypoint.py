@@ -559,6 +559,12 @@ def _execute(configuration: dict[str, Any]) -> None:
         else workdir / "output"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    if configuration.get("mlflow"):
+        from training_service_metrics_runtime import current_recorder
+
+        recorder = current_recorder()
+        recorder.set_artifact_root(str(output_dir))
+        os.environ["TRAINING_SERVICE_MLFLOW_RUN"] = json.dumps(recorder.configuration)
     result = _run_training(
         algorithm,
         model_path,
@@ -569,9 +575,6 @@ def _execute(configuration: dict[str, Any]) -> None:
         configuration["num_workers"],
     )
     if configuration.get("mlflow"):
-        from training_service_metrics_runtime import current_recorder
-
-        recorder = current_recorder()
         if isinstance(result, dict):
             recorder.emit({"result": result})
         recorder.emit(directory_size=("artifacts/output_directory_bytes", str(output_dir)))
@@ -590,28 +593,32 @@ def main(configuration: dict[str, Any]) -> None:
     import time
     from datetime import UTC, datetime
 
-    from training_service_metrics_runtime import current_recorder
+    import training_service_metrics_runtime as metrics_runtime
 
-    os.environ["TRAINING_SERVICE_MLFLOW_RUN"] = json.dumps(tracked)
-    os.environ["TRAINING_SERVICE_MLFLOW_DRIVER_PROCESS"] = f"{socket.gethostname()}:{os.getpid()}"
-    recorder = current_recorder()
+    recorder = None
     started = time.monotonic()
-    recorder.emit(
-        {"job/started_at_unix_seconds": time.time()},
-        tags={
-            "job.started_at": datetime.now(UTC).isoformat(),
-            "tracking.resource_scope": "instrumented_pods_and_rank_processes",
-            "training.phase": "initializing",
-        },
-    )
-    recorder.start_sampling()
 
     def cancelled(signum: int, frame: Any) -> None:
         raise SystemExit(128 + signum)
 
-    previous = signal.signal(signal.SIGTERM, cancelled)
+    previous = signal.getsignal(signal.SIGTERM)
     status = "FAILED"
     try:
+        signal.signal(signal.SIGTERM, cancelled)
+        os.environ["TRAINING_SERVICE_MLFLOW_RUN"] = json.dumps(tracked)
+        os.environ["TRAINING_SERVICE_MLFLOW_DRIVER_PROCESS"] = (
+            f"{socket.gethostname()}:{os.getpid()}"
+        )
+        recorder = metrics_runtime.current_recorder()
+        recorder.emit(
+            {"job/started_at_unix_seconds": time.time()},
+            tags={
+                "job.started_at": datetime.now(UTC).isoformat(),
+                "tracking.resource_scope": "instrumented_pods_and_rank_processes",
+                "training.phase": "initializing",
+            },
+        )
+        recorder.start_sampling()
         _execute(configuration)
         status = "FINISHED"
     except (SystemExit, KeyboardInterrupt):
@@ -620,18 +627,25 @@ def main(configuration: dict[str, Any]) -> None:
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
-            recorder.emit(
-                {
-                    "job/duration_seconds": time.monotonic() - started,
-                    "job/finished_at_unix_seconds": time.time(),
-                },
-                tags={
-                    "job.finished_at": datetime.now(UTC).isoformat(),
-                    "training.phase": {"FINISHED": "completed", "KILLED": "cancelled"}.get(
-                        status, "failed"
-                    ),
-                },
-            )
-            recorder.close(status)
+            if recorder is None:
+                # current_recorder may publish the instance before cancellation
+                # interrupts its return. Never create another one during cleanup.
+                recorder = getattr(metrics_runtime, "_CURRENT", None)
+            if recorder is not None:
+                try:
+                    recorder.emit(
+                        {
+                            "job/duration_seconds": time.monotonic() - started,
+                            "job/finished_at_unix_seconds": time.time(),
+                        },
+                        tags={
+                            "job.finished_at": datetime.now(UTC).isoformat(),
+                            "training.phase": {"FINISHED": "completed", "KILLED": "cancelled"}.get(
+                                status, "failed"
+                            ),
+                        },
+                    )
+                finally:
+                    recorder.close(status)
         finally:
             signal.signal(signal.SIGTERM, previous)

@@ -557,6 +557,7 @@ class CodeFlareJobBackend:
                 )
             elif request.mlflow_experiment_name is not None:
                 raise metrics_tracking.unavailable()
+            submit_attempted = False
             try:
                 metrics_environment = {}
                 if tracked is not None:
@@ -609,12 +610,39 @@ class CodeFlareJobBackend:
                     annotations=annotations,
                     api_client=api_client,
                 )
+                submit_attempted = True
                 identifier = str(job.submit())
                 if identifier != request.name:
                     raise RuntimeError("CodeFlare returned an unexpected RayJob identifier")
-            except Exception:
+            except Exception as error:
                 if tracked is not None:
-                    tracked.failed_submission()
+                    absent = not submit_attempted or (
+                        isinstance(error, _SdkSubmissionError)
+                        and error.error.status in {400, 401, 403, 404, 409, 422}
+                    )
+                    if not absent:
+                        try:
+                            accepted = read_job(api_client, project, request.name)
+                            value = metrics_tracking.metadata(accepted, project)
+                            if value and value["run_id"] == tracked.run_id:
+                                tracked.bind(accepted)
+                        except (
+                            ApiError,
+                            ApiException,
+                            metrics_tracking.TrackingError,
+                            HTTPError,
+                            OSError,
+                        ):
+                            # Even a first 404 cannot rule out a timed-out create
+                            # that is still in flight and commits after this read.
+                            pass
+                    if absent:
+                        tracked.failed_submission()
+                    else:
+                        _LOG.warning(
+                            "RayJob submission outcome is uncertain; its MLflow run was retained. "
+                            "Check the job by name before retrying submission."
+                        )
                 raise
             if tracked is not None:
                 # The job is accepted: tracking bookkeeping must not turn this into a
@@ -697,7 +725,7 @@ class CodeFlareJobBackend:
                     metrics_tracking.public_metadata(
                         job,
                         project,
-                        request.headers["authorization"],
+                        request.state.caller_bearer_token,
                         self.log_configuration().ca_file,
                     )
                 )
@@ -713,43 +741,69 @@ class CodeFlareJobBackend:
                 raise ApiError(
                     409, "shared_cluster", "Shared RayClusters cannot be deleted by this API."
                 )
-            try:
-                owned_cluster(api, project, job)
-            except ApiException as error:
-                if error.status != 404:
-                    raise
-                # Normal when shutdown-after-finish already removed the owned cluster.
+            deleting = bool(job["metadata"].get("deletionTimestamp"))
+            if not deleting:
+                try:
+                    owned_cluster(api, project, job)
+                except ApiException as error:
+                    if error.status != 404:
+                        raise
+                    # Normal when shutdown-after-finish removed the owned cluster.
+            binding = None
+            ca_file = None
+            if metrics_tracking.metadata(
+                job, project
+            ) or metrics_tracking.DELETION_FINALIZER in job["metadata"].get("finalizers", []):
+                try:
+                    ca_file = self.log_configuration().ca_file
+                    binding = metrics_tracking.bound_run(
+                        job, project, request.state.caller_bearer_token, ca_file
+                    )
+                except (metrics_tracking.TrackingError, OSError):
+                    raise metrics_tracking.unavailable() from None
+                if binding and not deleting:
+                    job = _tracking_finalizer(api, project, job, present=True)
+                elif not binding and metrics_tracking.DELETION_FINALIZER in job["metadata"].get(
+                    "finalizers", []
+                ):
+                    raise metrics_tracking.unavailable()
             metadata = job["metadata"]
-            with describe_not_found("Training job", name, project=project):
-                client.CustomObjectsApi(api).delete_namespaced_custom_object(
-                    group="ray.io",
-                    version="v1",
-                    namespace=project,
-                    plural="rayjobs",
-                    name=name,
-                    body=client.V1DeleteOptions(
-                        propagation_policy="Foreground",
-                        preconditions=client.V1Preconditions(
-                            uid=metadata["uid"], resource_version=metadata["resourceVersion"]
+            if not metadata.get("deletionTimestamp"):
+                with describe_not_found("Training job", name, project=project):
+                    client.CustomObjectsApi(api).delete_namespaced_custom_object(
+                        group="ray.io",
+                        version="v1",
+                        namespace=project,
+                        plural="rayjobs",
+                        name=name,
+                        body=client.V1DeleteOptions(
+                            propagation_policy="Foreground",
+                            preconditions=client.V1Preconditions(
+                                uid=metadata["uid"], resource_version=metadata["resourceVersion"]
+                            ),
                         ),
-                    ),
-                    _request_timeout=TIMEOUT,
-                )
-
-        if metrics_tracking.metadata(job, project):
-            try:
-                metrics_tracking.finalize_deleted(
-                    job, project, request.headers["authorization"], self.log_configuration().ca_file
-                )
-            except (
-                ApiError,
-                metrics_tracking.TrackingError,
-                OSError,
-                KeyError,
-                TypeError,
-                ValueError,
-            ):
-                _LOG.warning("Training job deleted; its MLflow run could not be finalized.")
+                        _request_timeout=TIMEOUT,
+                    )
+            if binding:
+                try:
+                    metrics_tracking.finalize_deleted(
+                        job,
+                        project,
+                        request.state.caller_bearer_token,
+                        ca_file,
+                        binding=binding,
+                    )
+                except (ApiError, metrics_tracking.TrackingError, OSError):
+                    raise ApiError(
+                        503,
+                        "metrics_unavailable",
+                        "Deletion is pending MLflow finalization. Restore MLflow access and "
+                        "retry DELETE for this job; its tracking binding has been retained.",
+                    ) from None
+                current = read_job(api, project, name)
+                if current["metadata"]["uid"] != metadata["uid"]:
+                    raise ApiError(409, "conflict", "Training job changed; refresh and retry.")
+                _tracking_finalizer(api, project, current, present=False)
 
     def log_client(self, request: Request, project: str, name: str) -> tuple[LogClient, str]:
         validate_names(project, name)
@@ -817,6 +871,37 @@ def read_job(api: client.ApiClient, project: str, name: str) -> dict[str, Any]:
         result: dict[str, Any] = client.CustomObjectsApi(api).get_namespaced_custom_object(
             "ray.io", "v1", project, "rayjobs", name, _request_timeout=TIMEOUT
         )
+    return result
+
+
+def _tracking_finalizer(
+    api: client.ApiClient, project: str, job: dict[str, Any], *, present: bool
+) -> dict[str, Any]:
+    """Retain the UID binding until authorized MLflow finalization succeeds."""
+    metadata = job["metadata"]
+    finalizers = list(metadata.get("finalizers", []))
+    guard = metrics_tracking.DELETION_FINALIZER
+    if (guard in finalizers) == present:
+        return job
+    if present:
+        finalizers.append(guard)
+    else:
+        finalizers.remove(guard)
+    result: dict[str, Any] = client.CustomObjectsApi(api).patch_namespaced_custom_object(
+        "ray.io",
+        "v1",
+        project,
+        "rayjobs",
+        metadata["name"],
+        body={
+            "metadata": {
+                "uid": metadata["uid"],
+                "resourceVersion": metadata["resourceVersion"],
+                "finalizers": finalizers,
+            }
+        },
+        _request_timeout=TIMEOUT,
+    )
     return result
 
 

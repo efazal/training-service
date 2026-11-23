@@ -239,6 +239,7 @@ def context(**kwargs):
 
 def test_callbacks_preserve_training_eval_and_checkpoint_measurements(recorder, tmp_path):
     (tmp_path / "weights").write_bytes(b"abc")
+    recorder.set_artifact_root(str(tmp_path))
     recorder.event("on_train_begin", context(step=7))
     recorder.event("on_step_begin", context())
     recorder.event("on_step_end", context())
@@ -292,15 +293,16 @@ def test_checkpoint_scan_runs_off_training_thread_and_tolerates_storage_loss(
 ):
     training_thread = threading.current_thread()
     observed = []
-    original = Path.rglob
+    recorder.set_artifact_root(str(tmp_path))
+    original = os.scandir
 
-    def scan(path, pattern):
+    def scan(path):
         observed.append(threading.current_thread())
         if storage_failure:
             raise OSError("checkpoint was rotated")
-        return original(path, pattern)
+        return original(path)
 
-    monkeypatch.setattr(Path, "rglob", scan)
+    monkeypatch.setattr(os, "scandir", scan)
     recorder.event("on_save", context(metrics={"checkpoint_path": str(tmp_path)}))
     recorder.close("FINISHED")
     assert observed and all(thread is not training_thread for thread in observed)

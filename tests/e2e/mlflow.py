@@ -38,10 +38,18 @@ def verify_run(api, uri, detail, *, detailed=True):
         assert tags.get("training.project") == api.project
         assert tags.get("training.job_id") == detail["id"]
         values = {m["key"]: m["value"] for m in run["data"]["metrics"]}
+        lifecycle_keys = [
+            "job/duration_seconds",
+            "job/started_at_unix_seconds",
+            "job/finished_at_unix_seconds",
+        ]
         assert math.isfinite(values["job/duration_seconds"])
         assert values["job/finished_at_unix_seconds"] >= values["job/started_at_unix_seconds"]
         history = []
         if detailed:
+            lifecycle_keys.extend(
+                ["training/started_at_unix_seconds", "training/finished_at_unix_seconds"]
+            )
             assert tags.get("tracking.unified_callbacks") == "true", (
                 "Detailed metrics require a callback-enabled runtime and algorithm"
             )
@@ -60,6 +68,8 @@ def verify_run(api, uri, detail, *, detailed=True):
                 math.isfinite(m["value"]) and m["step"] >= 0 and m["timestamp"] >= 0
                 for m in history
             )
+        lifecycle = {key: values[key] for key in lifecycle_keys}
+        assert all(math.isfinite(value) for value in lifecycle.values())
         assert tags.get("training.nonfinite_metrics") != "true", (
             "Training reported nonfinite metrics"
         )
@@ -76,4 +86,5 @@ def verify_run(api, uri, detail, *, detailed=True):
             json.dumps(sorted((m["step"], m["timestamp"], m["value"]) for m in history)).encode()
         ).hexdigest(),
         "persisted": True,
+        "lifecycle_metrics": lifecycle,
     }

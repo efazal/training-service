@@ -2341,6 +2341,7 @@ def test_tracked_submission_persists_run_and_never_embeds_caller_credential(
         cluster = serializer.sanitize_for_serialization(
             build_ray_cluster_spec(resource["cluster_config"], "metrics-cluster")
         )
+    assert "caller-secret" not in json.dumps(cluster)
     env = {
         item["name"]: item["value"]
         for item in cluster["headGroupSpec"]["template"]["spec"]["containers"][0]["env"]
@@ -2409,8 +2410,8 @@ def test_failed_submission_finalizes_reserved_mlflow_run(monkeypatch):
     run.metadata.return_value = {"run_id": "a" * 32}
     run.configuration.return_value = {"run_id": "a" * 32}
     monkeypatch.setattr(tracking, "reserve", Mock(return_value=run))
-    FakeRayJob.error = ApiException(status=409)
-    with pytest.raises(ApiException):
+    FakeRayJob.error = submission._SdkSubmissionError(ApiException(status=409))
+    with pytest.raises(submission._SdkSubmissionError):
         backend._submit_sync(
             "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
         )

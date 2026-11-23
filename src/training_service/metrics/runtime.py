@@ -16,10 +16,12 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from numbers import Real
 from pathlib import Path
-from stat import S_ISDIR
+from stat import S_ISDIR, S_ISREG
 from typing import Any
 from uuid import uuid4
 
@@ -90,10 +92,45 @@ class SystemSampler:
         return metrics
 
     def gpu(self) -> dict[str, float]:
+        def visibility(name: str) -> list[str] | None:
+            value = os.getenv(name)
+            if value is None:
+                return None
+            selectors = [item.strip() for item in value.split(",")]
+            # MIG instances cannot safely be measured with a parent-GPU query.
+            if len(selectors) > 64 or any(
+                not re.fullmatch(
+                    r"(?:0|[1-9][0-9]*|GPU-[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})",
+                    item,
+                )
+                for item in selectors
+            ):
+                return []
+            return list(dict.fromkeys(selectors))
+
+        cuda = visibility("CUDA_VISIBLE_DEVICES")
+        nvidia = visibility("NVIDIA_VISIBLE_DEVICES")
+        if cuda == [] or nvidia == []:
+            return {}
+        if cuda is None:
+            selectors = nvidia
+        elif all(item.startswith("GPU-") for item in cuda):
+            if nvidia is not None and not set(cuda).issubset(nvidia):
+                return {}
+            selectors = cuda
+        elif nvidia is not None and set(cuda) == {str(i) for i in range(len(nvidia))}:
+            # CUDA indices are local ordinals, not necessarily nvidia-smi IDs.
+            # The entire allocation is unambiguous; a partial index mapping is not.
+            selectors = nvidia
+        else:
+            return {}
+        if not selectors:
+            return {}
         try:
             result = subprocess.run(
                 [
                     "nvidia-smi",
+                    "--id=" + ",".join(selectors),
                     "--query-gpu=utilization.gpu,memory.used,memory.total,power.draw",
                     "--format=csv,noheader,nounits",
                 ],
@@ -102,10 +139,11 @@ class SystemSampler:
                 timeout=2,
                 check=False,
             )
-            if result.returncode:
+            lines = result.stdout.splitlines()
+            if result.returncode or len(lines) != len(selectors):
                 return {}
             metrics = {}
-            for index, line in enumerate(result.stdout.splitlines()):
+            for index, line in enumerate(lines):
                 for key, value, factor in zip(
                     (
                         "utilization_percent",
@@ -131,9 +169,12 @@ class RuntimeRecorder:
 
     DRAIN_TIMEOUT = 10
     BATCH_SIZE = 64
+    SCAN_MAX_ENTRIES = 10_000
+    SCAN_MAX_DEPTH = 32
+    SCAN_TIMEOUT = 2
 
     def __init__(self, configuration: dict[str, str]) -> None:
-        self.configuration = configuration
+        self.configuration = dict(configuration)
         ca_bundle = "".join(
             os.environ[f"TRAINING_SERVICE_MLFLOW_CA_{index}"]
             for index in range(int(configuration.get("ca_bundle_parts", "0")))
@@ -152,6 +193,9 @@ class RuntimeRecorder:
         self._completed = 0
         self._nonfinite = 0
         self._lock = threading.Lock()
+        self._artifact_root: tuple[str, tuple[int, int]] | None = None
+        if configuration.get("artifact_root"):
+            self.set_artifact_root(configuration["artifact_root"])
         self._closed = False
         identity = f"{socket.gethostname()}:{os.getpid()}"
         self._is_driver = os.getenv("TRAINING_SERVICE_MLFLOW_DRIVER_PROCESS", identity) == identity
@@ -165,7 +209,7 @@ class RuntimeRecorder:
         self._checkpoint_count = 0
         self._initial_step: int | None = None
         self._last_step_duration: float | None = None
-        self.emit(tags={self._producer: json.dumps(self._summary("running"))})
+        self.emit(tags={self._producer + ".startup": json.dumps(self._summary("running"))})
         self._writer.start()
 
     def emit(
@@ -185,8 +229,13 @@ class RuntimeRecorder:
         if directory_size:
             key, directory = directory_size
             try:
-                scan = (key, directory, self._directory_identity(directory))
-            except OSError:
+                with self._lock:
+                    root = self._artifact_root
+                if root is not None and ".." not in Path(directory).parts:
+                    relative = Path(os.path.abspath(directory)).relative_to(root[0]).parts
+                    with self._open_artifact_directory(root, relative) as descriptor:
+                        scan = (key, root, relative, self._directory_identity(descriptor))
+            except (OSError, ValueError):
                 pass
         with self._lock:
             if self._closed:
@@ -200,12 +249,101 @@ class RuntimeRecorder:
             except queue.Full:
                 self._failed += 1
 
+    def set_artifact_root(self, directory: str) -> None:
+        """Approve one artifact tree; inherited configuration approves the same path."""
+        root = None
+        try:
+            if ".." in Path(directory).parts:
+                raise ValueError("Artifact root contains traversal")
+            absolute = os.path.abspath(directory)
+            with self._open_directory(Path(absolute).parts[1:]) as descriptor:
+                stat = os.fstat(descriptor)
+                root = (absolute, (stat.st_dev, stat.st_ino))
+        except (OSError, ValueError):
+            pass
+        with self._lock:
+            self.configuration["artifact_root"] = directory
+            self._artifact_root = root
+
     @staticmethod
-    def _directory_identity(directory: str) -> tuple[int, int, int, int]:
-        stat = Path(directory).stat()
-        if not S_ISDIR(stat.st_mode):
-            raise NotADirectoryError(directory)
+    @contextmanager
+    def _open_directory(parts: tuple[str, ...], parent: int | None = None) -> Iterator[int]:
+        if len(parts) > 256 or any(part in {"", ".", ".."} or "/" in part for part in parts):
+            raise ValueError("Invalid artifact path")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = os.open("/", flags) if parent is None else os.dup(parent)
+        try:
+            for part in parts:
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def _open_artifact_directory(
+        self, root: tuple[str, tuple[int, int]], relative: tuple[str, ...]
+    ) -> Iterator[int]:
+        with self._open_directory(Path(root[0]).parts[1:]) as parent:
+            stat = os.fstat(parent)
+            if (stat.st_dev, stat.st_ino) != root[1]:
+                raise OSError("Artifact root was replaced")
+            with self._open_directory(relative, parent) as descriptor:
+                yield descriptor
+
+    @staticmethod
+    def _directory_identity(descriptor: int) -> tuple[int, int, int, int]:
+        stat = os.fstat(descriptor)
         return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
+
+    def _directory_size(
+        self,
+        root: tuple[str, tuple[int, int]],
+        relative: tuple[str, ...],
+        identity: tuple[int, int, int, int],
+    ) -> float:
+        deadline = time.monotonic() + self.SCAN_TIMEOUT
+        entries = 0
+
+        def visit(descriptor: int, depth: int) -> int:
+            nonlocal entries
+            before = self._directory_identity(descriptor)
+            if depth > self.SCAN_MAX_DEPTH or time.monotonic() >= deadline:
+                raise OSError("Artifact scan limit exceeded")
+            size = 0
+            with os.scandir(descriptor) as children:
+                for child in children:
+                    entries += 1
+                    if entries > self.SCAN_MAX_ENTRIES or time.monotonic() >= deadline:
+                        raise OSError("Artifact scan limit exceeded")
+                    stat = child.stat(follow_symlinks=False)
+                    if S_ISREG(stat.st_mode):
+                        size += stat.st_size
+                    elif S_ISDIR(stat.st_mode):
+                        with self._open_directory((child.name,), descriptor) as nested:
+                            expected = (
+                                stat.st_dev,
+                                stat.st_ino,
+                                stat.st_mtime_ns,
+                                stat.st_ctime_ns,
+                            )
+                            if self._directory_identity(nested) != expected:
+                                raise OSError("Artifact directory was replaced")
+                            size += visit(nested, depth + 1)
+            if self._directory_identity(descriptor) != before:
+                raise OSError("Artifact directory changed during scan")
+            return size
+
+        with self._open_artifact_directory(root, relative) as descriptor:
+            if self._directory_identity(descriptor) != identity:
+                raise OSError("Artifact directory was rotated")
+            size = visit(descriptor, 0)
+            # Reopen from the approved path to detect renames/replacements while scanning.
+            with self._open_artifact_directory(root, relative) as current:
+                if self._directory_identity(current) != identity:
+                    raise OSError("Artifact directory was rotated")
+            return float(size)
 
     def _write(self) -> None:
         deadline: float | None = None
@@ -215,8 +353,9 @@ class RuntimeRecorder:
                 # timeout so a dead server cannot stall pod finalization.
                 if deadline is None:
                     deadline = time.monotonic() + self.DRAIN_TIMEOUT
-                if time.monotonic() > deadline:
+                if self._queue.empty() or time.monotonic() > deadline:
                     return
+            failed = False
             try:
                 batch = [self._queue.get(timeout=0.1)]
             except queue.Empty:
@@ -231,17 +370,10 @@ class RuntimeRecorder:
                 labels = {}
                 for metrics, tags, step, scan, timestamp in batch:
                     if scan:
-                        key, directory, identity = scan
+                        key, root, relative, identity = scan
                         try:
-                            if self._directory_identity(directory) == identity:
-                                size = sum(
-                                    p.stat().st_size
-                                    for p in Path(directory).rglob("*")
-                                    if p.is_file()
-                                )
-                                if self._directory_identity(directory) == identity:
-                                    metrics[key] = float(size)
-                        except OSError:
+                            metrics[key] = self._directory_size(root, relative, identity)
+                        except (OSError, ValueError):
                             # Omit rotated/unavailable checkpoints rather than reporting zero.
                             pass
                     points.extend(
@@ -256,13 +388,14 @@ class RuntimeRecorder:
                 try:
                     self.client.log_batch(self.run_id, points, labels)
                 except TrackingError:
-                    with self._lock:
-                        self._failed += len(batch)
+                    failed = True
                     LOG.warning(
                         "MLflow metrics could not be delivered; check server access and readiness."
                     )
             finally:
                 with self._lock:
+                    if failed:
+                        self._failed += len(batch)
                     self._completed += len(batch)
                 for _ in batch:
                     self._queue.task_done()
@@ -400,17 +533,32 @@ class RuntimeRecorder:
     def _aggregate_delivery(self, own: dict[str, Any]) -> None:
         run = self.client.get_run(self.run_id)
         tags = {tag["key"]: tag["value"] for tag in run.get("data", {}).get("tags", [])}
+        candidates: dict[str, tuple[int, str]] = {}
+        for key, value in tags.items():
+            if not key.startswith("tracking.producer."):
+                continue
+            producer, _, suffix = key.rpartition(".")
+            priority = {"startup": 1, "terminal": 2}.get(suffix, 0)
+            if not priority:
+                producer = key  # Legacy producers used a single mutable tag.
+            if producer not in candidates or priority > candidates[producer][0]:
+                candidates[producer] = (priority, value)
         summaries = {}
         try:
-            for key, value in tags.items():
-                if key.startswith("tracking.producer."):
-                    item = json.loads(value)
-                    if not isinstance(item, dict) or any(
-                        not isinstance(item.get(field), int) or item[field] < 0
+            for producer, (priority, value) in candidates.items():
+                item = json.loads(value)
+                if (
+                    not isinstance(item, dict)
+                    or any(
+                        type(item.get(field)) is not int or item[field] < 0
                         for field in ("failed", "unresolved", "nonfinite", "world_size")
-                    ):
-                        raise ValueError("Invalid producer summary")
-                    summaries[key] = item
+                    )
+                    or (item.get("rank") is not None and not isinstance(item["rank"], str))
+                ):
+                    raise ValueError("Invalid producer summary")
+                if priority == 1:
+                    item["state"] = "running"  # Startup alone never proves delivery completed.
+                summaries[producer] = item
         except (ValueError, TypeError):
             raise TrackingError() from None
         summaries[self._producer] = own
@@ -450,13 +598,14 @@ class RuntimeRecorder:
                 return
             self._closed = True
         self._stop.set()
-        if self._sampler is not None:
+        if self._sampler is not None and self._sampler.is_alive():
             self._sampler.join(timeout=3)
         self._writer.join(timeout=self.DRAIN_TIMEOUT)
         summary = self._summary()
         try:
-            self.client.log(self.run_id, tags={self._producer: json.dumps(summary)})
+            self.client.log(self.run_id, tags={self._producer + ".terminal": json.dumps(summary)})
         except TrackingError:
+            summary = {**summary, "state": "incomplete"}
             LOG.warning("MLflow delivery summary could not be saved; check tracking availability.")
         if self._is_driver:
             try:

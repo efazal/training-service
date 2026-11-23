@@ -234,10 +234,39 @@ class TrackingClient:
         )
 
     def finish(self, run_id: str, status: str) -> None:
+        terminal = {"FINISHED", "FAILED", "KILLED"}
+        if status not in terminal:
+            raise TrackingError()
+        run = self.get_run(run_id)
+        if run["info"]["status"] in terminal:
+            return
+        # MLflow parameters are immutable. Both the driver and DELETE claim the
+        # same parameter before updating status, so competing writers converge
+        # on one result without overwriting an earlier completion with KILLED.
+        result: dict[str, Any] = {"status": status, "end_time": int(time.time() * 1000)}
+        try:
+            self.log(run_id, params={"training.terminal_result": json.dumps(result)})
+        except TrackingError:
+            # A conflicting claim or a lost response may still have committed.
+            run = self.get_run(run_id)
+            if run["info"]["status"] in terminal:
+                return
+            params = {item["key"]: item["value"] for item in run.get("data", {}).get("params", [])}
+            try:
+                result = json.loads(params["training.terminal_result"])
+                if (
+                    not isinstance(result, dict)
+                    or result.get("status") not in terminal
+                    or type(result.get("end_time")) is not int
+                    or result["end_time"] < 0
+                ):
+                    raise ValueError("Invalid terminal result")
+            except (KeyError, ValueError, TypeError):
+                raise TrackingError() from None
         self.request(
             "POST",
             "runs/update",
-            {"run_id": run_id, "status": status, "end_time": int(time.time() * 1000)},
+            {"run_id": run_id, "status": result["status"], "end_time": result["end_time"]},
         )
 
     def delete_run(self, run_id: str) -> None:

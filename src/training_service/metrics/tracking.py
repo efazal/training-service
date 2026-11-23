@@ -27,6 +27,7 @@ from training_service.metrics.client import (
 
 LOG = logging.getLogger(__name__)
 ANNOTATION = "training.rhoai.io/mlflow"
+DELETION_FINALIZER = "training.rhoai.io/mlflow-finalization"
 
 
 def unavailable() -> ApiError:
@@ -193,8 +194,10 @@ def finalize_deleted(
     project: str,
     token: str,
     ca_file: str | None,
+    *,
+    binding: tuple[TrackingClient, dict[str, str], dict[str, Any]] | None = None,
 ) -> None:
-    bound = bound_run(job, project, token, ca_file)
+    bound = binding or bound_run(job, project, token, ca_file)
     if not bound:
         return
     tracking, value, run = bound
@@ -205,11 +208,8 @@ def finalize_deleted(
     except TrackingError:
         LOG.warning("MLflow deletion tag could not be saved; attempting eligible finalization.")
     state = job.get("status", {}).get("jobStatus")
-    tags = {item["key"]: item["value"] for item in run.get("data", {}).get("tags", [])}
-    # An active driver owns its terminal result. API cancellation must not race its
-    # FINISHED/FAILED write with a stale KILLED update; MLflow has no compare-and-set.
-    if state not in {"SUCCEEDED", "FAILED"} and tags.get("job.started_at"):
-        return
+    # finish() arbitrates with driver completion through an immutable parameter;
+    # cancellation cannot rely on SIGTERM reaching the training process.
     status = {"SUCCEEDED": "FINISHED", "FAILED": "FAILED"}.get(state, "KILLED")
     tracking.finish(value["run_id"], status)
 

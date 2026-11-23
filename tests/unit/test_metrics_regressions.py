@@ -141,7 +141,7 @@ def test_copied_or_mismatched_annotations_never_finalize_another_run(monkeypatch
     obj.finish.assert_not_called()
 
 
-def test_delete_does_not_race_active_driver_terminal_result(monkeypatch):
+def test_delete_finalizes_active_driver_without_relying_on_sigterm(monkeypatch):
     obj = Mock()
     obj.get_run.return_value = bound_response(**{"job.started_at": "2026-11-20T12:00:00Z"})
     monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
@@ -149,7 +149,7 @@ def test_delete_does_not_race_active_driver_terminal_result(monkeypatch):
     job = tracked_job()
     job["status"] = {"jobStatus": "RUNNING"}
     tracking.finalize_deleted(job, "team-alpha", "caller", None)
-    obj.finish.assert_not_called()
+    obj.finish.assert_called_once_with(RUN, "KILLED")
     obj.log.assert_called_once()
 
 
@@ -177,15 +177,19 @@ def test_batches_preserve_every_loss_step_and_event_timestamp(monkeypatch):
     monkeypatch.setattr(runtime, "TrackingClient", lambda *args, **kwargs: obj)
     record = runtime.RuntimeRecorder(CONFIG)
     assert ready.wait(2)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(runtime.time, "time", lambda: clock["now"])
     try:
         for step in range(100):
+            clock["now"] = 100.0 + step
             record.event("on_log", context(step=step, loss=1 / (step + 1)))
     finally:
+        clock["now"] = 10000.0
         release.set()
         record.close("FINISHED")
     losses = [point for batch in obj.batches for point in batch if point["key"] == "train/loss"]
     assert [point["step"] for point in losses] == list(range(100))
-    assert all(point["timestamp"] > 0 for point in losses)
+    assert [point["timestamp"] for point in losses] == [(100 + step) * 1000 for step in range(100)]
     assert len(obj.batches) < 20
 
 
@@ -273,6 +277,7 @@ def test_rotated_checkpoint_is_omitted_not_reported_as_zero(monkeypatch, tmp_pat
     assert ready.wait(2)
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
+    record.set_artifact_root(str(tmp_path))
     (checkpoint / "weights").write_bytes(b"abc")
     record.event("on_save", context(metrics={"checkpoint_path": str(checkpoint)}))
     (checkpoint / "weights").unlink()
@@ -285,7 +290,8 @@ def test_rotated_checkpoint_is_omitted_not_reported_as_zero(monkeypatch, tmp_pat
 
 
 def test_training_results_recorded_before_failed_upload(monkeypatch, tmp_path):
-    record = Mock()
+    record = Mock(configuration=dict(CONFIG))
+    monkeypatch.setenv("TRAINING_SERVICE_MLFLOW_RUN", json.dumps(CONFIG))
     monkeypatch.setitem(
         sys.modules,
         "training_service_metrics_runtime",
@@ -348,6 +354,7 @@ def test_job_status_survives_gateway_trust_lookup_failure(monkeypatch):
         Mock(side_effect=ApiError(503, "metrics_unavailable", "Trust unavailable")),
     )
     request = Request({"type": "http", "headers": [(b"authorization", b"Bearer caller")]})
+    request.state.caller_bearer_token = "caller"
     detail = backend.get_job(request, "team-alpha", "job")
     assert detail["id"] == "job"
     assert "mlflow_url" not in detail
