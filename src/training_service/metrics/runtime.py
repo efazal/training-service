@@ -19,6 +19,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from hashlib import sha256
 from numbers import Real
 from pathlib import Path
 from stat import S_ISDIR, S_ISREG
@@ -32,6 +33,13 @@ except ImportError:
 
 LOG = logging.getLogger(__name__)
 _CURRENT: RuntimeRecorder | None = None
+
+
+def _metric_float(value: Real) -> float:
+    try:
+        return float(value)
+    except OverflowError:
+        return math.inf
 
 
 def numeric_metrics(
@@ -49,14 +57,29 @@ def numeric_metrics(
             for name, child in value.items():
                 visit(child, key + "/" + str(name) if key else str(name), depth + 1)
         elif isinstance(value, Real) and not isinstance(value, bool):
-            number = float(value)
+            number = _metric_float(value)
             if math.isfinite(number):
-                result[re.sub(r"[^\w /.:\-]", "_", key)[:250]] = number
+                result[key] = number
             elif nonfinite is not None:
                 nonfinite.append(key)
 
     visit(values, prefix.rstrip("/"), 0)
-    return result
+    names = {key: re.sub(r"[^\w /.:\-]", "_", key)[:250] for key in result}
+    # Reserve unchanged names first, including names that resemble generated suffixes.
+    metrics = {key: value for key, value in result.items() if names[key] == key}
+    for key in sorted(result):
+        if names[key] == key:
+            continue
+        digest = sha256(key.encode()).hexdigest()[:16]
+        suffix = "_" + digest
+        name = names[key][: 250 - len(suffix)] + suffix
+        collision = 0
+        while name in metrics:
+            collision += 1
+            suffix = f"_{digest}_{collision}"
+            name = names[key][: 250 - len(suffix)] + suffix
+        metrics[name] = result[key]
+    return metrics
 
 
 class SystemSampler:
@@ -226,7 +249,7 @@ class RuntimeRecorder:
         if omitted:
             labels["training.nonfinite_metrics"] = "true"
         scan = None
-        if directory_size:
+        if directory_size and directory_size[0] not in values:
             key, directory = directory_size
             try:
                 with self._lock:
@@ -473,17 +496,14 @@ class RuntimeRecorder:
             raw = context.metrics or {}
             path = raw.get("checkpoint_path")
             size = raw.get("checkpoint_size_bytes")
-            if (
-                isinstance(size, Real)
-                and not isinstance(size, bool)
-                and math.isfinite(size)
-                and float(size) >= 0
-            ):
-                metrics["checkpoint/size_bytes"] = size
+            if isinstance(size, Real) and not isinstance(size, bool):
+                size = _metric_float(size)
+                if size >= 0:
+                    metrics["checkpoint/size_bytes"] = size
             if isinstance(path, str):
                 tags["checkpoint.latest_path"] = path[:1000]
-                if "checkpoint/size_bytes" not in metrics:
-                    directory_size = ("checkpoint/size_bytes", path)
+                # emit validates the backend value before deciding whether a scan is needed.
+                directory_size = ("checkpoint/size_bytes", path)
             # Do not call time since last step 'checkpoint duration': it includes other work.
             for key in ("checkpoint_duration_seconds", "checkpoint_save_duration_seconds"):
                 if isinstance(raw.get(key), Real):
@@ -616,10 +636,16 @@ class RuntimeRecorder:
                 )
         # Ancillary telemetry must never suppress an independent terminal-state attempt.
         if status:
-            try:
-                self.client.finish(self.run_id, status)
-            except TrackingError:
-                LOG.warning("MLflow finalization failed; the run may remain open in MLflow.")
+            for attempt in range(2):
+                try:
+                    self.client.finish(self.run_id, status)
+                    break
+                except TrackingError as error:
+                    if attempt == 0 and (error.status in {408, 429} or 500 <= error.status < 600):
+                        time.sleep(1)
+                        continue
+                    LOG.warning("MLflow finalization failed; the run may remain open in MLflow.")
+                    break
 
 
 def current_recorder() -> RuntimeRecorder:

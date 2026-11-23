@@ -8,6 +8,35 @@ from urllib.parse import urlencode
 
 from training_service.metrics.client import TrackingClient, TrackingError
 
+_HISTORY_PAGE_SIZE = 1000
+_HISTORY_MAX_PAGES = 1000
+
+
+def _loss_history(tracking, run_id):
+    history = []
+    token = None
+    seen_tokens = set()
+    # MLflow 3: request page_token/max_results, response next_page_token.
+    # https://github.com/mlflow/mlflow/blob/v3.6.0/mlflow/protos/service.proto
+    for _ in range(_HISTORY_MAX_PAGES):
+        query = {"run_id": run_id, "metric_key": "train/loss", "max_results": _HISTORY_PAGE_SIZE}
+        if token is not None:
+            query["page_token"] = token
+        page = tracking.request("GET", "metrics/get-history", query)
+        metrics = page.get("metrics", [])
+        assert isinstance(metrics, list) and len(metrics) <= _HISTORY_PAGE_SIZE, (
+            "MLflow returned an invalid or oversized metric history page"
+        )
+        history.extend(metrics)
+        token = page.get("next_page_token")
+        if token is None or token == "":
+            return history
+        assert isinstance(token, str) and token not in seen_tokens, (
+            "MLflow returned an invalid or repeated pagination token"
+        )
+        seen_tokens.add(token)
+    raise AssertionError("MLflow metric history exceeded the pagination limit")
+
 
 def verify_run(api, uri, detail, *, detailed=True):
     tracking = TrackingClient(
@@ -19,7 +48,7 @@ def verify_run(api, uri, detail, *, detailed=True):
     run_id = detail.get("mlflow_run_id")
     assert isinstance(run_id, str), "Job did not expose an MLflow run ID"
     try:
-        run = tracking.request("GET", "runs/get", {"run_id": run_id})["run"]
+        run = tracking.get_run(run_id)
         info = run["info"]
         expected = (
             uri.rstrip("/")
@@ -61,9 +90,7 @@ def verify_run(api, uri, detail, *, detailed=True):
                 values["training/finished_at_unix_seconds"]
                 >= values["training/started_at_unix_seconds"]
             )
-            history = tracking.request(
-                "GET", "metrics/get-history", {"run_id": run_id, "metric_key": "train/loss"}
-            )["metrics"]
+            history = _loss_history(tracking, run_id)
             assert history and all(
                 math.isfinite(m["value"]) and m["step"] >= 0 and m["timestamp"] >= 0
                 for m in history

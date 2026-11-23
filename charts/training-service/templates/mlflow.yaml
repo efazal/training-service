@@ -1,4 +1,3 @@
-{{- if .Values.mlflow.enabled }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -8,9 +7,11 @@ rules:
     resources: [mlflows]
     resourceNames: [mlflow]
     verbs: [get]
+{{- if .Values.mlflow.enabled }}
   - apiGroups: [authorization.k8s.io]
     resources: [subjectaccessreviews]
     verbs: [create]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -48,7 +49,7 @@ subjects:
   - kind: Group
     name: {{ printf "system:serviceaccounts:%s" .Release.Namespace | quote }}
 {{- end }}
-{{- if .Values.mlflow.server.create }}
+{{- if and .Values.mlflow.enabled .Values.mlflow.server.create }}
 {{- if not (.Capabilities.APIVersions.Has "mlflow.opendatahub.io/v1") }}
 {{- fail "Enable the RHOAI MLflow operator before setting mlflow.server.create=true." }}
 {{- end }}
@@ -71,6 +72,5 @@ spec:
     resources:
       requests:
         storage: {{ .Values.mlflow.server.storageSize | quote }}
-{{- end }}
 {{- end }}
 {{- end }}

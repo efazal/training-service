@@ -41,7 +41,24 @@ def test_mlflow_permissions_are_project_scoped_and_server_is_optional(tmp_path):
     assert binding["subjects"] == [{"kind": "Group", "name": "system:serviceaccounts:default"}]
     disabled = render(tmp_path, {"mlflow": {"enabled": False}})
     assert disabled.returncode == 0, disabled.stderr
-    assert "-mlflow-training" not in disabled.stdout
+    assert "-mlflow-training" in disabled.stdout
+    disabled_docs = list(yaml.safe_load_all(disabled.stdout))
+    discovery = next(
+        doc
+        for doc in disabled_docs
+        if doc["kind"] == "ClusterRole" and doc["metadata"]["name"].endswith("-mlflow-discovery")
+    )
+    assert discovery["rules"] == [
+        {
+            "apiGroups": ["mlflow.opendatahub.io"],
+            "resources": ["mlflows"],
+            "resourceNames": ["mlflow"],
+            "verbs": ["get"],
+        }
+    ]
+    no_grant = render(tmp_path, {"mlflow": {"enabled": False, "grantTrainingAccess": False}})
+    assert no_grant.returncode == 0, no_grant.stderr
+    assert "-mlflow-training" not in no_grant.stdout
 
 
 def test_mlflow_server_creation_requires_installed_operator(tmp_path):

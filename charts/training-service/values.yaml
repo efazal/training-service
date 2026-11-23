@@ -57,10 +57,11 @@ logBackend:
     bundle: ""
 
 mlflow:
-  # Automatically track jobs when the managed MLflow singleton is available.
+  # Track new jobs when MLflow is available; existing runs remain recoverable.
   enabled: true
   # Grant this namespace's service accounts experiment access, including Ray's
-  # generated accounts. Other training projects need the same scoped grant.
+  # generated accounts. Retain access for existing jobs when enabled=false.
+  # Other training projects need the same scoped grant.
   grantTrainingAccess: true
   server:
     # The platform administrator normally provisions this cluster-wide singleton.

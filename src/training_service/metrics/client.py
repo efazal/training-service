@@ -173,20 +173,75 @@ class TrackingClient:
         return run
 
     def create_run(self, experiment: str, name: str, tags: dict[str, str]) -> str:
+        try:
+            result = self.request(
+                "POST",
+                "runs/create",
+                {
+                    "experiment_id": experiment,
+                    "run_name": name,
+                    "start_time": int(time.time() * 1000),
+                    "tags": [{"key": key, "value": value} for key, value in tags.items()],
+                },
+            )
+            run = result.get("run")
+            info = run.get("info") if isinstance(run, dict) else None
+            identifier = info.get("run_id") if isinstance(info, dict) else None
+            if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier):
+                raise TrackingError()
+            return identifier
+        except TrackingError as error:
+            submission_id = tags.get("training.submission_id")
+            if submission_id and (error.status >= 500 or error.status in {408, 429}):
+                recovered = self.find_run(experiment, submission_id)
+                if recovered:
+                    return recovered
+            raise
+
+    def find_run(self, experiment: str, submission_id: str) -> str | None:
+        """Reconcile only a server-issued reservation identity in this workspace."""
+        if not re.fullmatch(r"[a-zA-Z0-9-]{1,128}", submission_id):
+            raise TrackingError()
         result = self.request(
             "POST",
-            "runs/create",
+            "runs/search",
             {
-                "experiment_id": experiment,
-                "run_name": name,
-                "start_time": int(time.time() * 1000),
-                "tags": [{"key": key, "value": value} for key, value in tags.items()],
+                "experiment_ids": [experiment],
+                "filter": f"tags.`training.submission_id` = '{submission_id}'",
+                "max_results": 2,
+                "run_view_type": "ALL",
             },
         )
-        run = result.get("run")
-        info = run.get("info") if isinstance(run, dict) else None
-        identifier = info.get("run_id") if isinstance(info, dict) else None
-        if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier):
+        runs = result.get("runs", [])
+        if not isinstance(runs, list) or len(runs) > 1 or result.get("next_page_token"):
+            raise TrackingError()
+        if not runs:
+            return None
+        run = runs[0]
+        if not isinstance(run, dict) or not isinstance(run.get("info"), dict):
+            raise TrackingError()
+        identifier = run["info"].get("run_id")
+        if (
+            not isinstance(identifier, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", identifier)
+            or run["info"].get("experiment_id") != experiment
+        ):
+            raise TrackingError()
+        data = run.get("data")
+        values = data.get("tags") if isinstance(data, dict) else None
+        if not isinstance(values, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("key"), str)
+            or not isinstance(item.get("value"), str)
+            for item in values
+        ):
+            raise TrackingError()
+        tags = {item["key"]: item["value"] for item in values}
+        if (
+            tags.get("training.submission_id") != submission_id
+            or tags.get("training.project") != self.project
+            or run["info"].get("lifecycle_stage") == "deleted"
+        ):
             raise TrackingError()
         return identifier
 
@@ -194,18 +249,39 @@ class TrackingClient:
         # Preserve every point's original timestamp and step, including repeated keys.
         if len(tags) > 100:
             raise TrackingError()
-        limit = 1000 - len(tags)
-        for offset in range(0, max(1, len(metrics)), limit):
+        labels = [{"key": key, "value": value} for key, value in tags.items()]
+        body = {"run_id": run_id, "metrics": [], "params": [], "tags": labels}
+        try:
+            overhead = len(json.dumps(body, allow_nan=False).encode())
+            sizes = [len(json.dumps(point, allow_nan=False).encode()) for point in metrics]
+        except (TypeError, ValueError, OverflowError):
+            raise TrackingError() from None
+        # The REST limit applies to the encoded JSON, including Unicode escapes.
+        # Reserve the final tags in every chunk's budget so the last one always fits.
+        maximum = 1_000_000
+        if overhead > maximum:
+            raise TrackingError(413)
+        chunks: list[list[dict[str, Any]]] = []
+        chunk: list[dict[str, Any]] = []
+        size = overhead
+        for point, length in zip(metrics, sizes, strict=True):
+            if overhead + length > maximum:
+                raise TrackingError(413)
+            if len(chunk) >= 1000 - len(tags) or size + length + (2 if chunk else 0) > maximum:
+                chunks.append(chunk)
+                chunk, size = [], overhead
+            size += length + (2 if chunk else 0)
+            chunk.append(point)
+        chunks.append(chunk)
+        for index, points in enumerate(chunks):
             self.request(
                 "POST",
                 "runs/log-batch",
                 {
                     "run_id": run_id,
-                    "metrics": metrics[offset : offset + limit],
+                    "metrics": points,
                     "params": [],
-                    "tags": [{"key": key, "value": value} for key, value in tags.items()]
-                    if offset + limit >= len(metrics)
-                    else [],
+                    "tags": labels if index == len(chunks) - 1 else [],
                 },
             )
 

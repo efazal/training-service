@@ -597,12 +597,17 @@ def main(configuration: dict[str, Any]) -> None:
 
     recorder = None
     started = time.monotonic()
+    status = "FAILED"
+    finalizing = False
 
     def cancelled(signum: int, frame: Any) -> None:
+        # Success is selected before finally can install SIG_IGN. A late signal
+        # must not change that result or interrupt an in-progress finalization.
+        if status == "FINISHED" or finalizing:
+            return
         raise SystemExit(128 + signum)
 
     previous = signal.getsignal(signal.SIGTERM)
-    status = "FAILED"
     try:
         signal.signal(signal.SIGTERM, cancelled)
         os.environ["TRAINING_SERVICE_MLFLOW_RUN"] = json.dumps(tracked)
@@ -625,8 +630,9 @@ def main(configuration: dict[str, Any]) -> None:
         status = "KILLED"
         raise
     finally:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        finalizing = True
         try:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             if recorder is None:
                 # current_recorder may publish the instance before cancellation
                 # interrupts its return. Never create another one during cleanup.

@@ -17,7 +17,8 @@ from kubernetes.config.config_exception import ConfigException
 from urllib3.exceptions import HTTPError
 
 from training_service.errors import ApiError
-from training_service.kubernetes_client import TIMEOUT
+from training_service.kubernetes_client import TIMEOUT, caller_configuration
+from training_service.metrics import reservation as reservations
 from training_service.metrics.client import (
     DeletedExperimentError,
     TrackingClient,
@@ -28,6 +29,7 @@ from training_service.metrics.client import (
 LOG = logging.getLogger(__name__)
 ANNOTATION = "training.rhoai.io/mlflow"
 DELETION_FINALIZER = "training.rhoai.io/mlflow-finalization"
+ANNOTATION_LIMIT = 65_536
 
 
 def unavailable() -> ApiError:
@@ -39,9 +41,9 @@ def unavailable() -> ApiError:
     )
 
 
-def discover() -> str | None:
+def discover(*, recovery: bool = False) -> str | None:
     """Read the singleton's published endpoint; a DSC flag alone is not readiness."""
-    if os.getenv("TRAINING_SERVICE_MLFLOW_ENABLED", "false").lower() != "true":
+    if not recovery and os.getenv("TRAINING_SERVICE_MLFLOW_ENABLED", "false").lower() != "true":
         return None
     try:
         configuration = client.Configuration()
@@ -117,7 +119,7 @@ def verify_training_access(project: str) -> None:
 
 def metadata(job: dict[str, Any], project: str) -> dict[str, str] | None:
     raw = job.get("metadata", {}).get("annotations", {}).get(ANNOTATION)
-    if not isinstance(raw, str) or len(raw) > 4096:
+    if not isinstance(raw, str) or len(raw.encode("utf-8", errors="replace")) > ANNOTATION_LIMIT:
         return None
     try:
         value = json.loads(raw)
@@ -128,6 +130,13 @@ def metadata(job: dict[str, Any], project: str) -> dict[str, str] | None:
             or not re.fullmatch(r"[a-f0-9]{32}", value["run_id"])
             or not isinstance(value.get("url"), str)
             or not valid_url(value.get("tracking_uri", ""))
+            or (
+                "submission_id" in value
+                and (
+                    not isinstance(value["submission_id"], str)
+                    or not re.fullmatch(r"[a-zA-Z0-9-]{1,128}", value["submission_id"])
+                )
+            )
         ):
             return None
         uri = value["tracking_uri"].rstrip("/")
@@ -155,7 +164,7 @@ def bound_run(
     value = metadata(job, project)
     if not value:
         return None
-    uri = discover()
+    uri = discover(recovery=True)
     if not uri or uri.rstrip("/") != value["tracking_uri"].rstrip("/"):
         return None
     tracking = TrackingClient(uri, project, lambda: token.removeprefix("Bearer "), ca_file=ca_file)
@@ -166,12 +175,34 @@ def bound_run(
     identity = job.get("metadata", {})
     if (
         not identity.get("uid")
-        or params.get("training.rayjob_uid") != identity["uid"]
         or tags.get("training.project") != project
         or tags.get("training.job_id") != identity.get("name")
         or run["info"]["experiment_id"] != value["experiment_id"]
     ):
         return None
+    if params.get("training.rayjob_uid") != identity["uid"]:
+        submission_id = value.get("submission_id")
+        if params.get("training.rayjob_uid") or not submission_id:
+            return None
+        if params.get("training.submission_id") != submission_id:
+            return None
+        # A lost create response remains recoverable through its unique, durable
+        # reservation. A replacement name alone is never proof of ownership.
+        configuration = caller_configuration("Bearer " + token.removeprefix("Bearer "))
+        with client.ApiClient(configuration) as api:
+            marker = reservations.load(client.CoreV1Api(api), project, identity["name"])
+            if (
+                marker is None
+                or marker.submission_id != submission_id
+                or marker.data.get("run_id") != value["run_id"]
+                or marker.data.get("tracking_uri") != uri
+                or marker.data.get("submit_attempted") != "true"
+                or (marker.data.get("rayjob_uid") and marker.data["rayjob_uid"] != identity["uid"])
+            ):
+                return None
+            TrackedRun(
+                tracking, value["run_id"], value["experiment_id"], value["experiment_name"], marker
+            ).bind(job)
     return tracking, value, run
 
 
@@ -184,7 +215,7 @@ def public_metadata(
         if bound:
             _, value, _ = bound
             return {"mlflow_url": value["url"], "mlflow_run_id": value["run_id"]}
-    except (ApiError, TrackingError, OSError):
+    except (ApiError, TrackingError, ApiException, HTTPError, OSError):
         LOG.warning("MLflow job binding could not be verified; tracking link omitted.")
     return {}
 
@@ -207,7 +238,9 @@ def finalize_deleted(
         tracking.log(value["run_id"], tags={"training.deletion_requested": "true"})
     except TrackingError:
         LOG.warning("MLflow deletion tag could not be saved; attempting eligible finalization.")
-    state = job.get("status", {}).get("jobStatus")
+    from training_service.jobs import job_status
+
+    state = job_status(job)
     # finish() arbitrates with driver completion through an immutable parameter;
     # cancellation cannot rely on SIGTERM reaching the training process.
     status = {"SUCCEEDED": "FINISHED", "FAILED": "FAILED"}.get(state, "KILLED")
@@ -220,12 +253,14 @@ class TrackedRun:
     run_id: str
     experiment_id: str
     experiment_name: str
+    reservation: reservations.Reservation | None = None
 
     def metadata(self) -> dict[str, str]:
         return {
             "run_id": self.run_id,
             "experiment_id": self.experiment_id,
             "experiment_name": self.experiment_name,
+            **({"submission_id": self.reservation.submission_id} if self.reservation else {}),
             "url": self.client.uri
             + "?"
             + urlencode({"workspace": self.client.project})
@@ -234,6 +269,18 @@ class TrackedRun:
             + "/runs/"
             + self.run_id,
         }
+
+    def annotation(self) -> str:
+        value = json.dumps(
+            {**self.metadata(), "tracking_uri": self.client.uri, "project": self.client.project}
+        )
+        if len(value.encode()) > ANNOTATION_LIMIT:
+            raise ApiError(
+                422,
+                "validation_error",
+                "MLflow tracking metadata is too large. Use a shorter endpoint or experiment name.",
+            )
+        return value
 
     def configuration(self, ca_file: str | None) -> dict[str, str]:
         return {
@@ -247,15 +294,21 @@ class TrackedRun:
         uid = job.get("metadata", {}).get("uid")
         if not isinstance(uid, str) or not uid:
             raise TrackingError()
+        if self.reservation:
+            self.reservation.bind_job(job)
         self.client.log(self.run_id, params={"training.rayjob_uid": uid})
+        if self.reservation:
+            self.reservation.complete(job)
 
-    def failed_submission(self) -> None:
+    def failed_submission(self) -> bool:
         # The RayJob never existed, so the reserved run is garbage; submission
         # retries must not leave duplicate FAILED runs in the experiment.
         try:
             self.client.delete_run(self.run_id)
-            return
-        except TrackingError:
+            return True
+        except TrackingError as error:
+            if error.status == 404:
+                return True
             LOG.warning("Could not delete the reserved MLflow run; marking it failed.")
         try:
             self.client.log(self.run_id, tags={"training.phase": "submission_failed"})
@@ -265,6 +318,8 @@ class TrackedRun:
             self.client.finish(self.run_id, "FAILED")
         except TrackingError:
             LOG.warning("Could not mark the MLflow run as failed after submission failure.")
+            return False
+        return True
 
 
 def reserve(
@@ -280,27 +335,78 @@ def reserve(
     ca_file: str | None = None,
     parameters: dict[str, Any] | None = None,
     details: dict[str, str] | None = None,
+    reservation: reservations.Reservation | None = None,
 ) -> TrackedRun:
     """Use only the caller identity, with workspace forced to the path project."""
     tracking = TrackingClient(uri, project, lambda: token.removeprefix("Bearer "), ca_file=ca_file)
     try:
         experiment_name = experiment or "Default"
-        experiment_id = tracking.experiment(experiment_name)
-        run_id = tracking.create_run(
-            experiment_id,
-            name,
-            {
-                "training.project": project,
-                "training.job_id": name,
-                "training.algorithm": algorithm,
-                "training.submitted_by": submitted_by,
-                "training.phase": "submitted",
-                "training.backend": "ray",
-            },
-        )
-        run = TrackedRun(tracking, run_id, experiment_id, experiment_name)
+        experiment_id = (
+            reservation.data.get("experiment_id") if reservation else None
+        ) or tracking.experiment(experiment_name)
+        if reservation and not reservation.data.get("experiment_id"):
+            reservation.update(experiment_id=experiment_id)
+        tags = {
+            "training.project": project,
+            "training.job_id": name,
+            "training.algorithm": algorithm,
+            "training.submitted_by": submitted_by,
+            "training.phase": "submitted",
+            "training.backend": "ray",
+        }
+        if reservation:
+            tags["training.submission_id"] = reservation.submission_id
+            if reservation.data.get("phase") == "abandoned":
+                previous = reservation.data.get("run_id")
+                if previous:
+                    cleanup = TrackedRun(
+                        tracking, previous, experiment_id, experiment_name, reservation
+                    )
+                    if not cleanup.failed_submission():
+                        raise unavailable()
+                reservation.discard()
+                raise ApiError(
+                    503,
+                    "metrics_unavailable",
+                    "The previous failed MLflow reservation has "
+                    "been reconciled. Retry the submission to create a new attempt.",
+                )
+            if reservation.data.get("submit_attempted") == "true":
+                raise ApiError(
+                    409,
+                    "conflict",
+                    "This submission was already attempted. Look up the job "
+                    "by name before retrying; its original MLflow reservation is retained.",
+                )
+            run_id = reservation.data.get("run_id")
+            if not run_id:
+                if reservation.claim_create():
+                    try:
+                        run_id = tracking.create_run(experiment_id, name, tags)
+                    except TrackingError as error:
+                        if error.status in {400, 401, 403, 404, 409, 413, 422}:
+                            reservation.update(phase="abandoned")
+                            reservation.discard()
+                        raise
+                else:
+                    if reservation.data.get("submit_attempted") == "true":
+                        raise ApiError(
+                            409,
+                            "conflict",
+                            "This submission was already attempted. "
+                            "Look up the original job by name.",
+                        )
+                    run_id = tracking.find_run(experiment_id, reservation.submission_id)
+                    if run_id is None:
+                        raise unavailable()
+                reservation.update(phase="reserved", run_id=run_id, experiment_id=experiment_id)
+        else:
+            run_id = tracking.create_run(experiment_id, name, tags)
+        run = TrackedRun(tracking, run_id, experiment_id, experiment_name, reservation)
         try:
             params = {"resources." + k: str(v) for k, v in resources.items()}
+            if reservation:
+                params["training.submission_id"] = reservation.submission_id
             params.update(details or {})
             for key, value in (parameters or {}).items():
                 if len(params) >= 100:
@@ -317,8 +423,13 @@ def reserve(
                     params["algorithm." + key] = str(value)
             tracking.log(run_id, params=params)
         except TrackingError:
-            run.failed_submission()
+            if reservation:
+                reservation.update(phase="abandoned")
+            if run.failed_submission() and reservation:
+                reservation.discard()
             raise
+        if reservation and reservation.data.get("submit_attempted") == "true":
+            raise ApiError(409, "conflict", "This submission was already attempted.")
         return run
     except DeletedExperimentError:
         raise ApiError(

@@ -8,11 +8,13 @@ import shlex
 import sys
 import zlib
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -383,6 +385,43 @@ class FakeCoreApi:
         self.pvc_reads: list[tuple[str, str]] = []
         self.secret_reads: list[tuple[str, str]] = []
         self.pvc_access_modes: dict[str, list[str]] = {}
+        self.config_maps: dict[str, dict[str, Any]] = {}
+
+    def create_namespaced_config_map(self, namespace, body, **kwargs):
+        with client.ApiClient() as serializer:
+            value = serializer.sanitize_for_serialization(body)
+        name = value["metadata"]["name"]
+        if name in self.config_maps:
+            raise ApiException(status=409)
+        value["metadata"].update(uid=str(uuid4()), resourceVersion="1", namespace=namespace)
+        self.config_maps[name] = deepcopy(value)
+        return deepcopy(value)
+
+    def read_namespaced_config_map(self, name, namespace, **kwargs):
+        if name not in self.config_maps:
+            raise ApiException(status=404)
+        return deepcopy(self.config_maps[name])
+
+    def patch_namespaced_config_map(self, name, namespace, body, **kwargs):
+        value = self.read_namespaced_config_map(name, namespace)
+        metadata = body.get("metadata", {})
+        if any(
+            metadata.get(key, value["metadata"][key]) != value["metadata"][key]
+            for key in ("uid", "resourceVersion")
+        ):
+            raise ApiException(status=409)
+        value["metadata"].update(metadata)
+        value["metadata"]["resourceVersion"] = str(int(value["metadata"]["resourceVersion"]) + 1)
+        value.setdefault("data", {}).update(body.get("data", {}))
+        self.config_maps[name] = deepcopy(value)
+        return deepcopy(value)
+
+    def delete_namespaced_config_map(self, name, namespace, body, **kwargs):
+        value = self.read_namespaced_config_map(name, namespace)
+        uid = body["preconditions"]["uid"] if isinstance(body, dict) else body.preconditions.uid
+        if uid != value["metadata"]["uid"]:
+            raise ApiException(status=409)
+        del self.config_maps[name]
 
     def read_namespaced_persistent_volume_claim(
         self, name: str, namespace: str, **_kwargs: Any
@@ -414,6 +453,14 @@ class FakeRayJob:
         self.client_at_submit = self.kwargs["api_client"]
         if self.error is not None:
             raise self.error
+        self.client_at_submit.created_rayjob = {
+            "metadata": {
+                "uid": "created-rayjob-uid",
+                "name": self.kwargs["job_name"],
+                "namespace": self.kwargs["namespace"],
+                "annotations": dict(self.kwargs.get("annotations", {})),
+            }
+        }
         return str(self.kwargs["job_name"])
 
 
@@ -2295,10 +2342,10 @@ def test_tracked_submission_persists_run_and_never_embeds_caller_credential(
     ca_file.write_text(bundle)
     monkeypatch.setattr(
         backend,
-        "log_configuration",
-        lambda: SimpleNamespace(ca_file=str(ca_file) if full_trust_bundle else None),
+        "metrics_ca_file",
+        lambda: str(ca_file) if full_trust_bundle else None,
     )
-    monkeypatch.setattr(tracking, "discover", lambda: "https://tracking.example/mlflow")
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: "https://tracking.example/mlflow")
     access = Mock()
     monkeypatch.setattr(tracking, "verify_training_access", access)
     run = tracking.TrackedRun(
@@ -2356,8 +2403,8 @@ def test_tracking_permission_failure_prevents_rayjob_creation(monkeypatch):
 
     _mock_sdk(monkeypatch)
     backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
-    monkeypatch.setattr(backend, "log_configuration", lambda: SimpleNamespace(ca_file=None))
-    monkeypatch.setattr(tracking, "discover", lambda: "https://tracking.example/mlflow")
+    monkeypatch.setattr(backend, "metrics_ca_file", lambda: None)
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: "https://tracking.example/mlflow")
     monkeypatch.setattr(
         tracking,
         "verify_training_access",
@@ -2376,7 +2423,7 @@ def test_absent_mlflow_is_optional_unless_experiment_explicitly_requested(monkey
     from training_service.metrics import tracking
 
     _mock_sdk(monkeypatch)
-    monkeypatch.setattr(tracking, "discover", lambda: None)
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: None)
     body = _sample()
     body.mlflow_experiment_name = experiment
     backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
@@ -2403,8 +2450,8 @@ def test_failed_submission_finalizes_reserved_mlflow_run(monkeypatch):
 
     _mock_sdk(monkeypatch)
     backend = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
-    monkeypatch.setattr(backend, "log_configuration", lambda: SimpleNamespace(ca_file=None))
-    monkeypatch.setattr(tracking, "discover", lambda: "https://tracking.example/mlflow")
+    monkeypatch.setattr(backend, "metrics_ca_file", lambda: None)
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: "https://tracking.example/mlflow")
     monkeypatch.setattr(tracking, "verify_training_access", lambda project: None)
     run = Mock()
     run.metadata.return_value = {"run_id": "a" * 32}

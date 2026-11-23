@@ -142,6 +142,9 @@ class LogBackendResolver:
         self._ca_directory: TemporaryDirectory[str] | None = None
         self._ca_file: str | None = None
         self._ca_refresh_at = 0.0
+        self._ca_failure: ApiError | None = None
+        self._ca_retry_at = 0.0
+        self._ca_refreshing = False
         self._settings: LogBackendConfig | None = None
         self._failure: ApiError | None = None
         self._retry_at = 0.0
@@ -154,7 +157,24 @@ class LogBackendResolver:
             for name in ("TRAINING_SERVICE_RAY_CA_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
         ):
             return None
-        if self._ca_file is None or monotonic() >= self._ca_refresh_at:
+        with self._condition:
+            # Cold callers share a discovery; warm callers can validate the
+            # existing file while its replacement is fetched without the lock.
+            while self._ca_refreshing and self._ca_file is None:
+                self._condition.wait()
+            cached = self._ca_file
+            now = monotonic()
+            due = cached is None or now >= self._ca_refresh_at
+            refresh = due and not self._ca_refreshing and now >= self._ca_retry_at
+            if refresh:
+                self._ca_refreshing = True
+            elif cached is None:
+                assert self._ca_failure is not None
+                raise ApiError(503, self._ca_failure.code, self._ca_failure.message)
+        if not refresh:
+            return cached
+
+        try:
             bundle = _discover_ingress_ca()
             try:
                 if self._ca_directory is None:
@@ -173,9 +193,35 @@ class LogBackendResolver:
                     "Cannot prepare the platform public CA bundle. Ensure the service's "
                     "temporary directory is writable (writableTemp.enabled in the chart).",
                 ) from None
-            self._ca_file = str(target)
-            self._ca_refresh_at = monotonic() + _GATEWAY_CACHE_SECONDS
-        return self._ca_file
+        except ApiError as error:
+            with self._condition:
+                self._ca_failure = error
+                self._ca_retry_at = monotonic() + _DISCOVERY_RETRY_SECONDS
+            if cached is None:
+                raise
+            _LOG.warning(
+                "Platform CA refresh failed; using cached trust, retrying in %s seconds: %s",
+                _DISCOVERY_RETRY_SECONDS,
+                error.message,
+            )
+            return cached
+        else:
+            with self._condition:
+                self._ca_file = str(target)
+                self._ca_refresh_at = monotonic() + _GATEWAY_CACHE_SECONDS
+                self._ca_failure = None
+                self._ca_retry_at = 0.0
+            return str(target)
+        finally:
+            with self._condition:
+                self._ca_refreshing = False
+                self._condition.notify_all()
+
+    def trust_file(self) -> str:
+        """Resolve public trust independently of Ray gateway availability."""
+        # Every path, including cached fallbacks, revalidates local trust and
+        # explicit overrides. A refresh failure cannot hide a damaged CA file.
+        return trusted_ca_file(self._platform_ca_file())
 
     def configuration(self) -> "LogBackendConfig":
         with self._condition:
@@ -207,7 +253,7 @@ class LogBackendResolver:
                 if self._gateway is not None and monotonic() < self._refresh_at
                 else _discover_gateway()
             )
-            resolved = log_backend_config(gateway, ca_file=self._platform_ca_file())
+            resolved = log_backend_config(gateway, ca_file=self.trust_file())
         except ApiError as error:
             with self._condition:
                 self._failure = error
@@ -288,6 +334,11 @@ def log_backend_config(
         raise ApiError(
             503, "logs_unavailable", "Unset RAY_ADDRESS and RAY_API_SERVER_ADDRESS in the API pod."
         )
+    return LogBackendConfig(gateway, trusted_ca_file(ca_file))
+
+
+def trusted_ca_file(ca_file: str | None = None) -> str:
+    """Validate the configured CA without resolving any service endpoint."""
     # Give Requests and the WebSocket transport the same explicit trust bundle.
     # A filename also prevents Requests from substituting ambient proxy CA settings.
     ca_file = (
@@ -306,4 +357,4 @@ def log_backend_config(
             "The log backend CA bundle cannot be loaded. Check TRAINING_SERVICE_RAY_CA_FILE "
             "and the mounted public CA ConfigMap.",
         ) from None
-    return LogBackendConfig(gateway, ca_file)
+    return ca_file

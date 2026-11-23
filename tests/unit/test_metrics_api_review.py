@@ -4,7 +4,6 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Barrier, Lock
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -23,7 +22,7 @@ from training_service.metrics import client, tracking
 def test_active_delete_finalizes_even_when_driver_cannot_handle_sigterm(monkeypatch):
     obj = Mock()
     obj.get_run.return_value = bound_response(**{"job.started_at": "2026-11-23T10:00:00Z"})
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     job = tracked_job()
     job["status"] = {"jobStatus": "RUNNING"}
@@ -115,9 +114,7 @@ def test_tracking_uses_verified_token_for_lowercase_bearer(backend, monkeypatch)
     monkeypatch.setattr(tracking, "metadata", lambda *args: {"run_id": RUN})
     public = Mock(return_value={})
     monkeypatch.setattr(tracking, "public_metadata", public)
-    monkeypatch.setattr(
-        jobs.CodeFlareJobBackend, "log_configuration", lambda self: SimpleNamespace(ca_file=None)
-    )
+    monkeypatch.setattr(jobs.CodeFlareJobBackend, "metrics_ca_file", lambda self: None)
     response = http.get(BASE + "/example", headers={"Authorization": "bearer unit-test-token"})
     assert response.status_code == 200
     assert public.call_args.args == (record, "team-a", "unit-test-token", None)
@@ -131,9 +128,7 @@ def test_tracking_finalization_failure_retains_binding_for_delete_retry(backend,
     )
     finalize = Mock(side_effect=[client.TrackingError(), None])
     monkeypatch.setattr(tracking, "finalize_deleted", finalize)
-    monkeypatch.setattr(
-        jobs.CodeFlareJobBackend, "log_configuration", lambda self: SimpleNamespace(ca_file=None)
-    )
+    monkeypatch.setattr(jobs.CodeFlareJobBackend, "metrics_ca_file", lambda self: None)
 
     def patch(*args, **kwargs):
         metadata = kwargs["body"]["metadata"]
@@ -167,11 +162,11 @@ def test_tracking_finalization_failure_retains_binding_for_delete_retry(backend,
 def test_ambiguous_submit_retains_reserved_run_even_when_first_lookup_is_absent(
     monkeypatch, lookup, failure
 ):
-    submission_tests._mock_sdk(monkeypatch)
-    monkeypatch.setattr(jobs, "preflight", lambda *args: None)
+    core = submission_tests._mock_sdk(monkeypatch)
+    monkeypatch.setattr(jobs, "resolve_local_queue", lambda *args: None)
     backend = jobs.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
-    monkeypatch.setattr(backend, "log_configuration", lambda: SimpleNamespace(ca_file=None))
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(backend, "metrics_ca_file", lambda: None)
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "verify_training_access", lambda project: None)
     run = Mock(run_id=RUN)
     run.metadata.return_value = {"run_id": RUN}
@@ -179,7 +174,15 @@ def test_ambiguous_submit_retains_reserved_run_even_when_first_lookup_is_absent(
     monkeypatch.setattr(tracking, "reserve", lambda *args, **kwargs: run)
     error = OSError("lost create response") if failure == "transport" else ApiException(status=403)
     submission_tests.FakeRayJob.error = error
-    read = Mock(return_value=tracked_job())
+
+    def accepted(*args):
+        job = tracked_job()
+        value = json.loads(job["metadata"]["annotations"][tracking.ANNOTATION])
+        value["submission_id"] = next(iter(core.config_maps.values()))["metadata"]["uid"]
+        job["metadata"]["annotations"][tracking.ANNOTATION] = json.dumps(value)
+        return job
+
+    read = Mock(side_effect=accepted)
     if lookup != "accepted":
         read.side_effect = ApiError(
             404 if lookup == "absent" else 503, "not_found", "lookup unavailable"
@@ -201,9 +204,7 @@ def test_delete_failure_keeps_tracking_finalizer_and_never_finalizes(backend, mo
     monkeypatch.setattr(
         tracking, "bound_run", lambda *args: (Mock(), {"run_id": RUN}, bound_response())
     )
-    monkeypatch.setattr(
-        jobs.CodeFlareJobBackend, "log_configuration", lambda self: SimpleNamespace(ca_file=None)
-    )
+    monkeypatch.setattr(jobs.CodeFlareJobBackend, "metrics_ca_file", lambda self: None)
     patched = deepcopy(record)
     patched["metadata"]["resourceVersion"] = "43"
     patched["metadata"]["finalizers"] = [tracking.DELETION_FINALIZER]
@@ -225,9 +226,7 @@ def test_terminating_job_does_not_reinstall_a_released_tracking_finalizer(backen
     monkeypatch.setattr(
         tracking, "bound_run", lambda *args: (Mock(), {"run_id": RUN}, bound_response("KILLED"))
     )
-    monkeypatch.setattr(
-        jobs.CodeFlareJobBackend, "log_configuration", lambda self: SimpleNamespace(ca_file=None)
-    )
+    monkeypatch.setattr(jobs.CodeFlareJobBackend, "metrics_ca_file", lambda self: None)
     finalize = Mock()
     monkeypatch.setattr(tracking, "finalize_deleted", finalize)
     custom.patch_namespaced_custom_object.side_effect = ApiException(status=422)
@@ -248,9 +247,7 @@ def test_pending_tracking_finalization_ignores_a_reused_cluster_name(backend, mo
     monkeypatch.setattr(
         tracking, "bound_run", lambda *args: (Mock(), {"run_id": RUN}, bound_response())
     )
-    monkeypatch.setattr(
-        jobs.CodeFlareJobBackend, "log_configuration", lambda self: SimpleNamespace(ca_file=None)
-    )
+    monkeypatch.setattr(jobs.CodeFlareJobBackend, "metrics_ca_file", lambda self: None)
     monkeypatch.setattr(tracking, "finalize_deleted", Mock())
     custom.patch_namespaced_custom_object.return_value = record
     assert http.delete(BASE + "/example", headers=HEADERS).status_code == 204

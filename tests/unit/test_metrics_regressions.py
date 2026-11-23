@@ -129,7 +129,7 @@ def test_failed_submission_marks_failed_when_deletion_fails():
 def test_copied_or_mismatched_annotations_never_finalize_another_run(monkeypatch, change):
     obj = Mock()
     obj.get_run.return_value = bound_response()
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     job = tracked_job()
     if change == "experiment":
@@ -144,7 +144,7 @@ def test_copied_or_mismatched_annotations_never_finalize_another_run(monkeypatch
 def test_delete_finalizes_active_driver_without_relying_on_sigterm(monkeypatch):
     obj = Mock()
     obj.get_run.return_value = bound_response(**{"job.started_at": "2026-11-20T12:00:00Z"})
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     job = tracked_job()
     job["status"] = {"jobStatus": "RUNNING"}
@@ -350,7 +350,7 @@ def test_job_status_survives_gateway_trust_lookup_failure(monkeypatch):
     monkeypatch.setattr(jobs, "read_job", lambda *args: tracked_job())
     monkeypatch.setattr(
         backend,
-        "log_configuration",
+        "metrics_ca_file",
         Mock(side_effect=ApiError(503, "metrics_unavailable", "Trust unavailable")),
     )
     request = Request({"type": "http", "headers": [(b"authorization", b"Bearer caller")]})

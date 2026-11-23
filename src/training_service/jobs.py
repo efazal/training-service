@@ -43,6 +43,7 @@ from training_service.kubernetes_client import (
 from training_service.kueue_preflight import resolve_local_queue
 from training_service.log_config import LogBackendConfig, LogBackendResolver
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
+from training_service.metrics import reservation as metrics_reservations
 from training_service.metrics import tracking as metrics_tracking
 from training_service.ray_entrypoint import get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
@@ -75,6 +76,7 @@ class _CallerApiClient(client.ApiClient):
     # Request-scoped proof that our version-aware lookup found no default. The
     # pinned SDK otherwise repeats that lookup using v1beta1 and suppresses denials.
     unqueued_project: str | None = None
+    created_rayjob: dict[str, Any] | None = None
 
     def call_api(self, resource_path: str, method: str, *args: Any, **kwargs: Any) -> Any:
         path_params = args[0] if args else kwargs.get("path_params")
@@ -102,7 +104,12 @@ class _CallerApiClient(client.ApiClient):
         if kwargs.get("_request_timeout") is None:
             kwargs["_request_timeout"] = _K8S_TIMEOUT_SECONDS
         try:
-            return super().call_api(resource_path, method, *args, **kwargs)
+            result = super().call_api(resource_path, method, *args, **kwargs)
+            if is_rayjob_create:
+                response = result[0] if isinstance(result, tuple) else result
+                if isinstance(response, dict):
+                    self.created_rayjob = response
+            return result
         except ApiException as error:
             if is_rayjob_create:
                 # CodeFlare's vendored RayjobApi catches ApiException and
@@ -441,6 +448,12 @@ class CodeFlareJobBackend:
     def log_configuration(self) -> LogBackendConfig:
         return self._log_config.configuration()
 
+    def metrics_ca_file(self) -> str:
+        try:
+            return self._log_config.trust_file()
+        except ApiError:
+            raise metrics_tracking.unavailable() from None
+
     async def submit(
         self, project: str, request: CreateJobRequest, caller: CallerIdentity, token: str
     ) -> str:
@@ -518,11 +531,20 @@ class CodeFlareJobBackend:
             workers = (resources.num_nodes or 1) - 1
             layout = backend.cluster_options(gpu_count, cpu, memory, resolved)
             tracked = None
+            reservation = None
             mlflow = None
             uri = metrics_tracking.discover()
             if uri:
-                ca_file = self.log_configuration().ca_file
+                ca_file = self.metrics_ca_file()
                 metrics_tracking.verify_training_access(project)
+                reservation = metrics_reservations.acquire(
+                    core_api,
+                    project,
+                    request.name,
+                    hashlib.sha256((caller.username + "\n" + serialized).encode()).hexdigest(),
+                    uri,
+                    request.mlflow_experiment_name or "Default",
+                )
                 tracked = metrics_tracking.reserve(
                     uri,
                     project,
@@ -547,20 +569,21 @@ class CodeFlareJobBackend:
                         "output_uri": request.output.destination_uri,
                         **({"queue_name": queue} if queue else {}),
                     },
-                )
-                annotations[metrics_tracking.ANNOTATION] = json.dumps(
-                    {
-                        **tracked.metadata(),
-                        "tracking_uri": uri,
-                        "project": project,
-                    }
+                    reservation=reservation,
                 )
             elif request.mlflow_experiment_name is not None:
                 raise metrics_tracking.unavailable()
             submit_attempted = False
+            if reservation:
+                if reservation.data.get("submit_attempted") == "true":
+                    raise ApiError(409, "conflict", "This submission was already attempted.")
+                # A stale/concurrent claim must leave the shared run untouched.
+                # Keep claim failures outside the owner-only cleanup scope.
+                reservation.update(submit_attempted="true")
             try:
                 metrics_environment = {}
                 if tracked is not None:
+                    annotations[metrics_tracking.ANNOTATION] = tracked.annotation()
                     mlflow = tracked.configuration(ca_file)
                     mlflow["expected_ranks"] = str(gpu_count if backend.metrics_rank_per_gpu else 1)
                     # Trust is public data, but a full root bundle exceeds exec's single-
@@ -622,9 +645,18 @@ class CodeFlareJobBackend:
                     )
                     if not absent:
                         try:
-                            accepted = read_job(api_client, project, request.name)
+                            accepted = getattr(api_client, "created_rayjob", None)
+                            if not isinstance(accepted, dict):
+                                accepted = read_job(api_client, project, request.name)
                             value = metrics_tracking.metadata(accepted, project)
-                            if value and value["run_id"] == tracked.run_id:
+                            if (
+                                value
+                                and value["run_id"] == tracked.run_id
+                                and (
+                                    reservation is None
+                                    or value.get("submission_id") == reservation.submission_id
+                                )
+                            ):
                                 tracked.bind(accepted)
                         except (
                             ApiError,
@@ -637,7 +669,10 @@ class CodeFlareJobBackend:
                             # that is still in flight and commits after this read.
                             pass
                     if absent:
-                        tracked.failed_submission()
+                        if reservation:
+                            reservation.update(phase="abandoned", submit_attempted="false")
+                        if tracked.failed_submission() and reservation:
+                            reservation.discard()
                     else:
                         _LOG.warning(
                             "RayJob submission outcome is uncertain; its MLflow run was retained. "
@@ -650,7 +685,10 @@ class CodeFlareJobBackend:
                 # link and disables API finalization rather than trusting an annotation.
                 for attempt in range(2):
                     try:
-                        tracked.bind(read_job(api_client, project, identifier))
+                        created = getattr(api_client, "created_rayjob", None)
+                        if not isinstance(created, dict):
+                            raise metrics_tracking.TrackingError()
+                        tracked.bind(created)
                         break
                     except (
                         metrics_tracking.TrackingError,
@@ -726,7 +764,7 @@ class CodeFlareJobBackend:
                         job,
                         project,
                         request.state.caller_bearer_token,
-                        self.log_configuration().ca_file,
+                        self.metrics_ca_file(),
                     )
                 )
             except ApiError:
@@ -751,22 +789,11 @@ class CodeFlareJobBackend:
                     # Normal when shutdown-after-finish removed the owned cluster.
             binding = None
             ca_file = None
-            if metrics_tracking.metadata(
-                job, project
-            ) or metrics_tracking.DELETION_FINALIZER in job["metadata"].get("finalizers", []):
-                try:
-                    ca_file = self.log_configuration().ca_file
-                    binding = metrics_tracking.bound_run(
-                        job, project, request.state.caller_bearer_token, ca_file
-                    )
-                except (metrics_tracking.TrackingError, OSError):
-                    raise metrics_tracking.unavailable() from None
-                if binding and not deleting:
-                    job = _tracking_finalizer(api, project, job, present=True)
-                elif not binding and metrics_tracking.DELETION_FINALIZER in job["metadata"].get(
-                    "finalizers", []
-                ):
-                    raise metrics_tracking.unavailable()
+            tracked = bool(metrics_tracking.metadata(job, project)) or (
+                metrics_tracking.DELETION_FINALIZER in job["metadata"].get("finalizers", [])
+            )
+            if tracked and not deleting:
+                job = _tracking_finalizer(api, project, job, present=True)
             metadata = job["metadata"]
             if not metadata.get("deletionTimestamp"):
                 with describe_not_found("Training job", name, project=project):
@@ -784,8 +811,14 @@ class CodeFlareJobBackend:
                         ),
                         _request_timeout=TIMEOUT,
                     )
-            if binding:
+            if tracked:
                 try:
+                    ca_file = self.metrics_ca_file()
+                    binding = metrics_tracking.bound_run(
+                        job, project, request.state.caller_bearer_token, ca_file
+                    )
+                    if binding is None:
+                        raise metrics_tracking.unavailable()
                     metrics_tracking.finalize_deleted(
                         job,
                         project,
@@ -793,6 +826,16 @@ class CodeFlareJobBackend:
                         ca_file,
                         binding=binding,
                     )
+                    value = metrics_tracking.metadata(job, project)
+                    if value and value.get("submission_id"):
+                        marker = metrics_reservations.load(client.CoreV1Api(api), project, name)
+                        if marker is not None:
+                            if (
+                                marker.submission_id != value["submission_id"]
+                                or marker.data.get("run_id") != value["run_id"]
+                            ):
+                                raise metrics_tracking.unavailable()
+                            marker.complete(job)
                 except (ApiError, metrics_tracking.TrackingError, OSError):
                     raise ApiError(
                         503,

@@ -387,7 +387,7 @@ def bound_response(status="RUNNING", **tags):
 def test_get_job_returns_only_authenticated_project_scoped_link(monkeypatch):
     obj = Mock()
     obj.get_run.return_value = bound_response()
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     job = tracked_job()
     assert "mlflow_url" not in jobs.detail(job, "team-alpha")
@@ -404,7 +404,7 @@ def test_get_job_returns_only_authenticated_project_scoped_link(monkeypatch):
 def test_deletion_preserves_terminal_mlflow_history(monkeypatch, status):
     obj = Mock()
     obj.get_run.return_value = bound_response(status)
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     tracking.finalize_deleted(tracked_job(), "team-alpha", "caller-credential", None)
     obj.log.assert_not_called()
@@ -417,7 +417,7 @@ def test_deletion_preserves_terminal_mlflow_history(monkeypatch, status):
 def test_deletion_finalizes_only_unfinished_runs(monkeypatch, state, expected):
     obj = Mock()
     obj.get_run.return_value = bound_response()
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     monkeypatch.setattr(tracking, "TrackingClient", lambda *args, **kwargs: obj)
     job = tracked_job()
     job["status"] = {"jobStatus": state}
@@ -427,7 +427,7 @@ def test_deletion_finalizes_only_unfinished_runs(monkeypatch, state, expected):
 
 def test_deletion_never_sends_caller_token_to_annotation_selected_server(monkeypatch):
     job = tracked_job("https://untrusted.example/mlflow")
-    monkeypatch.setattr(tracking, "discover", lambda: CONFIG["tracking_uri"])
+    monkeypatch.setattr(tracking, "discover", lambda **kwargs: CONFIG["tracking_uri"])
     constructor = Mock()
     monkeypatch.setattr(tracking, "TrackingClient", constructor)
     tracking.finalize_deleted(job, "team-alpha", "caller-credential", None)

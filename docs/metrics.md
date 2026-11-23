@@ -115,10 +115,19 @@ selector. The submitting user also needs experiment access in that project.
 Submission checks the caller and training account group; permission or readiness failures return
 an actionable error before a RayJob is created.
 
+When tracking is enabled, the submitting caller also needs `get`, `create`, `patch`
+and `delete` on ConfigMaps in the training project. A `training-metrics-*`
+ConfigMap records the request digest, unique submission attempt and server/run/UID
+identifiers. The API uses these markers to recover a lost create response and
+reuse the exact reservation. It never identifies an attempt by run name alone.
+After the run's UID binding is acknowledged, the marker is owned by that RayJob
+and Kubernetes removes it with the job. Uncertain markers are retained for recovery.
+
 The service reuses its configured platform gateway trust. Runtime authentication
 uses the pod's mounted service-account token, reread for each request to support
 rotation. Caller credentials are never embedded in the training program or run
 metadata. No additional MLflow Python package is needed for the callback recorder.
+MLflow trust resolution is independent of Ray log-gateway discovery and readiness.
 
 Set `mlflow.enabled: false` in the chart to disable automatic tracking. If the
 server is absent, requests without an experiment name can continue without
@@ -144,6 +153,26 @@ Kubernetes finalizers and releases only the tracking finalizer. These retries ar
 caller initiated and require the same project permissions; no credentials are
 persisted for background processing. If the original deletion was rejected,
 tracking is not finalized.
+
+MLflow availability does not prevent an authorized caller from stopping the
+workload: Kubernetes deletion is requested before contacting MLflow. Recovery of
+existing tracked jobs remains available when `mlflow.enabled` is changed to false;
+that switch controls new reservations. The original endpoint and immutable
+submission/UID binding are still verified before a tracking update.
+The chart retains read-only singleton discovery and honors `grantTrainingAccess`
+independently, so disabling new tracking does not revoke existing workloads'
+experiment access. Disable that grant separately only after the affected runs
+have been finalized.
+
+If the original server has been permanently retired, an authorized operator can
+explicitly abandon finalization. First record the retained run ID and reservation
+identifiers, then remove only `training.rhoai.io/mlflow-finalization` from that
+RayJob using its current UID and resourceVersion as patch preconditions. Preserve
+other finalizers. This releases Kubernetes cleanup without updating another server;
+the original run may require manual reconciliation. Inspect and remove an orphaned
+reservation ConfigMap by its own UID only after confirming its attempt is no
+longer in flight. Do not clear an uncertain marker merely to retry: its original
+MLflow create could still commit.
 
 An uncertain submission response also retains its reserved run, even if the first
 lookup returns 404: the original create may still commit after the timeout.
