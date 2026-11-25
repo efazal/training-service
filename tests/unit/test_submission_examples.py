@@ -62,6 +62,10 @@ def test_discovered_example_passes_post_validation_and_reaches_storage(client, m
     assert example["resources"]["num_nodes"] == (2 if name == "lora_grpo" else 1)
     assert example["resources"]["gpus_per_node"] == 1
     assert example["output"]["destination_uri"].startswith("pvc://training-data/")
+    if name == "osft":
+        # A smaller per-GPU budget makes mini-trainer drop samples that max_seq_len allows.
+        parameters = example["algorithm"]["parameters"]
+        assert parameters["max_tokens_per_gpu"] >= parameters["max_seq_len"]
 
     # No edits to the discovered body: missing project storage is the first failure.
     result = client.post("/api/v1/projects/team-alpha/training-jobs", headers=HEADERS, json=example)
@@ -126,6 +130,32 @@ def test_runtime_does_not_supply_example_for_python_only_profile(client, runtime
     result = client.get("/api/v1/algorithms/lora_sft", headers=HEADERS)
     assert result.status_code == 200
     assert "example_request" not in result.json()
+
+
+@pytest.mark.parametrize(
+    ("name", "parameter"),
+    [("lora_grpo", "group_size"), ("sft", "num_epochs")],
+)
+def test_retyped_runtime_parameter_omits_example_instead_of_failing(
+    client, runtime_catalog, name, parameter
+):
+    payload = json.loads(runtime_catalog.read_text())
+    schema = next(a for a in payload["algorithms"] if a["name"] == name)["parameter_schema"]
+    # Profile validators do arithmetic on these values; a string must not break discovery.
+    schema["properties"][parameter] = {"type": "string", "enum": ["4"]}
+    runtime_catalog.write_text(json.dumps(payload))
+    result = client.get(f"/api/v1/algorithms/{name}", headers=HEADERS)
+    assert result.status_code == 200
+    assert "example_request" not in result.json()
+    assert "No submission example" in result.json()["notes"][-1]
+
+
+def test_grpo_example_notes_runtime_requirement(client):
+    grpo = client.get("/api/v1/algorithms/lora_grpo", headers=HEADERS).json()
+    assert "example_request" in grpo
+    assert any("verl" in note and "TRL" in note for note in grpo["notes"])
+    sft = client.get("/api/v1/algorithms/sft", headers=HEADERS).json()
+    assert not any("verl" in note for note in sft["notes"])
 
 
 def test_mutating_returned_example_does_not_affect_later_requests(client):

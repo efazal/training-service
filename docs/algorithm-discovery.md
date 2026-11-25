@@ -20,7 +20,9 @@ create storage or inspect cluster capacity.
 
 Examples are checked against the configured runtime's parameter schema and the API's
 execution-profile validation. OSFT includes required parameters; LoRA GRPO uses a
-GPU-free head plus one GPU worker and shared PVC storage. Example values are
+GPU-free head plus one GPU worker and shared PVC storage. LoRA GRPO also needs a
+runtime with compatible verl and TRL packages, which discovery does not verify;
+its details include a note saying so. Example values are
 illustrative, not runtime defaults, resource recommendations, or a guarantee of
 successful training. Native per-parameter examples remain sourced from the runtime.
 `example_request` is omitted with a note when no compatible example is available,

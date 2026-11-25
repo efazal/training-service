@@ -43,7 +43,8 @@ _EXAMPLE_PARAMETERS = {
     "osft": {
         **_SFT_EXAMPLE_PARAMETERS,
         "unfreeze_rank_ratio": 0.5,
-        "max_tokens_per_gpu": 1024,
+        # mini-trainer drops samples longer than this budget, so keep it at max_seq_len.
+        "max_tokens_per_gpu": _SFT_EXAMPLE_PARAMETERS["max_seq_len"],
     },
     "lora_grpo": {
         "learning_rate": 0.00001,
@@ -210,7 +211,8 @@ def _example_request(algorithm: dict[str, Any]) -> dict[str, Any] | None:
             {role: {"scheme": "pvc", "path": path} for role, path in paths.items()}, normalized
         )
         component_validator("CreateJobRequest").validate(example)
-    except (ApiError, ValueError, ValidationError):
+    # TypeError: a runtime may retype a parameter that the profile validators do arithmetic on.
+    except (ApiError, ValueError, TypeError, ValidationError):
         return None
     return example
 
@@ -260,6 +262,11 @@ def get_algorithm(request: Request, name: str, include: str | None = None) -> di
             "before submission. Referenced storage must exist in the target project. "
             "Example values do not guarantee model fit or runtime compatibility."
         )
+        if name == "lora_grpo":
+            notes.append(
+                "lora_grpo also needs a training runtime with compatible verl and TRL "
+                "packages; discovery does not verify them."
+            )
     else:
         notes.append("No submission example is available for this runtime and execution profile.")
     result["notes"] = notes
