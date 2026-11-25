@@ -45,6 +45,7 @@ from training_service.log_config import LogBackendConfig, LogBackendResolver
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
 from training_service.metrics import reservation as metrics_reservations
 from training_service.metrics import tracking as metrics_tracking
+from training_service.metrics.client import RunGoneError
 from training_service.ray_entrypoint import get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_backend import JobBackend
@@ -814,18 +815,23 @@ class CodeFlareJobBackend:
             if tracked:
                 try:
                     ca_file = self.metrics_ca_file()
-                    binding = metrics_tracking.bound_run(
-                        job, project, request.state.caller_bearer_token, ca_file
-                    )
-                    if binding is None:
-                        raise metrics_tracking.unavailable()
-                    metrics_tracking.finalize_deleted(
-                        job,
-                        project,
-                        request.state.caller_bearer_token,
-                        ca_file,
-                        binding=binding,
-                    )
+                    try:
+                        binding = metrics_tracking.bound_run(
+                            job, project, request.state.caller_bearer_token, ca_file
+                        )
+                        if binding is None:
+                            raise metrics_tracking.unavailable()
+                        metrics_tracking.finalize_deleted(
+                            job,
+                            project,
+                            request.state.caller_bearer_token,
+                            ca_file,
+                            binding=binding,
+                        )
+                    except RunGoneError:
+                        # Nothing remains to finalize, but the reservation and
+                        # RayJob finalizer still need normal Kubernetes cleanup.
+                        _LOG.info("MLflow run is already deleted; completing job deletion.")
                     value = metrics_tracking.metadata(job, project)
                     if value and value.get("submission_id"):
                         marker = metrics_reservations.load(client.CoreV1Api(api), project, name)

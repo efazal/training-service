@@ -146,6 +146,9 @@ For a verified tracked job, DELETE adds the
 `training.rhoai.io/mlflow-finalization` RayJob finalizer before requesting foreground
 deletion. Callers need RayJob `patch` permission as well as `get` and `delete`.
 The finalizer retains the UID-to-run binding until MLflow finalization succeeds.
+If MLflow confirms the run is missing or soft-deleted, DELETE treats it as already
+finalized, completes reservation cleanup, and releases the tracking finalizer.
+This also applies when the run is deleted while DELETE is finalizing it.
 If MLflow finalization fails, DELETE returns `503 metrics_unavailable`; restore
 MLflow access and retry DELETE on the same job. The retained RayJob makes that
 retry possible even after its workload stops. A successful retry preserves other

@@ -30,6 +30,10 @@ class DeletedExperimentError(TrackingError):
     """An experiment must be restored explicitly before accepting new runs."""
 
 
+class RunGoneError(TrackingError):
+    """A missing or soft-deleted run no longer needs job finalization."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -143,7 +147,12 @@ class TrackingClient:
             )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        run = self.request("GET", "runs/get", {"run_id": run_id}).get("run")
+        try:
+            run = self.request("GET", "runs/get", {"run_id": run_id}).get("run")
+        except TrackingError as error:
+            if error.status == 404:
+                raise RunGoneError(404) from None
+            raise
         if not isinstance(run, dict) or not isinstance(run.get("info"), dict):
             raise TrackingError()
         info = run["info"]
@@ -158,6 +167,8 @@ class TrackingClient:
         }:
             raise TrackingError()
         self.experiment_id(info)
+        if info.get("lifecycle_stage") == "deleted":
+            raise RunGoneError(404)
         data = run.get("data", {})
         if not isinstance(data, dict):
             raise TrackingError()
@@ -339,11 +350,18 @@ class TrackingClient:
                     raise ValueError("Invalid terminal result")
             except (KeyError, ValueError, TypeError):
                 raise TrackingError() from None
-        self.request(
-            "POST",
-            "runs/update",
-            {"run_id": run_id, "status": result["status"], "end_time": result["end_time"]},
-        )
+        try:
+            self.request(
+                "POST",
+                "runs/update",
+                {"run_id": run_id, "status": result["status"], "end_time": result["end_time"]},
+            )
+        except TrackingError as error:
+            if error.status in {400, 404, 409}:
+                # Deletion can race the final update. Confirm the run is gone
+                # rather than masking a different rejected update.
+                self.get_run(run_id)
+            raise
 
     def delete_run(self, run_id: str) -> None:
         self.request("POST", "runs/delete", {"run_id": run_id})
