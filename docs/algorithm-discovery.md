@@ -2,8 +2,34 @@
 
 `GET /api/v1/algorithms` returns compact summaries and `details_url` links.
 `GET /api/v1/algorithms/{name}` returns readable parameter types, known defaults,
-required parameters, and examples only when supplied by the runtime schema.
-Discovery does not generate POST requests or choose models, storage, or resources.
+required parameters, and an editable `example_request` for supported submission profiles.
+Copy that complete request body into Swagger's POST endpoint, or save it as JSON:
+
+```bash
+curl --fail-with-body -H "Authorization: Bearer $TOKEN" \
+  "$TRAINING_SERVICE_URL/api/v1/algorithms/lora_sft" \
+  | jq -e '.example_request // error("No example is available for this runtime")' > job.json
+```
+
+Edit `job.json` to set a unique job name, model/dataset paths, existing output storage,
+and resources appropriate for your model. Add `queue_name` if your project needs a
+Kueue LocalQueue, then submit it to
+`POST /api/v1/projects/YOUR_PROJECT/training-jobs`. The `training-data` PVC and input
+paths in the example are placeholders for project resources; discovery does not
+create storage or inspect cluster capacity.
+
+Examples are checked against the configured runtime's parameter schema and the API's
+execution-profile validation. OSFT includes required parameters; LoRA GRPO uses a
+GPU-free head plus one GPU worker and shared PVC storage. LoRA GRPO also needs a
+runtime with compatible verl and TRL packages, which discovery does not verify;
+its details include a note saying so. Example values are
+illustrative, not runtime defaults, resource recommendations, or a guarantee of
+successful training. Native per-parameter examples remain sourced from the runtime.
+`example_request` is omitted with a note when no compatible example is available,
+including unsupported profiles, Python-only interfaces, and required parameters
+without a usable example/default/choice. Discovery never fetches schema references
+to construct an example.
+
 Add `?include=parameter_schema` only when the native JSON Schema is needed.
 An empty catalog returns `200 {"algorithms": []}`. A missing, malformed or
 image-mismatched startup catalog returns `503 backend_unavailable`.
@@ -77,23 +103,24 @@ and `TRAINING_RAY_IMAGE` before starting the API. Helm sets these automatically.
 
 ## Example training request
 
-This is documentation, not a generated discovery response or a recommended
-configuration. Replace the model and dataset paths, output path, and resources
-for your environment. The PVC must exist in the target project and contain the
-model and algorithm-compatible JSONL data. Submit this body to
+The detail endpoint supplies an `example_request` like the following. Replace the
+model and dataset paths, output path, and resources for your environment. The PVC
+must exist in the target project and contain the model and algorithm-compatible
+JSONL data. Submit this body to
 `POST /api/v1/projects/YOUR_PROJECT/training-jobs` with your bearer token.
 
 ```json
 {
   "name": "lora-sft-example",
   "backend": "ray",
-  "model": {"uri": "pvc://YOUR_PVC/models/YOUR_MODEL/"},
-  "dataset": {"uri": "pvc://YOUR_PVC/datasets/train.jsonl"},
+  "model": {"uri": "pvc://training-data/models/my-model/"},
+  "dataset": {"uri": "pvc://training-data/datasets/chat.jsonl"},
   "algorithm": {
     "name": "lora_sft",
     "parameters": {
-      "learning_rate": 0.0001,
-      "num_epochs": 2,
+      "backend": "unsloth",
+      "learning_rate": 0.00002,
+      "num_epochs": 1,
       "effective_batch_size": 8,
       "max_seq_len": 2048
     }
@@ -105,7 +132,7 @@ model and algorithm-compatible JSONL data. Submit this body to
     "cpus_per_node": "8",
     "memory_per_node": "32Gi"
   },
-  "output": {"destination_uri": "pvc://YOUR_PVC/outputs/lora-sft-example/"}
+  "output": {"destination_uri": "pvc://training-data/outputs/lora-sft-example/"}
 }
 ```
 
@@ -119,5 +146,7 @@ and mocked Kubernetes operations; no cluster is needed.
 `make test-e2e-deploy` exercises the normal chart's init container, without preparing
 a separate catalog. It checks compact responses, details/schema links, incompatible
 submissions, unknown names and authentication alongside the queued training lifecycle.
+It also checks that discovered example bodies pass submission validation and reach
+the expected storage lookup after only project-specific identifiers are replaced.
 Namespace cleanup removes the chart-managed script and generated catalog volume.
 See [the E2E runner instructions](../tests/e2e/README.md).

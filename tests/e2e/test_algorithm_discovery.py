@@ -36,15 +36,24 @@ def runtime_algorithm(api, request):
 def catalog_submission(api, missing_job_id, pytestconfig):
     payloads = []
 
-    def submit(name, parameters, expected, mentions=()):
-        payload = {
-            "name": f"e2e-{missing_job_id[-16:]}-{len(payloads)}",
-            "model": {"uri": f"pvc://{missing_job_id}/model/"},
-            "dataset": {"uri": f"pvc://{missing_job_id}/train.jsonl"},
-            "output": {"destination_uri": f"pvc://{missing_job_id}/output/"},
-            "algorithm": {"name": name, "parameters": parameters},
-            "resources": {"num_nodes": 2 if name == "lora_grpo" else 1, "gpus_per_node": 1},
-        }
+    def submit(name, parameters, expected, mentions=(), example=None):
+        payload = (
+            deepcopy(example)
+            if example is not None
+            else {
+                "name": f"e2e-{missing_job_id[-16:]}-{len(payloads)}",
+                "model": {"uri": f"pvc://{missing_job_id}/model/"},
+                "dataset": {"uri": f"pvc://{missing_job_id}/train.jsonl"},
+                "output": {"destination_uri": f"pvc://{missing_job_id}/output/"},
+                "algorithm": {"name": name, "parameters": parameters},
+                "resources": {"num_nodes": 2 if name == "lora_grpo" else 1, "gpus_per_node": 1},
+            }
+        )
+        if example is not None:
+            payload["name"] = f"e2e-{missing_job_id[-16:]}-{len(payloads)}"
+            payload["model"]["uri"] = f"pvc://{missing_job_id}/model/"
+            payload["dataset"]["uri"] = f"pvc://{missing_job_id}/train.jsonl"
+            payload["output"]["destination_uri"] = f"pvc://{missing_job_id}/output/"
         payloads.append(payload)
         response = api.request("POST", api.jobs, expected=expected, json=payload)
         api.error(
@@ -86,7 +95,10 @@ def test_follow_algorithm_details_and_opt_into_schema(api):
         detail = api.object(api.request("GET", summary["details_url"]))
         component_validator("AlgorithmDetails").validate(detail)
         assert "parameter_schema" not in detail
-        assert "example_request" not in detail
+        if summary["name"] in ALGORITHMS:
+            example = detail["example_request"]
+            component_validator("CreateJobRequest").validate(example)
+            assert example["algorithm"]["name"] == summary["name"]
         assert {key: detail[key] for key in summary} == summary
         expanded = api.object(api.request("GET", detail["parameter_schema_url"]))
         schema = expanded.pop("parameter_schema")
@@ -94,12 +106,30 @@ def test_follow_algorithm_details_and_opt_into_schema(api):
         assert expanded == detail
         assert set(detail["parameters"]) == set(schema.get("properties", {}))
         assert detail["required_parameters"] == schema.get("required", [])
+        if "example_request" in detail:
+            Draft202012Validator(schema, registry=Registry()).validate(
+                detail["example_request"]["algorithm"]["parameters"]
+            )
         for name, parameter in detail["parameters"].items():
             if "example" in parameter:
                 native = schema["properties"][name]
                 assert "example" in native
                 assert parameter["example"] == native["example"]
                 Draft202012Validator(native).validate(parameter["example"])
+
+
+@pytest.mark.parametrize("name", ALGORITHMS)
+def test_discovered_example_reaches_storage_lookup(api, catalog_submission, missing_job_id, name):
+    detail = api.object(api.request("GET", f"{BASE}/{name}"))
+    example = detail["example_request"]
+    # Replace only project-specific identifiers; keep discovered parameters/resources intact.
+    catalog_submission(
+        name,
+        example["algorithm"]["parameters"],
+        404,
+        ("PersistentVolumeClaim", missing_job_id),
+        example=example,
+    )
 
 
 def test_missing_algorithm_has_context(api, missing_job_id):

@@ -151,7 +151,7 @@ def test_detail_lists_every_parameter_without_fabricating_defaults(client: TestC
 
 
 @pytest.mark.parametrize("name", ["lora_sft", "sft", "osft", "lora_grpo", "grpo"])
-def test_all_details_describe_runtime_without_environment_specific_examples(
+def test_all_details_describe_runtime_and_offer_supported_submission_examples(
     client: TestClient, image_catalog: dict, name: str
 ) -> None:
     response = client.get(BASE + "/" + name, headers=HEADERS)
@@ -160,9 +160,12 @@ def test_all_details_describe_runtime_without_environment_specific_examples(
     source = next(item for item in image_catalog["algorithms"] if item["name"] == name)
     assert set(data["parameters"]) == set(source["parameter_schema"]["properties"])
     assert data["required_parameters"] == source["parameter_schema"]["required"]
-    assert "example_request" not in data
+    if name == "grpo":
+        assert "example_request" not in data
+    else:
+        assert data["example_request"]["algorithm"]["name"] == name
+        component_validator("CreateJobRequest").validate(data["example_request"])
     assert "Qwen/" not in response.text
-    assert "pvc://" not in response.text
     assert any("validates algorithms and parameters" in note for note in data["notes"])
     if "grpo" in name:
         assert "reward_fn" not in data["parameters"]
@@ -346,6 +349,7 @@ def test_catalog_reads_do_not_need_caller_configmap_permissions(client, monkeypa
 
     monkeypatch.setattr(kubernetes_client.client, "CoreV1Api", unexpected)
     assert client.get(BASE, headers=HEADERS).status_code == 200
+    assert client.get(BASE + "/lora_sft", headers=HEADERS).status_code == 200
 
 
 def test_empty_catalog_is_successful(client, catalog_file):

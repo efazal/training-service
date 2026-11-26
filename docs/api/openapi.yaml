@@ -58,8 +58,9 @@ paths:
     get:
       summary: "Get algorithm details"
       description: >-
-        Return the algorithm's parameters, required fields, defaults, and usage notes. Set
-        include=parameter_schema to retrieve its JSON Schema.
+        Return the algorithm's parameters, required fields, defaults, and an editable submission
+        example when supported by the configured runtime. Set include=parameter_schema to
+        retrieve its JSON Schema.
       operationId: getAlgorithm
       x-request-context: true
       tags:
@@ -1242,6 +1243,14 @@ components:
             parameter_schema:
               type: object
               description: "Parameter validation schema, included only with include=parameter_schema."
+            example_request:
+              allOf:
+                - $ref: '#/components/schemas/CreateJobRequest'
+              description: >-
+                Editable request body for POST /projects/{project}/training-jobs. Customize the
+                job name, input paths, output storage, resources, and optional queue for your
+                project. Values are examples, not runtime defaults. Omitted when a compatible
+                example cannot be generated for the configured runtime or execution profile.
             runtime:
               $ref: '#/components/schemas/AlgorithmRuntime'
             notes:
